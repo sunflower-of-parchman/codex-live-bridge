@@ -54,6 +54,10 @@ The canon structure is located at:
 
 - `/Users/michaelwall/codex-live-bridge/docs/composition-canon/README.md`
 
+## Ensemble manifest
+
+- `/Users/michaelwall/codex-live-bridge/docs/ensemble/ensemble-manifest.md`
+
 ## Open source status
 
 This repo is public from day one:
