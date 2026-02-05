@@ -91,4 +91,9 @@ CAPABILITIES: List[Dict[str, str]] = [
         "lom_path": "Song.getcount('tracks')",
         "summary": "Return the current number of tracks in the loaded Live Set.",
     },
+    {
+        "command": "get_tempo",
+        "lom_path": "Song.tempo",
+        "summary": "Return the current global tempo in BPM.",
+    },
 ]

@@ -15,6 +15,7 @@ This note captures the latest docs used to map bridge commands to the Live Objec
 ## Confirmed mappings used in this bridge
 
 - `set_tempo` -> `Song.tempo`
+- `get_tempo` -> `Song.tempo`
 - `set_global_key` -> `Song.root_note`, `Song.scale_name`, `Song.scale_intervals`
 - `set_track_volume` -> `Track.mixer_device.volume`
 - `set_track_pan` -> `Track.mixer_device.panning`

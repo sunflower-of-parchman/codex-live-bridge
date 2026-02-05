@@ -2,7 +2,7 @@
 
 This bridge exposes a local HTTP command API on port `9000` and forwards commands to a Max for Live LiveAPI router over UDP.
 Both command transports intentionally use port `9000`: HTTP uses `TCP/9000` and Max receives commands on `UDP/9000`.
-For query responses (for example `get_track_count`), Max sends JSON back to the bridge on `UDP/9002`.
+For response-backed commands (`set_tempo`, `get_tempo`, `get_track_count`), Max sends JSON back to the bridge on `UDP/9002`.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ For query responses (for example `get_track_count`), Max sends JSON back to the 
 2. Python bridge validates payloads against command schemas.
 3. Bridge forwards validated envelopes to UDP target `127.0.0.1:9000`.
 4. Max for Live `js` router executes LiveAPI calls against the LOM.
-5. For query commands, Max sends the JSON response to bridge UDP listener `127.0.0.1:9002`.
+5. For response-backed commands, Max sends JSON responses to bridge UDP listener `127.0.0.1:9002`.
 
 ## Files
 
@@ -57,6 +57,12 @@ python3 /Users/michaelwall/codex-live-bridge/scripts/send_live_command.py --url 
 python3 /Users/michaelwall/codex-live-bridge/scripts/send_live_command.py --url http://127.0.0.1:9000 --command get_track_count --payload '{}'
 ```
 
+## Query current tempo
+
+```bash
+python3 /Users/michaelwall/codex-live-bridge/scripts/send_live_command.py --url http://127.0.0.1:9000 --command get_tempo --payload '{}'
+```
+
 ## Command examples
 
 ### Insert notes
@@ -83,6 +89,14 @@ curl -s http://127.0.0.1:9000/command \
 curl -s http://127.0.0.1:9000/command \
   -H 'Content-Type: application/json' \
   -d '{"command":"set_tempo","payload":{"bpm":120.0}}'
+```
+
+### Read tempo / BPM
+
+```bash
+curl -s http://127.0.0.1:9000/command \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"get_tempo","payload":{}}'
 ```
 
 ### Set global key

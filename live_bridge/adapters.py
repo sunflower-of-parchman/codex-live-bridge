@@ -39,7 +39,7 @@ class UdpMaxProxyAdapter:
     response_host: str = "127.0.0.1"
     response_port: int = 9002
     response_timeout_s: float = 1.0
-    query_commands: Tuple[str, ...] = ("get_track_count",)
+    query_commands: Tuple[str, ...] = ("set_tempo", "get_track_count", "get_tempo")
 
     def _target(self) -> str:
         return f"udp://{self.host}:{self.port}"

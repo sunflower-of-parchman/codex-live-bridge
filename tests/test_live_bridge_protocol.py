@@ -17,6 +17,7 @@ class LiveBridgeProtocolTests(unittest.TestCase):
         self.assertIn("set_tempo", commands)
         self.assertIn("set_global_key", commands)
         self.assertIn("get_track_count", commands)
+        self.assertIn("get_tempo", commands)
 
     def test_valid_note_insert_envelope(self):
         envelope = parse_envelope(
@@ -114,6 +115,24 @@ class LiveBridgeProtocolTests(unittest.TestCase):
             parse_envelope(
                 {
                     "command": "get_track_count",
+                    "payload": {"foo": "bar"},
+                }
+            )
+
+    def test_get_tempo_accepts_empty_payload(self):
+        envelope = parse_envelope(
+            {
+                "command": "get_tempo",
+                "payload": {},
+            }
+        )
+        self.assertEqual(envelope.command, "get_tempo")
+
+    def test_get_tempo_rejects_extra_payload_fields(self):
+        with self.assertRaises(ProtocolError):
+            parse_envelope(
+                {
+                    "command": "get_tempo",
                     "payload": {"foo": "bar"},
                 }
             )

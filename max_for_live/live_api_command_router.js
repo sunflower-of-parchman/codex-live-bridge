@@ -250,10 +250,27 @@ function set_eq8_band_gain(payload) {
   return { band: payload.band, gain: payload.gain };
 }
 
+function numeric_property_value(value, propertyName) {
+  var parsed = Array.isArray(value) ? value[0] : value;
+  var numberValue = Number(parsed);
+  if (isNaN(numberValue)) {
+    throw new Error("Could not parse numeric value for " + propertyName + ".");
+  }
+  return numberValue;
+}
+
 function set_tempo(payload) {
   var song = api("live_set");
   song.set("tempo", payload.bpm);
-  return { bpm: payload.bpm };
+  return {
+    requested_bpm: payload.bpm,
+    current_bpm: numeric_property_value(song.get("tempo"), "tempo")
+  };
+}
+
+function get_tempo(_payload) {
+  var song = api("live_set");
+  return { bpm: numeric_property_value(song.get("tempo"), "tempo") };
 }
 
 function set_global_key(payload) {
@@ -294,7 +311,8 @@ var handlers = {
   set_eq8_band_gain: set_eq8_band_gain,
   set_tempo: set_tempo,
   set_global_key: set_global_key,
-  get_track_count: get_track_count
+  get_track_count: get_track_count,
+  get_tempo: get_tempo
 };
 
 function handle_command(message) {

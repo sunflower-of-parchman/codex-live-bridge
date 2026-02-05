@@ -217,6 +217,11 @@ def _validate_get_track_count(payload: Dict[str, Any]) -> None:
         raise ProtocolError("'get_track_count' does not accept payload fields.")
 
 
+def _validate_get_tempo(payload: Dict[str, Any]) -> None:
+    if payload:
+        raise ProtocolError("'get_tempo' does not accept payload fields.")
+
+
 VALIDATORS: Dict[str, Callable[[Dict[str, Any]], None]] = {
     "note_insert": _validate_note_insert,
     "create_midi_clip": _validate_create_midi_clip,
@@ -235,6 +240,7 @@ VALIDATORS: Dict[str, Callable[[Dict[str, Any]], None]] = {
     "set_tempo": _validate_tempo,
     "set_global_key": _validate_global_key,
     "get_track_count": _validate_get_track_count,
+    "get_tempo": _validate_get_tempo,
 }
 
 
