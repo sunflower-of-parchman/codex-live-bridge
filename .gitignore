@@ -1,3 +1,4 @@
 memory/conversation.jsonl
 __pycache__/
 *.pyc
+logs/
