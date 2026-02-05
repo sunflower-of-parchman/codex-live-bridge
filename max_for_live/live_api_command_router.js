@@ -3,7 +3,12 @@ inlets = 1;
 outlets = 1;
 
 function post_json(obj) {
-  outlet(0, JSON.stringify(obj));
+  var raw = JSON.stringify(obj);
+  var bytes = [];
+  for (var i = 0; i < raw.length; i++) {
+    bytes.push(raw.charCodeAt(i) & 255);
+  }
+  outlet(0, bytes);
 }
 
 function error_json(id, message) {
