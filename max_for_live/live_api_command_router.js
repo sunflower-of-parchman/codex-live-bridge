@@ -2,6 +2,29 @@ autowatch = 1;
 inlets = 1;
 outlets = 1;
 
+var LOG_PATH = "/Users/michaelwall/codex-live-bridge/logs/live_api_router.log";
+
+function safe_log(entry) {
+  try {
+    var file = new File(LOG_PATH, "append");
+    file.writeline(entry);
+    file.close();
+  } catch (err) {
+    // Avoid crashing the router if file logging fails.
+  }
+}
+
+function log_event(kind, id, payload) {
+  var timestamp = new Date().toISOString();
+  var entry = {
+    ts: timestamp,
+    kind: kind,
+    id: id || null,
+    payload: payload || {}
+  };
+  safe_log(JSON.stringify(entry));
+}
+
 function post_json(obj) {
   var raw = JSON.stringify(obj);
   var bytes = [];
@@ -12,10 +35,12 @@ function post_json(obj) {
 }
 
 function error_json(id, message) {
+  log_event("error", id, { error: message });
   post_json({ ok: false, id: id || null, error: message });
 }
 
 function success_json(id, result) {
+  log_event("success", id, result || {});
   post_json({ ok: true, id: id || null, result: result || {} });
 }
 

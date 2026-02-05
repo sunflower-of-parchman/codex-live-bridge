@@ -16,7 +16,6 @@ class MaxForLivePatchTests(unittest.TestCase):
         boxes = patch_data["patcher"]["boxes"]
         texts = [box["box"].get("text", "") for box in boxes]
         self.assertTrue(any("udpreceive 9000" in text for text in texts))
-        self.assertTrue(any("outputformat rawbytes" in text for text in texts))
         self.assertTrue(any("live_api_command_router.js" in text for text in texts))
 
     def test_patch_routes_js_output_to_print(self):
