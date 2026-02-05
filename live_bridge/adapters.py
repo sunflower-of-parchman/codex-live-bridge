@@ -37,18 +37,15 @@ class UdpMaxProxyAdapter:
     port: int = 9000
     timeout_s: float = 0.25
     response_host: str = "127.0.0.1"
-    response_port: int = 9002
+    response_port: int = 0
     response_timeout_s: float = 1.0
-    query_commands: Tuple[str, ...] = ("set_tempo", "get_track_count", "get_tempo")
+    query_commands: Tuple[str, ...] = ("get_track_count", "get_tempo")
 
     def _target(self) -> str:
         return f"udp://{self.host}:{self.port}"
 
-    def _no_response_message(self, command: str) -> str:
-        return (
-            f"No UDP response for '{command}' on {self.response_host}:{self.response_port}. "
-            "Confirm Max patch includes udpsend for bridge responses."
-        )
+    def _responses_enabled(self) -> bool:
+        return self.response_port > 0
 
     def _query_with_response(self, command_id: str, encoded: bytes) -> Dict[str, Any]:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as recv_sock:
@@ -76,28 +73,21 @@ class UdpMaxProxyAdapter:
         encoded = json.dumps(message, ensure_ascii=True).encode("utf-8")
 
         if command in self.query_commands:
+            if not self._responses_enabled():
+                raise RuntimeError(
+                    f"Query command '{command}' requires a UDP response port. "
+                    "Run the bridge with --udp-response-port to enable responses."
+                )
             try:
                 result = self._query_with_response(command_id, encoded)
             except TimeoutError as exc:  # pragma: no cover
-                if command == "set_tempo":
-                    return {
-                        "status": "forwarded",
-                        "backend": "udp-max-proxy",
-                        "target": self._target(),
-                        "bytes_sent": len(encoded),
-                        "warning": self._no_response_message(command),
-                    }
-                raise RuntimeError(self._no_response_message(command)) from exc
+                raise RuntimeError(
+                    f"No UDP response for '{command}' on {self.response_host}:{self.response_port}."
+                ) from exc
             except socket.timeout as exc:
-                if command == "set_tempo":
-                    return {
-                        "status": "forwarded",
-                        "backend": "udp-max-proxy",
-                        "target": self._target(),
-                        "bytes_sent": len(encoded),
-                        "warning": self._no_response_message(command),
-                    }
-                raise RuntimeError(self._no_response_message(command)) from exc
+                raise RuntimeError(
+                    f"No UDP response for '{command}' on {self.response_host}:{self.response_port}."
+                ) from exc
             return {
                 "status": "executed",
                 "backend": "udp-max-proxy",

@@ -108,7 +108,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--udp-response-port",
         type=int,
-        default=int(os.getenv("LIVE_BRIDGE_UDP_RESPONSE_PORT", "9002")),
+        default=int(os.getenv("LIVE_BRIDGE_UDP_RESPONSE_PORT", "0")),
     )
     return parser
 
@@ -129,7 +129,7 @@ def main() -> int:
     print(
         f"Starting live bridge on http://{args.host}:{args.port} "
         f"(backend={args.backend}, udp_target={args.udp_host}:{args.udp_port}, "
-        f"udp_response={args.udp_response_host}:{args.udp_response_port})"
+        f"udp_response={'disabled' if args.udp_response_port <= 0 else f'{args.udp_response_host}:{args.udp_response_port}'})"
     )
     try:
         server.serve_forever()
