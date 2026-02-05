@@ -61,3 +61,9 @@ python3 /Users/michaelwall/codex-live-bridge/scripts/short_term_memory.py log --
 python3 /Users/michaelwall/codex-live-bridge/scripts/short_term_memory.py log --role assistant --text "Perfect, let's go."
 python3 /Users/michaelwall/codex-live-bridge/scripts/short_term_memory.py show --limit 20
 ```
+
+## Testing
+
+```bash
+python3 -m unittest discover -s /Users/michaelwall/codex-live-bridge/tests -p "test_*.py"
+```
