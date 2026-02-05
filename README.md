@@ -84,3 +84,7 @@ python3 /Users/michaelwall/codex-live-bridge/scripts/run_self_eval.py
 
 - Workflow doc: `/Users/michaelwall/codex-live-bridge/docs/workflows/supabase-track-gap-suggester.md`
 - SQL query: `/Users/michaelwall/codex-live-bridge/sql/next_best_track_gap.sql`
+
+## Launch Ableton Live
+
+- Workflow doc: `/Users/michaelwall/codex-live-bridge/docs/workflows/launch-ableton-live.md`
