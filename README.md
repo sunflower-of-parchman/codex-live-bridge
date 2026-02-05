@@ -1,13 +1,60 @@
-# codex-live-bridge
+# Listening for the Ghost in the Machine
 
-Freshly initialized repository for building from scratch.
+Open source bridge connecting the Codex app to digital audio workstations (DAWs) for agentic composition assistance and catalog management.
 
-## Current setup
+## Vision
 
-- Git repository initialized
-- Short-term conversation memory logger added
+This repository is a teaching and build space for composition systems that combine:
 
-## Conversation memory quick start
+- music fundamentals
+- emotional and narrative intent from the human condition
+- practical DAW execution workflows
+
+The architecture is DAW-agnostic by design. Ableton Live is the first implementation example.
+
+## Project focus
+
+- Build a bridge that can work with any DAW
+- Use Ableton Live + Max for Live + Live Object Model (LOM) as the first reference path
+- Generate and test composition workflows driven by mood, meter, BPM, and key
+- Keep outputs reusable for catalog development
+
+## Workspaces
+
+1. `codex-live-bridge`
+2. `composition researcher-TA`
+
+## Composition Researcher-TA output requirements
+
+- instrument ranges (VST-specific when needed)
+- mood definitions (written descriptions)
+- narrative stories for each mood focused on the human condition and the world
+
+Narrative guardrail: stories must not reference art making, music, or dance.
+
+## Build constraints
+
+- 1 automation
+- 2 skills
+- 2 workspaces
+- dictation-first workflow
+
+## Initial roadmap
+
+1. Build core memory, logging, and repo docs
+2. Seed ensemble and mood documentation from composition research outputs
+3. Build the Max for Live bridge and connect to LOM
+4. Expand bridge controls: note insert, velocity, automation, mixing, EQ, BPM/tempo, global key
+5. Run bridge tests, ensemble tests, and eval loops
+6. Produce 3-minute tracks and compare run-over-run behavior
+
+## Open source status
+
+This repo is public from day one:
+
+- [sunflower-of-parchman/codex-live-bridge](https://github.com/sunflower-of-parchman/codex-live-bridge)
+
+## Memory quick start
 
 ```bash
 python3 /Users/michaelwall/codex-live-bridge/scripts/short_term_memory.py log --role user --text "Starting build now."
