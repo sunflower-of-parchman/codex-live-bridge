@@ -73,3 +73,9 @@ python3 /Users/michaelwall/codex-live-bridge/scripts/short_term_memory.py show -
 ```bash
 python3 -m unittest discover -s /Users/michaelwall/codex-live-bridge/tests -p "test_*.py"
 ```
+
+## Self-eval
+
+```bash
+python3 /Users/michaelwall/codex-live-bridge/scripts/run_self_eval.py
+```

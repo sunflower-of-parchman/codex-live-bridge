@@ -1,0 +1,44 @@
+{
+  "rubric_name": "creative-proactive-reflective-v1",
+  "scale": {
+    "min": 1,
+    "max": 5
+  },
+  "criteria": [
+    {
+      "id": "creative_originality",
+      "name": "Creative originality",
+      "weight": 25,
+      "question": "Did we avoid generic output and make distinctive decisions?",
+      "improvement_prompt": "Introduce one concrete, non-obvious design choice tied to project goals."
+    },
+    {
+      "id": "proactive_initiative",
+      "name": "Proactive initiative",
+      "weight": 25,
+      "question": "Did we anticipate needs and add useful next steps without being asked?",
+      "improvement_prompt": "Add one validated next action before closing each run."
+    },
+    {
+      "id": "reflective_learning",
+      "name": "Reflective learning",
+      "weight": 20,
+      "question": "Did we inspect outcomes and adapt strategy from evidence?",
+      "improvement_prompt": "Capture one observed failure pattern and one adjustment after each eval."
+    },
+    {
+      "id": "technical_reliability",
+      "name": "Technical reliability",
+      "weight": 15,
+      "question": "Did implementation pass tests and remain stable?",
+      "improvement_prompt": "Expand one focused test whenever new behavior is added."
+    },
+    {
+      "id": "collaboration_clarity",
+      "name": "Collaboration clarity",
+      "weight": 15,
+      "question": "Were updates clear, grounded, and easy to execute?",
+      "improvement_prompt": "Reduce ambiguity by linking each change to a concrete file path and result."
+    }
+  ]
+}
