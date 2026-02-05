@@ -58,6 +58,12 @@ The canon structure is located at:
 
 - `/Users/michaelwall/codex-live-bridge/docs/ensemble/ensemble-manifest.md`
 
+## Mood docs and corpus
+
+- Mood definitions: `/Users/michaelwall/codex-live-bridge/docs/moods/README.md`
+- Mood example corpus: `/Users/michaelwall/codex-live-bridge/docs/mood-examples/README.md`
+- Mood research plan: `/Users/michaelwall/codex-live-bridge/docs/plans/mood-research-corpus-plan.md`
+
 ## Open source status
 
 This repo is public from day one:
