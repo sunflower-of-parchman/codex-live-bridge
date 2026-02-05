@@ -48,6 +48,12 @@ Narrative guardrail: stories must not reference art making, music, or dance.
 5. Run bridge tests, ensemble tests, and eval loops
 6. Produce 3-minute tracks and compare run-over-run behavior
 
+## Composition canon
+
+The canon structure is located at:
+
+- `/Users/michaelwall/codex-live-bridge/docs/composition-canon/README.md`
+
 ## Open source status
 
 This repo is public from day one:
