@@ -33,3 +33,27 @@ Canonical ensemble list captured from the current Live session.
 
 - `Metalic Drums` is preserved as the exact session label.
 - Canonical normalized alias for search/use is `Metallic Drums`.
+
+## Mood-to-Ensemble Recommendations
+
+Use this as a starting selection map when choosing instruments by mood.
+
+| Mood | Primary choices | Supporting choices | Why this pairing works |
+|---|---|---|---|
+| Ambient | Rhodes, Vibraphone, Mellotron | Choir, String Quartet, Novachord | Soft attacks, sustained tones, and blended layers support stillness and space. |
+| Beautiful | Piano, String Quartet, Choir | Acoustic Guitar, Vibraphone, Rhodes | Warm harmonic clarity and lyrical sustain create tenderness and lift. |
+| Energetic | Drum Set, Electric Guitar, Marimba | Piano, Rhodes, Metalic Drums | Strong pulse plus percussive articulation drives momentum and forward motion. |
+| Hopeful | Piano, Acoustic Guitar, String Quartet | Choir, Drum Set (light), Rhodes | Clear harmony with gentle rhythmic support creates upward emotional pull. |
+| Humorous | Marimba, Vibraphone, Piano | Darbuka, Metalic Drums, Acoustic Guitar | Bright transient instruments and quick-response timbres support playful contrast. |
+| Intense | Drum Set, Metalic Drums, Electric Guitar | String Quartet, Piano (low register), Darbuka | High-impact rhythm and dense mid-low energy increase urgency and pressure. |
+| Mysterious | Novachord, Mellotron, Vibraphone | Frame Drum, Darbuka (sparse), String Quartet | Uncertain tone color plus restrained pulse preserves ambiguity and suspense. |
+| Nostalgia | Piano, Rhodes, Mellotron | Acoustic Guitar, Choir, String Quartet | Familiar timbral warmth and gentle blend support remembered, bittersweet tone. |
+| Rhythmic | Frame Drum, Darbuka, Drum Set | Marimba, Acoustic Guitar, Piano | Layered hand/percussion grooves and repeating attacks reinforce cyclical drive. |
+| Sad | Piano, String Quartet, Choir | Rhodes, Mellotron, Acoustic Guitar (sparse) | Long sustain, low density, and soft articulation support reflection and gravity. |
+
+## Usage Rules
+
+1. Start with `2-4` primary choices for the target mood.
+2. Add `1-2` supporting choices only if the mood identity remains clear.
+3. If two moods are blended, keep one mood dominant in instrument count and register.
+4. Prefer arrangement contrast (density, register, articulation) over adding too many sources.
