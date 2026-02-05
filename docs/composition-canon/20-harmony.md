@@ -26,10 +26,12 @@ Document your harmony approach here:
 1. Define tonal center or modal frame explicitly.
 2. Track chord function per section, not only per bar.
 3. Favor smooth voice-leading unless contrast is intentional.
+4. Choose and apply one mood profile from `70-mood-harmonic-profiles.md` before writing final chord content.
 
 ## Teaching Notes
 
 Capture progression families, voicing examples, and harmonic do/don't rules.
+Reference mood-first harmonic profiles in `70-mood-harmonic-profiles.md`.
 
 ## Self-Eval Signals
 

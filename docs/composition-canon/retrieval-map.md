@@ -10,6 +10,7 @@ Use this map when routing prompts or lookups to the right canon file.
 - texture, color, patch choice, spectral clarity -> `40-timbre.md`
 - layering, role assignment, transitions -> `50-arranging.md`
 - form, narrative pacing, climax, ending -> `60-arc-of-piece.md`
+- mood harmony, mood profile, chord mood mapping, emotional harmony -> `70-mood-harmonic-profiles.md`
 
 ## Retrieval conventions
 

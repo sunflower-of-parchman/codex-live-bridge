@@ -17,6 +17,7 @@ This folder holds the core philosophy and practical fundamentals for how we comp
 5. `40-timbre.md`
 6. `50-arranging.md`
 7. `60-arc-of-piece.md`
+8. `70-mood-harmonic-profiles.md`
 
 ## How to use this canon
 
