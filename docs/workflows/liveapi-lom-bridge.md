@@ -30,13 +30,16 @@ This bridge uses a single UDP port (`9000`) for Live control commands.
 5. Confirm the `js` object path points to:
    `/Users/michaelwall/codex-live-bridge/max_for_live/live_api_command_router.js`
 6. Lock patcher (`Cmd+E`) and save the device (`Cmd+S`).
-7. Start the bridge server on port `9000` and test with one command.
+7. Confirm the scaffold includes `udpsend 127.0.0.1 9001` wired from the same `js` outlet.
+8. Start the bridge server on port `9000` and test with one command.
 
 ## Run bridge on port 9000
 
 ```bash
-python3 /Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py --port 9000 --backend udp-max-proxy --udp-port 9000
+python3 /Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py --port 9000 --backend udp-max-proxy --udp-port 9000 --udp-response-port 9001
 ```
+
+`--udp-response-port 9001` is required for query commands such as `get_tempo` and `get_track_count`.
 
 ## Health and capability checks
 
