@@ -44,6 +44,12 @@ class UdpMaxProxyAdapter:
     def _target(self) -> str:
         return f"udp://{self.host}:{self.port}"
 
+    def _no_response_message(self, command: str) -> str:
+        return (
+            f"No UDP response for '{command}' on {self.response_host}:{self.response_port}. "
+            "Confirm Max patch includes udpsend for bridge responses."
+        )
+
     def _query_with_response(self, command_id: str, encoded: bytes) -> Dict[str, Any]:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as recv_sock:
             recv_sock.bind((self.response_host, self.response_port))
@@ -73,15 +79,25 @@ class UdpMaxProxyAdapter:
             try:
                 result = self._query_with_response(command_id, encoded)
             except TimeoutError as exc:  # pragma: no cover
-                raise RuntimeError(
-                    f"No UDP response for '{command}' on {self.response_host}:{self.response_port}. "
-                    "Confirm Max patch includes udpsend for bridge responses."
-                ) from exc
+                if command == "set_tempo":
+                    return {
+                        "status": "forwarded",
+                        "backend": "udp-max-proxy",
+                        "target": self._target(),
+                        "bytes_sent": len(encoded),
+                        "warning": self._no_response_message(command),
+                    }
+                raise RuntimeError(self._no_response_message(command)) from exc
             except socket.timeout as exc:
-                raise RuntimeError(
-                    f"No UDP response for '{command}' on {self.response_host}:{self.response_port}. "
-                    "Confirm Max patch includes udpsend for bridge responses."
-                ) from exc
+                if command == "set_tempo":
+                    return {
+                        "status": "forwarded",
+                        "backend": "udp-max-proxy",
+                        "target": self._target(),
+                        "bytes_sent": len(encoded),
+                        "warning": self._no_response_message(command),
+                    }
+                raise RuntimeError(self._no_response_message(command)) from exc
             return {
                 "status": "executed",
                 "backend": "udp-max-proxy",

@@ -64,6 +64,26 @@ class UdpMaxProxyAdapterTests(unittest.TestCase):
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["response"]["current_bpm"], 121.0)
 
+    def test_set_tempo_falls_back_to_forwarded_when_no_udp_response(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as cmd_sock:
+            cmd_sock.bind(("127.0.0.1", 0))
+            command_port = cmd_sock.getsockname()[1]
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            response_port = probe.getsockname()[1]
+
+        adapter = UdpMaxProxyAdapter(
+            host="127.0.0.1",
+            port=command_port,
+            response_host="127.0.0.1",
+            response_port=response_port,
+            response_timeout_s=0.05,
+        )
+        result = adapter.execute("cmd-tempo-timeout", "set_tempo", {"bpm": 130})
+        self.assertEqual(result["status"], "forwarded")
+        self.assertIn("warning", result)
+
     def test_query_command_waits_for_matching_udp_response(self):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as cmd_sock:
             cmd_sock.bind(("127.0.0.1", 0))
