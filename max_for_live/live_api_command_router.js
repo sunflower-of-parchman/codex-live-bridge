@@ -18,19 +18,62 @@ function parse_message(args) {
   if (!args || !args.length) {
     throw new Error("No command payload provided.");
   }
+  if (args.length === 1 && typeof args[0] === "string" && args[0].charAt(0) === "{") {
+    return JSON.parse(args[0]);
+  }
   var raw = args.join(" ");
   return JSON.parse(raw);
 }
 
 function anything() {
-  var args = arrayfromargs(messagename, arguments);
+  var args;
   var payload;
   try {
+    if (messagename === "rawbytes") {
+      args = arrayfromargs(arguments);
+      payload = parse_rawbytes(args);
+      handle_command(payload);
+      return;
+    }
+    args = arrayfromargs(messagename, arguments);
     payload = parse_message(args);
     handle_command(payload);
   } catch (err) {
     error_json(null, String(err));
   }
+}
+
+function list() {
+  var args = arrayfromargs(arguments);
+  var payload;
+  try {
+    payload = parse_rawbytes(args);
+    handle_command(payload);
+  } catch (err) {
+    error_json(null, String(err));
+  }
+}
+
+function parse_rawbytes(bytes) {
+  if (!bytes || !bytes.length) {
+    throw new Error("No raw bytes were received.");
+  }
+  var chars = [];
+  var i;
+  for (i = 0; i < bytes.length; i++) {
+    if (typeof bytes[i] !== "number") {
+      throw new Error("Raw byte list contained non-numeric value.");
+    }
+    if (bytes[i] === 0) {
+      continue;
+    }
+    chars.push(String.fromCharCode(bytes[i]));
+  }
+  var raw = chars.join("");
+  if (!raw || raw.charAt(0) !== "{") {
+    throw new Error("Raw UDP payload is not a JSON object.");
+  }
+  return JSON.parse(raw);
 }
 
 function api(path) {

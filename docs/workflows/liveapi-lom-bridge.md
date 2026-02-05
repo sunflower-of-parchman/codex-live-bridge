@@ -16,6 +16,18 @@ This bridge exposes a local HTTP command API on port `9000` and forwards command
 - Bridge server: `/Users/michaelwall/codex-live-bridge/live_bridge/server.py`
 - Protocol validators: `/Users/michaelwall/codex-live-bridge/live_bridge/protocol.py`
 - Max router script: `/Users/michaelwall/codex-live-bridge/max_for_live/live_api_command_router.js`
+- Max patch scaffold: `/Users/michaelwall/codex-live-bridge/max_for_live/live_bridge_receiver.maxpat`
+
+## Load into Max MIDI Effect (copy/paste workflow)
+
+1. In Ableton Live, select your Max MIDI Effect and click `Edit` to open in Max.
+2. In Max, unlock the patcher (`Cmd+E` on macOS).
+3. Open `/Users/michaelwall/codex-live-bridge/max_for_live/live_bridge_receiver.maxpat`.
+4. Select all objects in that patch (`Cmd+A`), copy (`Cmd+C`), then paste (`Cmd+V`) into the Max MIDI Effect patcher.
+5. Confirm the `js` object path points to:
+   `/Users/michaelwall/codex-live-bridge/max_for_live/live_api_command_router.js`
+6. Lock patcher (`Cmd+E`) and save the device (`Cmd+S`).
+7. Start the bridge server on port `9000` and test with one command.
 
 ## Run bridge on port 9000
 

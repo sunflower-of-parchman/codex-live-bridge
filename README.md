@@ -96,3 +96,4 @@ python3 /Users/michaelwall/codex-live-bridge/scripts/run_self_eval.py
 - Bridge workflow: `/Users/michaelwall/codex-live-bridge/docs/workflows/liveapi-lom-bridge.md`
 - LOM reference notes: `/Users/michaelwall/codex-live-bridge/docs/research/lom-current-references-2026-02-05.md`
 - Max router script: `/Users/michaelwall/codex-live-bridge/max_for_live/live_api_command_router.js`
+- Max copy/paste patch: `/Users/michaelwall/codex-live-bridge/max_for_live/live_bridge_receiver.maxpat`
