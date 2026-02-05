@@ -24,7 +24,7 @@
         "box": {
           "id": "obj-1",
           "maxclass": "comment",
-          "text": "Codex Live Bridge: receive UDP JSON on port 9001 and execute via LiveAPI router JS",
+          "text": "Codex Live Bridge: receive UDP JSON on port 9000 and execute via LiveAPI router JS",
           "patching_rect": [24.0, 16.0, 660.0, 20.0]
         }
       },
@@ -32,7 +32,7 @@
         "box": {
           "id": "obj-2",
           "maxclass": "newobj",
-          "text": "udpreceive 9001 @outputformat rawbytes @defer 1",
+          "text": "udpreceive 9000 @outputformat rawbytes @defer 1",
           "patching_rect": [24.0, 52.0, 280.0, 22.0]
         }
       },

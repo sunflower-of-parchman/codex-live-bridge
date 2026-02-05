@@ -15,7 +15,7 @@ class MaxForLivePatchTests(unittest.TestCase):
         patch_data = json.loads(PATCH_PATH.read_text(encoding="utf-8"))
         boxes = patch_data["patcher"]["boxes"]
         texts = [box["box"].get("text", "") for box in boxes]
-        self.assertTrue(any("udpreceive 9001" in text for text in texts))
+        self.assertTrue(any("udpreceive 9000" in text for text in texts))
         self.assertTrue(any("live_api_command_router.js" in text for text in texts))
 
 

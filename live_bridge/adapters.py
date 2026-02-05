@@ -34,7 +34,7 @@ class UdpMaxProxyAdapter:
     """Forwards validated command envelopes to a Max for Live UDP listener."""
 
     host: str = "127.0.0.1"
-    port: int = 9001
+    port: int = 9000
     timeout_s: float = 0.25
 
     def execute(self, command_id: str, command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -50,4 +50,3 @@ class UdpMaxProxyAdapter:
             "target": f"udp://{self.host}:{self.port}",
             "bytes_sent": len(encoded),
         }
-

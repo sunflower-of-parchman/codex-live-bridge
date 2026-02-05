@@ -87,7 +87,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=int(os.getenv("LIVE_BRIDGE_PORT", "9000")))
     parser.add_argument("--backend", default=os.getenv("LIVE_BRIDGE_BACKEND", "udp-max-proxy"))
     parser.add_argument("--udp-host", default=os.getenv("LIVE_BRIDGE_UDP_HOST", "127.0.0.1"))
-    parser.add_argument("--udp-port", type=int, default=int(os.getenv("LIVE_BRIDGE_UDP_PORT", "9001")))
+    parser.add_argument("--udp-port", type=int, default=int(os.getenv("LIVE_BRIDGE_UDP_PORT", "9000")))
     return parser
 
 
@@ -117,4 +117,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

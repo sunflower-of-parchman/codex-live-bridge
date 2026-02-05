@@ -1,12 +1,13 @@
 # LiveAPI LOM Bridge (Port 9000)
 
 This bridge exposes a local HTTP command API on port `9000` and forwards commands to a Max for Live LiveAPI router over UDP.
+Both transports intentionally use port `9000`: HTTP uses `TCP/9000` and Max uses `UDP/9000`.
 
 ## Architecture
 
 1. Codex or other client sends JSON commands to `http://127.0.0.1:9000/command`.
 2. Python bridge validates payloads against command schemas.
-3. Bridge forwards validated envelopes to UDP target `127.0.0.1:9001`.
+3. Bridge forwards validated envelopes to UDP target `127.0.0.1:9000`.
 4. Max for Live `js` router executes LiveAPI calls against the LOM.
 
 ## Files
@@ -32,7 +33,7 @@ This bridge exposes a local HTTP command API on port `9000` and forwards command
 ## Run bridge on port 9000
 
 ```bash
-python3 /Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py --port 9000 --backend udp-max-proxy --udp-port 9001
+python3 /Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py --port 9000 --backend udp-max-proxy --udp-port 9000
 ```
 
 ## Health and capability checks
