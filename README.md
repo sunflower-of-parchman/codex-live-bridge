@@ -88,3 +88,10 @@ python3 /Users/michaelwall/codex-live-bridge/scripts/run_self_eval.py
 ## Launch Ableton Live
 
 - Workflow doc: `/Users/michaelwall/codex-live-bridge/docs/workflows/launch-ableton-live.md`
+
+## LiveAPI LOM bridge (port 9000)
+
+- Run server: `python3 /Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py --port 9000 --backend udp-max-proxy --udp-port 9001`
+- Bridge workflow: `/Users/michaelwall/codex-live-bridge/docs/workflows/liveapi-lom-bridge.md`
+- LOM reference notes: `/Users/michaelwall/codex-live-bridge/docs/research/lom-current-references-2026-02-05.md`
+- Max router script: `/Users/michaelwall/codex-live-bridge/max_for_live/live_api_command_router.js`

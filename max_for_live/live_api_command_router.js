@@ -1,0 +1,213 @@
+autowatch = 1;
+inlets = 1;
+outlets = 1;
+
+function post_json(obj) {
+  outlet(0, JSON.stringify(obj));
+}
+
+function error_json(id, message) {
+  post_json({ ok: false, id: id || null, error: message });
+}
+
+function success_json(id, result) {
+  post_json({ ok: true, id: id || null, result: result || {} });
+}
+
+function parse_message(args) {
+  if (!args || !args.length) {
+    throw new Error("No command payload provided.");
+  }
+  var raw = args.join(" ");
+  return JSON.parse(raw);
+}
+
+function anything() {
+  var args = arrayfromargs(messagename, arguments);
+  var payload;
+  try {
+    payload = parse_message(args);
+    handle_command(payload);
+  } catch (err) {
+    error_json(null, String(err));
+  }
+}
+
+function api(path) {
+  return new LiveAPI(path);
+}
+
+function clip_api(trackIndex, clipSlotIndex) {
+  var slot = api("live_set tracks " + trackIndex + " clip_slots " + clipSlotIndex);
+  var hasClip = slot.get("has_clip");
+  var clipPresent = Array.isArray(hasClip) ? hasClip[0] : hasClip;
+  if (!clipPresent) {
+    throw new Error("Clip slot " + clipSlotIndex + " on track " + trackIndex + " has no clip.");
+  }
+  return api("live_set tracks " + trackIndex + " clip_slots " + clipSlotIndex + " clip");
+}
+
+function mixer_parameter(trackIndex, parameterName) {
+  var mixer = api("live_set tracks " + trackIndex + " mixer_device");
+  return api(mixer.path + " " + parameterName);
+}
+
+function send_parameter(trackIndex, sendIndex) {
+  var mixer = api("live_set tracks " + trackIndex + " mixer_device");
+  return api(mixer.path + " sends " + sendIndex);
+}
+
+function device_parameter(trackIndex, deviceIndex, parameterIndex) {
+  return api("live_set tracks " + trackIndex + " devices " + deviceIndex + " parameters " + parameterIndex);
+}
+
+function set_param_value(parameterApi, value) {
+  parameterApi.set("value", value);
+}
+
+function note_insert(payload) {
+  var clip = clip_api(payload.track_index, payload.clip_slot_index);
+  var dict = new Dict();
+  dict.parse(JSON.stringify(payload.notes));
+  clip.call("add_new_notes", dict.name);
+  return { inserted_notes: payload.notes.length };
+}
+
+function set_note_velocity(payload) {
+  var clip = clip_api(payload.track_index, payload.clip_slot_index);
+  var dict = new Dict();
+  dict.parse(
+    JSON.stringify([
+      {
+        pitch: payload.pitch,
+        start_time: payload.start_time,
+        duration: payload.duration,
+        velocity: payload.velocity,
+        mute: false
+      }
+    ])
+  );
+  clip.call("apply_note_modifications", dict.name);
+  return { updated_velocity: payload.velocity };
+}
+
+function create_automation(payload) {
+  var clip = clip_api(payload.track_index, payload.clip_slot_index);
+  var parameter = device_parameter(payload.track_index, payload.device_index, payload.parameter_index);
+  clip.call("clear_envelope", parameter.path);
+  clip.call("create_automation_envelope", parameter.path);
+
+  var envelope = api(parameter.path + " automation_envelope");
+  for (var i = 0; i < payload.points.length; i++) {
+    var point = payload.points[i];
+    envelope.call("insert_step", point.time, point.value);
+  }
+  return { automation_points: payload.points.length };
+}
+
+function set_track_volume(payload) {
+  var volume = mixer_parameter(payload.track_index, "volume");
+  set_param_value(volume, payload.value);
+  return { value: payload.value };
+}
+
+function set_track_pan(payload) {
+  var pan = mixer_parameter(payload.track_index, "panning");
+  set_param_value(pan, payload.value);
+  return { value: payload.value };
+}
+
+function set_send_level(payload) {
+  var send = send_parameter(payload.track_index, payload.send_index);
+  set_param_value(send, payload.value);
+  return { send_index: payload.send_index, value: payload.value };
+}
+
+function set_device_parameter(payload) {
+  var parameter = device_parameter(payload.track_index, payload.device_index, payload.parameter_index);
+  set_param_value(parameter, payload.value);
+  return { value: payload.value };
+}
+
+function set_eq3(payload) {
+  var baseTrack = payload.track_index;
+  var deviceIndex = payload.device_index || 0;
+  var mapping = {
+    low_gain: 1,
+    mid_gain: 2,
+    high_gain: 3,
+    low_on: 4,
+    mid_on: 5,
+    high_on: 6
+  };
+  var changed = 0;
+  var field;
+
+  for (field in mapping) {
+    if (!mapping.hasOwnProperty(field)) {
+      continue;
+    }
+    if (payload[field] === undefined) {
+      continue;
+    }
+    var parameter = device_parameter(baseTrack, deviceIndex, mapping[field]);
+    set_param_value(parameter, payload[field]);
+    changed += 1;
+  }
+  return { changed_fields: changed };
+}
+
+function set_eq8_band_gain(payload) {
+  var parameterIndex = payload.band;
+  var parameter = device_parameter(payload.track_index, payload.device_index, parameterIndex);
+  set_param_value(parameter, payload.gain);
+  return { band: payload.band, gain: payload.gain };
+}
+
+function set_tempo(payload) {
+  var song = api("live_set");
+  song.set("tempo", payload.bpm);
+  return { bpm: payload.bpm };
+}
+
+function set_global_key(payload) {
+  var song = api("live_set");
+  song.set("root_note", payload.root_note);
+  if (payload.scale_name !== undefined) {
+    song.set("scale_name", payload.scale_name);
+  }
+  if (payload.scale_intervals !== undefined) {
+    song.set("scale_intervals", payload.scale_intervals.join(" "));
+  }
+  return {
+    root_note: payload.root_note,
+    scale_name: payload.scale_name || null,
+    scale_intervals: payload.scale_intervals || null
+  };
+}
+
+var handlers = {
+  note_insert: note_insert,
+  set_note_velocity: set_note_velocity,
+  create_automation: create_automation,
+  set_track_volume: set_track_volume,
+  set_track_pan: set_track_pan,
+  set_send_level: set_send_level,
+  set_device_parameter: set_device_parameter,
+  set_eq3: set_eq3,
+  set_eq8_band_gain: set_eq8_band_gain,
+  set_tempo: set_tempo,
+  set_global_key: set_global_key
+};
+
+function handle_command(message) {
+  var id = message.id || null;
+  var command = message.command;
+  var payload = message.payload || {};
+
+  if (!command || !handlers[command]) {
+    throw new Error("Unsupported command: " + command);
+  }
+  var result = handlers[command](payload);
+  success_json(id, result);
+}

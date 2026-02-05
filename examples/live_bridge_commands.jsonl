@@ -1,0 +1,9 @@
+{"command":"note_insert","payload":{"track_index":0,"clip_slot_index":0,"notes":[{"pitch":60,"start_time":0.0,"duration":1.0,"velocity":100,"mute":false}]}}
+{"command":"set_note_velocity","payload":{"track_index":0,"clip_slot_index":0,"pitch":60,"start_time":0.0,"duration":1.0,"velocity":90}}
+{"command":"create_automation","payload":{"track_index":0,"clip_slot_index":0,"device_index":1,"parameter_index":3,"points":[{"time":0.0,"value":0.1},{"time":2.0,"value":0.9}]}}
+{"command":"set_track_volume","payload":{"track_index":0,"value":0.72}}
+{"command":"set_track_pan","payload":{"track_index":0,"value":-0.15}}
+{"command":"set_send_level","payload":{"track_index":0,"send_index":1,"value":0.4}}
+{"command":"set_eq8_band_gain","payload":{"track_index":0,"device_index":2,"band":4,"gain":0.6}}
+{"command":"set_tempo","payload":{"bpm":122.0}}
+{"command":"set_global_key","payload":{"root_note":9,"scale_name":"Minor","scale_intervals":[0,2,3,5,7,8,10]}}
