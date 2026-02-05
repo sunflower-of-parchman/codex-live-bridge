@@ -22,6 +22,7 @@ class LiveBridgeServiceTests(unittest.TestCase):
         commands = [entry["command"] for entry in capabilities["commands"]]
         self.assertIn("create_midi_clip", commands)
         self.assertIn("set_track_mute", commands)
+        self.assertIn("get_track_count", commands)
 
     def test_execute_command_routes_to_adapter(self):
         response = self.service.execute_command(

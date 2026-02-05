@@ -71,11 +71,24 @@ def build_handler(service: BridgeService):
     return BridgeHandler
 
 
-def build_service(bind_host: str, bind_port: int, backend: str, udp_host: str, udp_port: int) -> BridgeService:
+def build_service(
+    bind_host: str,
+    bind_port: int,
+    backend: str,
+    udp_host: str,
+    udp_port: int,
+    udp_response_host: str,
+    udp_response_port: int,
+) -> BridgeService:
     if backend == "mock":
         adapter = MockLiveAdapter()
     elif backend == "udp-max-proxy":
-        adapter = UdpMaxProxyAdapter(host=udp_host, port=udp_port)
+        adapter = UdpMaxProxyAdapter(
+            host=udp_host,
+            port=udp_port,
+            response_host=udp_response_host,
+            response_port=udp_response_port,
+        )
     else:
         raise ValueError(f"Unsupported backend '{backend}'. Use 'mock' or 'udp-max-proxy'.")
     return BridgeService(adapter=adapter, bind_host=bind_host, bind_port=bind_port)
@@ -88,6 +101,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", default=os.getenv("LIVE_BRIDGE_BACKEND", "udp-max-proxy"))
     parser.add_argument("--udp-host", default=os.getenv("LIVE_BRIDGE_UDP_HOST", "127.0.0.1"))
     parser.add_argument("--udp-port", type=int, default=int(os.getenv("LIVE_BRIDGE_UDP_PORT", "9000")))
+    parser.add_argument(
+        "--udp-response-host",
+        default=os.getenv("LIVE_BRIDGE_UDP_RESPONSE_HOST", "127.0.0.1"),
+    )
+    parser.add_argument(
+        "--udp-response-port",
+        type=int,
+        default=int(os.getenv("LIVE_BRIDGE_UDP_RESPONSE_PORT", "9002")),
+    )
     return parser
 
 
@@ -99,12 +121,15 @@ def main() -> int:
         backend=args.backend,
         udp_host=args.udp_host,
         udp_port=args.udp_port,
+        udp_response_host=args.udp_response_host,
+        udp_response_port=args.udp_response_port,
     )
     handler_cls = build_handler(service)
     server = ThreadingHTTPServer((args.host, args.port), handler_cls)
     print(
         f"Starting live bridge on http://{args.host}:{args.port} "
-        f"(backend={args.backend}, udp_target={args.udp_host}:{args.udp_port})"
+        f"(backend={args.backend}, udp_target={args.udp_host}:{args.udp_port}, "
+        f"udp_response={args.udp_response_host}:{args.udp_response_port})"
     )
     try:
         server.serve_forever()

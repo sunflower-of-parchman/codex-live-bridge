@@ -54,9 +54,17 @@
       },
       {
         "box": {
+          "id": "obj-6",
+          "maxclass": "newobj",
+          "text": "udpsend 127.0.0.1 9002",
+          "patching_rect": [196.0, 128.0, 170.0, 22.0]
+        }
+      },
+      {
+        "box": {
           "id": "obj-5",
           "maxclass": "comment",
-          "text": "Copy these objects into your Max MIDI Effect patcher (Edit in Max), then save the device.",
+          "text": "Copy these objects into your Max MIDI Effect patcher (Edit in Max), then save the device. Keep udpsend for query responses.",
           "patching_rect": [24.0, 166.0, 620.0, 20.0]
         }
       }
@@ -72,6 +80,12 @@
         "patchline": {
           "source": ["obj-3", 0],
           "destination": ["obj-4", 0]
+        }
+      },
+      {
+        "patchline": {
+          "source": ["obj-3", 0],
+          "destination": ["obj-6", 0]
         }
       }
     ]

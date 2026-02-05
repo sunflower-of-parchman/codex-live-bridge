@@ -1,7 +1,8 @@
 # LiveAPI LOM Bridge (Port 9000)
 
 This bridge exposes a local HTTP command API on port `9000` and forwards commands to a Max for Live LiveAPI router over UDP.
-Both transports intentionally use port `9000`: HTTP uses `TCP/9000` and Max uses `UDP/9000`.
+Both command transports intentionally use port `9000`: HTTP uses `TCP/9000` and Max receives commands on `UDP/9000`.
+For query responses (for example `get_track_count`), Max sends JSON back to the bridge on `UDP/9002`.
 
 ## Architecture
 
@@ -9,6 +10,7 @@ Both transports intentionally use port `9000`: HTTP uses `TCP/9000` and Max uses
 2. Python bridge validates payloads against command schemas.
 3. Bridge forwards validated envelopes to UDP target `127.0.0.1:9000`.
 4. Max for Live `js` router executes LiveAPI calls against the LOM.
+5. For query commands, Max sends the JSON response to bridge UDP listener `127.0.0.1:9002`.
 
 ## Files
 
@@ -33,7 +35,7 @@ Both transports intentionally use port `9000`: HTTP uses `TCP/9000` and Max uses
 ## Run bridge on port 9000
 
 ```bash
-python3 /Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py --port 9000 --backend udp-max-proxy --udp-port 9000
+python3 /Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py --port 9000 --backend udp-max-proxy --udp-port 9000 --udp-response-port 9002
 ```
 
 ## Health and capability checks
@@ -47,6 +49,12 @@ curl -s http://127.0.0.1:9000/capabilities
 
 ```bash
 python3 /Users/michaelwall/codex-live-bridge/scripts/send_live_command.py --url http://127.0.0.1:9000 --command set_tempo --payload '{"bpm":123}'
+```
+
+## Query current track count
+
+```bash
+python3 /Users/michaelwall/codex-live-bridge/scripts/send_live_command.py --url http://127.0.0.1:9000 --command get_track_count --payload '{}'
 ```
 
 ## Command examples

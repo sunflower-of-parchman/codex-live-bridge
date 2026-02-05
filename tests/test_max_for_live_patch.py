@@ -16,6 +16,7 @@ class MaxForLivePatchTests(unittest.TestCase):
         boxes = patch_data["patcher"]["boxes"]
         texts = [box["box"].get("text", "") for box in boxes]
         self.assertTrue(any("udpreceive 9000" in text for text in texts))
+        self.assertTrue(any("udpsend 127.0.0.1 9002" in text for text in texts))
         self.assertTrue(any("live_api_command_router.js" in text for text in texts))
 
 

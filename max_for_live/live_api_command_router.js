@@ -267,6 +267,11 @@ function set_global_key(payload) {
   };
 }
 
+function get_track_count(_payload) {
+  var song = api("live_set");
+  return { track_count: song.getcount("tracks") };
+}
+
 var handlers = {
   note_insert: note_insert,
   create_midi_clip: create_midi_clip,
@@ -283,7 +288,8 @@ var handlers = {
   set_eq3: set_eq3,
   set_eq8_band_gain: set_eq8_band_gain,
   set_tempo: set_tempo,
-  set_global_key: set_global_key
+  set_global_key: set_global_key,
+  get_track_count: get_track_count
 };
 
 function handle_command(message) {

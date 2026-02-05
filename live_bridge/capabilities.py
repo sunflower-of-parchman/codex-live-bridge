@@ -86,4 +86,9 @@ CAPABILITIES: List[Dict[str, str]] = [
         "lom_path": "Song.root_note, Song.scale_name, Song.scale_intervals",
         "summary": "Set global key center and scale.",
     },
+    {
+        "command": "get_track_count",
+        "lom_path": "Song.getcount('tracks')",
+        "summary": "Return the current number of tracks in the loaded Live Set.",
+    },
 ]
