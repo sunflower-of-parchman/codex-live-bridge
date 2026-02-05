@@ -92,6 +92,7 @@ python3 /Users/michaelwall/codex-live-bridge/scripts/run_self_eval.py
 ## LiveAPI LOM bridge (port 9000)
 
 - Run server: `python3 /Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py --port 9000 --backend udp-max-proxy --udp-port 9001`
+- Send command: `python3 /Users/michaelwall/codex-live-bridge/scripts/send_live_command.py --url http://127.0.0.1:9000 --command set_tempo --payload '{"bpm":123}'`
 - Bridge workflow: `/Users/michaelwall/codex-live-bridge/docs/workflows/liveapi-lom-bridge.md`
 - LOM reference notes: `/Users/michaelwall/codex-live-bridge/docs/research/lom-current-references-2026-02-05.md`
 - Max router script: `/Users/michaelwall/codex-live-bridge/max_for_live/live_api_command_router.js`

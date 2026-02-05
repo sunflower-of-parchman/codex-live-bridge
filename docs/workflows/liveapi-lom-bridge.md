@@ -12,6 +12,7 @@ This bridge exposes a local HTTP command API on port `9000` and forwards command
 ## Files
 
 - Server entrypoint: `/Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py`
+- CLI sender: `/Users/michaelwall/codex-live-bridge/scripts/send_live_command.py`
 - Bridge server: `/Users/michaelwall/codex-live-bridge/live_bridge/server.py`
 - Protocol validators: `/Users/michaelwall/codex-live-bridge/live_bridge/protocol.py`
 - Max router script: `/Users/michaelwall/codex-live-bridge/max_for_live/live_api_command_router.js`
@@ -27,6 +28,12 @@ python3 /Users/michaelwall/codex-live-bridge/scripts/run_live_bridge.py --port 9
 ```bash
 curl -s http://127.0.0.1:9000/health
 curl -s http://127.0.0.1:9000/capabilities
+```
+
+## CLI sender usage
+
+```bash
+python3 /Users/michaelwall/codex-live-bridge/scripts/send_live_command.py --url http://127.0.0.1:9000 --command set_tempo --payload '{"bpm":123}'
 ```
 
 ## Command examples
@@ -94,8 +101,18 @@ curl -s http://127.0.0.1:9000/command -H 'Content-Type: application/json' -d '{"
 curl -s http://127.0.0.1:9000/command -H 'Content-Type: application/json' -d '{"command":"set_eq8_band_gain","payload":{"track_index":0,"device_index":2,"band":4,"gain":0.55}}'
 ```
 
+### Clip and transport controls
+
+```bash
+curl -s http://127.0.0.1:9000/command -H 'Content-Type: application/json' -d '{"command":"create_midi_clip","payload":{"track_index":0,"clip_slot_index":2,"length_beats":8.0}}'
+curl -s http://127.0.0.1:9000/command -H 'Content-Type: application/json' -d '{"command":"fire_clip","payload":{"track_index":0,"clip_slot_index":2}}'
+curl -s http://127.0.0.1:9000/command -H 'Content-Type: application/json' -d '{"command":"stop_track","payload":{"track_index":0}}'
+curl -s http://127.0.0.1:9000/command -H 'Content-Type: application/json' -d '{"command":"set_track_mute","payload":{"track_index":0,"value":true}}'
+curl -s http://127.0.0.1:9000/command -H 'Content-Type: application/json' -d '{"command":"set_track_solo","payload":{"track_index":0,"value":false}}'
+```
+
 ## Next extensions
 
 - Add arrangement-level automation support
-- Add clip creation and duplication commands
 - Add device discovery command for named EQ targeting
+- Add explicit scene launch commands

@@ -37,8 +37,16 @@ function api(path) {
   return new LiveAPI(path);
 }
 
+function track_api(trackIndex) {
+  return api("live_set tracks " + trackIndex);
+}
+
+function clip_slot_api(trackIndex, clipSlotIndex) {
+  return api("live_set tracks " + trackIndex + " clip_slots " + clipSlotIndex);
+}
+
 function clip_api(trackIndex, clipSlotIndex) {
-  var slot = api("live_set tracks " + trackIndex + " clip_slots " + clipSlotIndex);
+  var slot = clip_slot_api(trackIndex, clipSlotIndex);
   var hasClip = slot.get("has_clip");
   var clipPresent = Array.isArray(hasClip) ? hasClip[0] : hasClip;
   if (!clipPresent) {
@@ -71,6 +79,24 @@ function note_insert(payload) {
   dict.parse(JSON.stringify(payload.notes));
   clip.call("add_new_notes", dict.name);
   return { inserted_notes: payload.notes.length };
+}
+
+function create_midi_clip(payload) {
+  var slot = clip_slot_api(payload.track_index, payload.clip_slot_index);
+  slot.call("create_clip", payload.length_beats);
+  return { clip_length_beats: payload.length_beats };
+}
+
+function fire_clip(payload) {
+  var slot = clip_slot_api(payload.track_index, payload.clip_slot_index);
+  slot.call("fire");
+  return { fired: true };
+}
+
+function stop_track(payload) {
+  var track = track_api(payload.track_index);
+  track.call("stop_all_clips");
+  return { stopped: true };
 }
 
 function set_note_velocity(payload) {
@@ -108,6 +134,18 @@ function create_automation(payload) {
 function set_track_volume(payload) {
   var volume = mixer_parameter(payload.track_index, "volume");
   set_param_value(volume, payload.value);
+  return { value: payload.value };
+}
+
+function set_track_mute(payload) {
+  var track = track_api(payload.track_index);
+  track.set("mute", payload.value ? 1 : 0);
+  return { value: payload.value };
+}
+
+function set_track_solo(payload) {
+  var track = track_api(payload.track_index);
+  track.set("solo", payload.value ? 1 : 0);
   return { value: payload.value };
 }
 
@@ -188,9 +226,14 @@ function set_global_key(payload) {
 
 var handlers = {
   note_insert: note_insert,
+  create_midi_clip: create_midi_clip,
+  fire_clip: fire_clip,
+  stop_track: stop_track,
   set_note_velocity: set_note_velocity,
   create_automation: create_automation,
   set_track_volume: set_track_volume,
+  set_track_mute: set_track_mute,
+  set_track_solo: set_track_solo,
   set_track_pan: set_track_pan,
   set_send_level: set_send_level,
   set_device_parameter: set_device_parameter,

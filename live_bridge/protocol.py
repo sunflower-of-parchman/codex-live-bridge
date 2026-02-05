@@ -92,6 +92,28 @@ def _validate_note_insert(payload: Dict[str, Any]) -> None:
         _require_note_dict(note, idx)
 
 
+def _validate_create_midi_clip(payload: Dict[str, Any]) -> None:
+    _require_int(payload, "track_index")
+    _require_int(payload, "clip_slot_index")
+    length_beats = _require_number(payload, "length_beats")
+    if length_beats <= 0:
+        raise ProtocolError("'length_beats' must be > 0.")
+
+
+def _validate_fire_clip(payload: Dict[str, Any]) -> None:
+    _require_int(payload, "track_index")
+    _require_int(payload, "clip_slot_index")
+
+
+def _validate_stop_track(payload: Dict[str, Any]) -> None:
+    _require_int(payload, "track_index")
+
+
+def _validate_track_toggle(payload: Dict[str, Any]) -> None:
+    _require_int(payload, "track_index")
+    _require_bool(payload, "value")
+
+
 def _validate_note_velocity(payload: Dict[str, Any]) -> None:
     _require_int(payload, "track_index")
     _require_int(payload, "clip_slot_index")
@@ -192,8 +214,13 @@ def _validate_global_key(payload: Dict[str, Any]) -> None:
 
 VALIDATORS: Dict[str, Callable[[Dict[str, Any]], None]] = {
     "note_insert": _validate_note_insert,
+    "create_midi_clip": _validate_create_midi_clip,
+    "fire_clip": _validate_fire_clip,
+    "stop_track": _validate_stop_track,
     "set_note_velocity": _validate_note_velocity,
     "create_automation": _validate_automation,
+    "set_track_mute": _validate_track_toggle,
+    "set_track_solo": _validate_track_toggle,
     "set_track_volume": _validate_mix_volume,
     "set_track_pan": _validate_mix_pan,
     "set_send_level": _validate_send_level,

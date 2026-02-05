@@ -19,6 +19,9 @@ class LiveBridgeServiceTests(unittest.TestCase):
         capabilities = self.service.capabilities()
         self.assertTrue(capabilities["ok"])
         self.assertGreater(len(capabilities["commands"]), 0)
+        commands = [entry["command"] for entry in capabilities["commands"]]
+        self.assertIn("create_midi_clip", commands)
+        self.assertIn("set_track_mute", commands)
 
     def test_execute_command_routes_to_adapter(self):
         response = self.service.execute_command(
@@ -33,6 +36,18 @@ class LiveBridgeServiceTests(unittest.TestCase):
         self.assertEqual(response["command"], "set_tempo")
         self.assertEqual(response["result"]["backend"], "mock")
         self.assertEqual(len(self.adapter.history), 1)
+
+    def test_execute_new_command_routes_to_adapter(self):
+        response = self.service.execute_command(
+            {
+                "id": "cmd-2",
+                "command": "set_track_solo",
+                "payload": {"track_index": 1, "value": True},
+            }
+        )
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["command"], "set_track_solo")
+        self.assertEqual(self.adapter.history[-1]["payload"]["value"], True)
 
     def test_unsupported_command_raises_protocol_error(self):
         with self.assertRaises(ProtocolError):

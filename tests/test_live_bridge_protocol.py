@@ -7,8 +7,13 @@ class LiveBridgeProtocolTests(unittest.TestCase):
     def test_supported_commands_include_core_controls(self):
         commands = supported_commands()
         self.assertIn("note_insert", commands)
+        self.assertIn("create_midi_clip", commands)
+        self.assertIn("fire_clip", commands)
+        self.assertIn("stop_track", commands)
         self.assertIn("create_automation", commands)
         self.assertIn("set_track_volume", commands)
+        self.assertIn("set_track_mute", commands)
+        self.assertIn("set_track_solo", commands)
         self.assertIn("set_tempo", commands)
         self.assertIn("set_global_key", commands)
 
@@ -69,6 +74,28 @@ class LiveBridgeProtocolTests(unittest.TestCase):
                 {
                     "command": "set_global_key",
                     "payload": {"root_note": 12, "scale_name": "Major"},
+                }
+            )
+
+    def test_create_midi_clip_requires_positive_length(self):
+        with self.assertRaises(ProtocolError):
+            parse_envelope(
+                {
+                    "command": "create_midi_clip",
+                    "payload": {
+                        "track_index": 0,
+                        "clip_slot_index": 1,
+                        "length_beats": 0,
+                    },
+                }
+            )
+
+    def test_set_track_mute_requires_boolean(self):
+        with self.assertRaises(ProtocolError):
+            parse_envelope(
+                {
+                    "command": "set_track_mute",
+                    "payload": {"track_index": 0, "value": 1},
                 }
             )
 

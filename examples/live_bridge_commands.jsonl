@@ -1,7 +1,12 @@
 {"command":"note_insert","payload":{"track_index":0,"clip_slot_index":0,"notes":[{"pitch":60,"start_time":0.0,"duration":1.0,"velocity":100,"mute":false}]}}
+{"command":"create_midi_clip","payload":{"track_index":0,"clip_slot_index":2,"length_beats":8.0}}
+{"command":"fire_clip","payload":{"track_index":0,"clip_slot_index":2}}
+{"command":"stop_track","payload":{"track_index":0}}
 {"command":"set_note_velocity","payload":{"track_index":0,"clip_slot_index":0,"pitch":60,"start_time":0.0,"duration":1.0,"velocity":90}}
 {"command":"create_automation","payload":{"track_index":0,"clip_slot_index":0,"device_index":1,"parameter_index":3,"points":[{"time":0.0,"value":0.1},{"time":2.0,"value":0.9}]}}
 {"command":"set_track_volume","payload":{"track_index":0,"value":0.72}}
+{"command":"set_track_mute","payload":{"track_index":0,"value":false}}
+{"command":"set_track_solo","payload":{"track_index":0,"value":true}}
 {"command":"set_track_pan","payload":{"track_index":0,"value":-0.15}}
 {"command":"set_send_level","payload":{"track_index":0,"send_index":1,"value":0.4}}
 {"command":"set_eq8_band_gain","payload":{"track_index":0,"device_index":2,"band":4,"gain":0.6}}
