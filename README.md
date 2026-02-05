@@ -79,3 +79,8 @@ python3 -m unittest discover -s /Users/michaelwall/codex-live-bridge/tests -p "t
 ```bash
 python3 /Users/michaelwall/codex-live-bridge/scripts/run_self_eval.py
 ```
+
+## Next best track suggestion
+
+- Workflow doc: `/Users/michaelwall/codex-live-bridge/docs/workflows/supabase-track-gap-suggester.md`
+- SQL query: `/Users/michaelwall/codex-live-bridge/sql/next_best_track_gap.sql`
