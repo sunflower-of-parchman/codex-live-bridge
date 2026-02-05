@@ -132,6 +132,88 @@ Document your mood-harmony method here:
 - Arc cue: slow descent, delayed cadence, low dynamic ceiling
 - Principle transfer: lament contour, breath-like pacing, gentle taper endings
 
+### Live Implementation Checklists (5 steps each)
+
+#### Ambient
+
+1. Set project tempo in `55-78 BPM` and keep meter stable.
+2. Choose one mode family (`Dorian`, `Lydian`, or minor pentatonic) and lock it for the first draft.
+3. Build a low-churn loop from `i -> IV -> i -> bVII` or tonic-pedal plus upper-planing movement.
+4. Voice with tonic-fifth bass drones and sparse upper `3/7/9` color tones.
+5. Automate long, slow changes (filter, send, width) and confirm harmonic rate stays minimal.
+
+#### Beautiful
+
+1. Set tempo in `68-92 BPM` with moderate pulse and gentle subdivision.
+2. Choose `Ionian` or `Lydian` as the base mode family and define one borrowed color rule.
+3. Sketch `I -> vi -> IV -> V` movement with softened cadence treatment.
+4. Use open lower voicings and smooth upper voice-leading centered on `3-7-9` color.
+5. Arrange arc as calm entry, bloom, and gentle return; verify no section feels over-dense.
+
+#### Energetic
+
+1. Set tempo in `110-138 BPM` and pick a clear rhythmic anchor early.
+2. Choose `Dorian`, `Mixolydian`, or `Aeolian` and keep harmonic language consistent.
+3. Program a driving loop (`i -> bVII -> bVI -> bVII` or dominant-cycle variant).
+4. Stack compact mid-register voicings over strong octave or root-fifth bass.
+5. Increase harmonic or textural density every 8-16 bars to create escalation.
+
+#### Hopeful
+
+1. Set tempo in `82-108 BPM` and define a stable groove with light lift.
+2. Choose a bright-leaning mode family (`Lydian` or `Ionian`, optionally `Dorian` blend).
+3. Use uplift movement (`I -> V/3 -> vi -> IV`) with suspended or softened cadences.
+4. Keep top voice rising stepwise where possible; emphasize open `3` and `9` colors.
+5. End sections with partial resolution so forward momentum remains active.
+
+#### Humorous
+
+1. Set tempo in `92-122 BPM` with room for rhythmic turnarounds.
+2. Choose major pentatonic or `Mixolydian` base and reserve one surprise-color move.
+3. Write a short progression with one deliberate sidestep dominant and clear return.
+4. Use compact voicings, rests, and quick register shifts to create timing contrast.
+5. Validate that surprise events resolve quickly and read as playful, not chaotic.
+
+#### Intense
+
+1. Choose either fast (`120-160 BPM`) or halftime-heavy (`60-72 BPM`) tempo framing.
+2. Select a high-tension mode family (`Phrygian`, harmonic-minor family, or `Phrygian dominant`).
+3. Build around `i -> bII -> i -> V7(b9)` plus controlled diminished connectors.
+4. Layer low anchors with upper minor-second or tritone friction before release.
+5. Automate long tension ramps and delay final cadence until late in the section arc.
+
+#### Mysterious
+
+1. Set tempo in `65-95 BPM` and avoid overly busy rhythmic grids.
+2. Choose `Dorian b2`, `Phrygian dominant`, or diminished-fragment language.
+3. Use suspended tonic zones with ambiguous shifts instead of hard functional closure.
+4. Keep bass simple (root-fifth) and stack fourth-based upper voicings.
+5. Resolve selectively; verify ambiguity persists through most of the phrase.
+
+#### Nostalgia
+
+1. Set tempo in `70-96 BPM` with relaxed pulse and humanized timing.
+2. Choose major/minor blend strategy with borrowed minor-subdominant color.
+3. Shape movement like `I -> V/3 -> vi -> ivm -> I/5 -> V` with partial cadences.
+4. Use warm mid-register voicings and gentle inner semitone drift.
+5. Repeat one recognizable motif with small variation to imply remembered return.
+
+#### Rhythmic
+
+1. Set tempo in `96-124 BPM` and define primary cycle length first.
+2. Choose `Dorian`, `Aeolian`, or minor pentatonic and keep harmony low-churn.
+3. Start with long vamp behavior (`i7 <-> IV7`) before adding extra harmonic events.
+4. Distribute interlocking rhythmic parts around shell-style harmonic support.
+5. Add polymetric accent overlays (`3:2` or `4:3`) while preserving harmonic clarity.
+
+#### Sad
+
+1. Set tempo in `58-82 BPM` and keep dynamic floor low.
+2. Choose `Aeolian`, `Dorian`, or `Phrygian` and define one descending contour rule.
+3. Write movement around `i -> bVI -> iv -> Vsus4 -> V` with delayed cadence timing.
+4. Space voicings widely and carry one unresolved extension (`9` or `11`) through changes.
+5. Taper endings gently and confirm the arc feels reflective rather than merely slow.
+
 ## Self-Eval Signals
 
 - Harmonic profile matches intended mood without relying on key-specific tricks.
