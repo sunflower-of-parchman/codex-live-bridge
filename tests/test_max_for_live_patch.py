@@ -17,6 +17,7 @@ class MaxForLivePatchTests(unittest.TestCase):
         texts = [box["box"].get("text", "") for box in boxes]
         self.assertTrue(any("udpreceive 9000" in text for text in texts))
         self.assertTrue(any("live_api_command_router.js" in text for text in texts))
+        self.assertTrue(any("outputformat rawbytes" in text for text in texts))
         self.assertTrue(any("udpsend 127.0.0.1 9001" in text for text in texts))
 
     def test_patch_routes_js_output_to_print(self):
@@ -32,10 +33,19 @@ class MaxForLivePatchTests(unittest.TestCase):
             and line["patchline"].get("destination") == ["obj-6", 0]
             for line in lines
         )
+        rawbytes_route_exists = any(
+            line["patchline"].get("source") == ["obj-8", 0]
+            and line["patchline"].get("destination") == ["obj-2", 0]
+            for line in lines
+        )
         self.assertTrue(print_route_exists, "Expected js outlet to be wired to print live_bridge_router.")
         self.assertTrue(
             response_route_exists,
             "Expected js outlet to be wired to udpsend 127.0.0.1 9001 for query responses.",
+        )
+        self.assertTrue(
+            rawbytes_route_exists,
+            "Expected outputformat rawbytes message to be wired into udpreceive 9000.",
         )
 
 

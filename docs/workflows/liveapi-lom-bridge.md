@@ -29,9 +29,10 @@ This bridge uses a single UDP port (`9000`) for Live control commands.
 4. Select all objects in that patch (`Cmd+A`), copy (`Cmd+C`), then paste (`Cmd+V`) into the Max MIDI Effect patcher.
 5. Confirm the `js` object path points to:
    `/Users/michaelwall/codex-live-bridge/max_for_live/live_api_command_router.js`
-6. Lock patcher (`Cmd+E`) and save the device (`Cmd+S`).
+6. Confirm `loadbang -> outputformat rawbytes -> udpreceive 9000` is present.
 7. Confirm the scaffold includes `udpsend 127.0.0.1 9001` wired from the same `js` outlet.
-8. Start the bridge server on port `9000` and test with one command.
+8. Lock patcher (`Cmd+E`) and save the device (`Cmd+S`).
+9. Start the bridge server on port `9000` and test with one command.
 
 ## Run bridge on port 9000
 
