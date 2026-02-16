@@ -1,16 +1,17 @@
 # codex-live-bridge
 
 `codex-live-bridge` is an open-source bridge that lets the Codex app control
-Ableton Live for daily composition workflows.
+Ableton Live across musical workflows.
 
-This project is designed for agent-assisted music production loops, not only
-raw transport/control commands.
+This project is designed for Codex-driven Live control, not only raw
+transport/control commands.
 
 ## What This Enables
 
-- Codex app orchestration of Ableton Live setup and composition tasks
-- meter/BPM coverage workflows driven by catalog metadata
-- repeatable "prepare the session and start composing" loops
+- Codex app orchestration of Ableton Live setup, writing, and iteration tasks
+- workflow-specific routines powered by your own documents and notes
+  (for example harmony, melody, rhythm, timbre, and velocity references)
+- repeatable "prepare the session and start working" loops
 - automation-first creative routines while keeping personal project data in a private source repo
 
 ## Included
@@ -24,14 +25,21 @@ raw transport/control commands.
 - `bridge/*.py`:
   bridge control and composition scripts
 
+## Example Use Cases
+
+- composition setup from catalog metadata (for example meter/BPM targeting)
+- harmony and arrangement workflows driven by your own music docs
+- sound design and session prep routines that Codex can execute repeatedly
+- reusable Ableton setup flows for writing, rehearsal, and production sessions
+
 ## Workflow Pattern
 
-Typical usage loop:
+Typical usage loop (for any musical use case):
 
 1. Query catalog metadata (for example meter/BPM coverage) outside Live.
-2. Select the next target context to compose.
+2. Select the next musical context to work on.
 3. Use this bridge to configure Ableton Live for that context.
-4. Generate, write, or iterate composition material in-session.
+4. Generate, write, perform, or iterate material in-session.
 
 ## Requirements
 
@@ -54,7 +62,7 @@ cd codex-live-bridge
 python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature --create-midi-tracks 0 --create-audio-tracks 0 --add-midi-tracks 0 --add-audio-tracks 0
 ```
 
-4. Compose a one-minute marimba arrangement:
+4. Optional composition example:
 ```bash
 python3 bridge/compose_arrangement.py --minutes 1
 ```
