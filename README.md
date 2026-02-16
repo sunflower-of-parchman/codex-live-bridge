@@ -6,6 +6,8 @@ Ableton Live across musical workflows.
 This project is designed for Codex-driven Live control, not only raw
 transport/control commands.
 
+Started during the OpenAI 2026 Hackathon in San Francisco.
+
 ## What This Enables
 
 - Codex app orchestration of Ableton Live setup, writing, and iteration tasks
