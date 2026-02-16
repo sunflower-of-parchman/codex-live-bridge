@@ -47,12 +47,13 @@ This repository is actively evolving. The current runtime path is:
 
 1. Clone the repo:
 ```bash
-git clone https://github.com/sunflower-of-parchman/codex-compose.git
-cd codex-compose
+git clone <repo-url>
+cd <repo-dir>
 ```
 
 2. Load the Max for Live bridge device in Ableton Live:
-- use `bridge/m4l/LiveUdpBridge.maxpat`
+- drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track
+- source-edit fallback: use `bridge/m4l/LiveUdpBridge.maxpat`
 - ensure Live is listening on UDP `9000`
 
 3. Verify bridge connectivity:
@@ -133,6 +134,6 @@ Contributions are welcome.
 - submit focused pull requests with clear rationale
 - include tests when behavior changes
 
-## Access And Use
+## License
 
-This repository is private. No open-source license is granted.
+This project is licensed under the MIT License. See `LICENSE`.
