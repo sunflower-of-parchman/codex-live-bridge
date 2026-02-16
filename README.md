@@ -51,14 +51,59 @@ Live Object Model reference:
 
 A supported usage pattern in this repo is:
 
-1. Choose meter, BPM, mood, and key.
-2. Use scripts to set up Live and write structured starting material.
-3. Iterate by re-running workflow scripts and clip-writing passes.
-4. Optionally log composition prints and eval artifacts for your own review.
+1. Keep track 1 in Ableton Live as `codex-bridge` (control/bridge, no instrument).
+2. Put the first active instrument on track 2 (current default: `Marimba`).
+3. Choose meter, BPM, mood, and key, then compose with workflow scripts.
+4. Review eval artifacts, adjust constraints/guidance, and compose again.
+5. Grow the ensemble one instrument at a time by updating registry/config and repeating the same compose+eval loop.
 
 This pattern is implemented by shipped scripts such as
 `bridge/setup_marimba_environment.py`, `bridge/compose_arrangement.py`,
 `bridge/arrangement/marimba.py`, and `bridge/composition_feedback_loop.py`.
+
+Current runtime default registry is marimba-only:
+`bridge/config/instrument_registry.marimba.v1.json`.
+
+## Current Eval Coverage
+
+Evals in `bridge/composition_feedback_loop.py` currently score symbolic
+composition structure, not rendered audio quality.
+
+Current artifact fields include:
+
+- run metadata (`mood`, `key`, `tempo`, `meter`, minutes, bars, section size, status)
+- per-section strategy paths (`form_labels`, `hat_density_path`, `piano_mode_path`)
+- per-track note-count paths and created-clip counts
+- structural fingerprints and a fingerprint hash
+
+Similarity/novelty behavior:
+
+- compares current fingerprint to a recent reference run (prefers same meter+BPM)
+- computes `similarity_to_reference` and `novelty_score = 1 - similarity`
+- emits repetition flags when trajectories repeat:
+  - `overall_structure_highly_similar_to_recent_run`
+  - `hat_density_trajectory_repeated`
+  - `piano_mode_trajectory_repeated`
+
+Merit rubric proxies (current):
+
+- `pulse_clarity_proxy`
+- `form_contrast_proxy`
+- `instrument_diversity_proxy`
+- `repetition_risk`
+
+Instrument identity checks (when contract is present, e.g. marimba):
+
+- marimba range adherence
+- marimba leap-discipline adherence
+- marimba attack-duration profile
+- marimba/vibraphone overlap and answer ratios
+- identity flags + reflection prompts for next run adjustments
+
+Artifacts are persisted to:
+
+- `memory/evals/compositions/<date>/<run_id>.json`
+- `memory/evals/composition_index.json`
 
 ## Capabilities
 
