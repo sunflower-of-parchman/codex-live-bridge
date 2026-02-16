@@ -1,47 +1,136 @@
 # codex-live-bridge
 
-`codex-live-bridge` is an open-source bridge that lets the Codex app control
-Ableton Live across musical workflows.
+`codex-live-bridge` is an open-source, local-first Codex-to-Ableton Live
+control bridge.
 
-This project is designed for Codex-driven Live control, not only raw
-transport/control commands.
+More precisely, this repo ships a Max for Live device, a JavaScript command
+router, a Python OSC client/CLI, and higher-level workflow scripts that drive
+Ableton Live through LiveAPI (the Live Object Model) over OSC/UDP.
 
 Started during the OpenAI 2026 Hackathon in San Francisco.
 
-## What This Enables
-
-- Codex app orchestration of Ableton Live setup, writing, and iteration tasks
-- workflow-specific routines powered by your own documents and notes
-  (for example harmony, melody, rhythm, timbre, and velocity references)
-- repeatable "prepare the session and start working" loops
-- automation-first creative routines while keeping personal project data in a private source repo
-
 ## Included
 
-- `bridge/m4l/LiveUdpBridge.amxd`:
-  packaged drop-in Max for Live MIDI device
-- `bridge/m4l/LiveUdpBridge.maxpat`:
-  editable Max patch source
-- `bridge/m4l/live_udp_bridge.js`:
-  JavaScript router logic used by the patch/device
-- `bridge/*.py`:
-  bridge control and composition scripts
+- `bridge/m4l/LiveUdpBridge.amxd`: packaged drop-in Max for Live MIDI device
+- `bridge/m4l/LiveUdpBridge.maxpat`: editable Max patch source
+- `bridge/m4l/live_udp_bridge.js`: JavaScript router logic used by the patch
+- `bridge/*.py`: OSC client and workflow scripts
 
-## Example Use Cases
+## Live Object Model Control (LiveAPI over OSC/UDP)
 
-- composition setup from catalog metadata (for example meter/BPM targeting)
-- harmony and arrangement workflows driven by your own music docs
-- sound design and session prep routines that Codex can execute repeatedly
-- reusable Ableton setup flows for writing, rehearsal, and production sessions
+The Max for Live device uses LiveAPI (Ableton Live Object Model) and exposes a
+generic RPC surface over OSC/UDP. This lets Codex (or any OSC client) query,
+set, call, inspect, and enumerate Live Object Model paths and properties.
 
-## Workflow Pattern
+Current `/api/*` endpoints:
 
-Typical usage loop (for any musical use case):
+- `/api/ping [request_id]`
+- `/api/get <path> <property> [request_id]`
+- `/api/set <path> <property> <value_json> [request_id]`
+- `/api/call <path> <method> <args_json> [request_id]`
+- `/api/children <path> <child_name> [request_id]`
+- `/api/describe <path> [request_id]`
 
-1. Query catalog metadata (for example meter/BPM coverage) outside Live.
-2. Select the next musical context to work on.
-3. Use this bridge to configure Ableton Live for that context.
-4. Generate, write, perform, or iterate material in-session.
+This provides broad Live control via LiveAPI/LOM, with an expanding surface
+area as workflows are added.
+
+Live Object Model reference:
+[Cycling '74 Live Object Model docs](https://docs.cycling74.com/max8/vignettes/live_object_model)
+
+## Data & Training
+
+- This repo ships no trained model weights.
+- This repo does not implement model training or fine-tuning pipelines.
+- This repo does not include or ingest anyone else's music.
+- Any workflow "learning" in this repo refers to optional local logging of your
+  own run artifacts (when enabled), not ML training.
+- If you are using Codex, that model is external to this repo; this repo is
+  the local control and workflow layer around Ableton Live.
+
+## Compositional Studio Assistant Workflow
+
+A supported usage pattern in this repo is:
+
+1. Choose meter, BPM, mood, and key.
+2. Use scripts to set up Live and write structured starting material.
+3. Iterate by re-running workflow scripts and clip-writing passes.
+4. Optionally log composition prints and eval artifacts for your own review.
+
+This pattern is implemented by shipped scripts such as
+`bridge/setup_marimba_environment.py`, `bridge/compose_arrangement.py`,
+`bridge/arrangement/marimba.py`, and `bridge/composition_feedback_loop.py`.
+
+## Capabilities
+
+Exact bridge command surface available now:
+
+1. `/ping`
+2. `/tempo <bpm>`
+3. `/sig_num <numerator>`
+4. `/sig_den <denominator>`
+5. `/create_midi_track`
+6. `/add_midi_tracks <count> [name]`
+7. `/create_audio_track`
+8. `/add_audio_tracks <count> [prefix]`
+9. `/delete_audio_tracks <count>`
+10. `/delete_midi_tracks <count>` (track 0 protected)
+11. `/rename_track <track_index> <name>`
+12. `/set_session_clip_notes <track_index> <slot_index> <length_beats> <notes_json> [clip_name]`
+13. `/append_session_clip_notes <track_index> <slot_index> <notes_json>`
+14. `/inspect_session_clip_notes <track_index> <slot_index>`
+15. `/ensure_midi_tracks <target_count>`
+16. `/midi_cc <controller> <value> [channel]`
+17. `/cc64 <value> [channel]`
+18. `/status`
+19. `/api/ping [request_id]`
+20. `/api/get <path> <property> [request_id]`
+21. `/api/set <path> <property> <value_json> [request_id]`
+22. `/api/call <path> <method> <args_json> [request_id]`
+23. `/api/children <path> <child_name> [request_id]`
+24. `/api/describe <path> [request_id]`
+
+ACK behavior:
+
+- The bridge emits OSC acknowledgements using `/ack`.
+- For `/api/*`, an optional trailing `request_id` is echoed in ACK responses
+  when provided.
+- The Python client can listen on the ACK port and print summarized ACK output.
+
+## Topology (Ports and Transport)
+
+- Default host: `127.0.0.1`
+- Command channel: UDP `9000`
+- ACK/query response channel: UDP `9001`
+- The Python client encodes OSC packets using the Python standard library.
+- The Max for Live device routes commands to LiveAPI inside
+  `bridge/m4l/live_udp_bridge.js`.
+
+## Shipped Workflows
+
+- `bridge/ableton_udp_bridge.py`: general OSC command client/CLI with ACK
+  listening and command batching modes
+- `bridge/setup_marimba_environment.py`: set tempo/signature/key, resolve track,
+  create/clean arrangement clip, optional save policy
+- `bridge/compose_arrangement.py`: registry-driven arrangement writing with
+  sections, groove handling, write strategies, save policy, optional logging
+- `bridge/arrangement/multi_pass.py`: multi-pass pipeline
+  (`seed_layout`, `form_density`, `repetition_development`, `dynamic_arc`,
+  `cadence`, then `polish_*`)
+- `bridge/arrangement/marimba.py` +
+  `bridge/config/marimba_identity.v1.json`: marimba identity and strategy layer
+  (including pair-mode shaping)
+- `bridge/composition_feedback_loop.py`: optional eval artifacts (novelty,
+  similarity, repetition flags, reflection prompts)
+- `bridge/compose_kick_pattern.py`: kick arrangement clip writer
+- `bridge/compose_rim_pattern.py`: rim arrangement clip writer
+- `bridge/compose_hat_pattern.py`: hat arrangement clip writer
+- `bridge/compose_piano_pattern.py`: piano arrangement clip writer
+- `bridge/compose_codex_arpeggio.py`: demo session-clip arpeggio writer
+- `bridge/run_next_track.py`: high-level next-track orchestration wrapper
+- `bridge/dump_marimba_params.py`: dump exposed device parameter values via
+  `/api/*`
+- `bridge/full_surface_smoke_test.py`: full-surface bridge smoke script
+- `bridge/benchmark_midi_write.py`: deterministic MIDI write benchmark harness
 
 ## Requirements
 
