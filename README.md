@@ -11,7 +11,7 @@ raw transport/control commands.
 - Codex app orchestration of Ableton Live setup and composition tasks
 - meter/BPM coverage workflows driven by catalog metadata
 - repeatable "prepare the session and start composing" loops
-- automation-first creative routines without exposing private user data
+- automation-first creative routines while keeping personal project data in a private source repo
 
 ## Included
 
