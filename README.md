@@ -1,60 +1,34 @@
-# codex-compose
+# codex-live-bridge
 
-`codex-compose` is an open-source composition workspace for generating musical
-ideas with:
+`codex-live-bridge` is an Ableton Live bridge for OSC/UDP-driven composition
+workflows, built with Max for Live and Python.
 
-- an Ableton Live bridge (OSC/UDP + Max for Live)
-- a registry-driven arrangement engine
-- durable compositional memory for iterative creative practice
+## Included
 
-The goal is not one perfect generator. The goal is better range, better
-decision-making, and clearer reflection over repeated composition runs.
-
-## Project Status
-
-This repository is actively evolving. The current runtime path is:
-
-- Python scripts in `bridge/`
-- Max for Live bridge device in `bridge/m4l/`
-- Ableton Live as the execution surface
-
-## Features
-
-- OSC/UDP bridge control for Ableton Live (`bridge/ableton_udp_bridge.py`)
-- arrangement generation with section arcs and instrumentation control
-- instrument registry support with per-instrument MIDI register constraints
-- compositional reflection artifacts and novelty/repetition scoring
-- durable memory workflow under `memory/`
-
-## Repository Layout
-
-- `bridge/`:
-  Live bridge, composition scripts, and bridge/arrangement tests
-- `memory/`:
-  canon, fundamentals, mood context, sessions, and work journal
-- `docs/`:
-  vision and audit documentation
-- `output/`:
-  generated run artifacts
+- `bridge/m4l/LiveUdpBridge.amxd`:
+  packaged drop-in Max for Live MIDI device
+- `bridge/m4l/LiveUdpBridge.maxpat`:
+  editable Max patch source
+- `bridge/m4l/live_udp_bridge.js`:
+  JavaScript router logic used by the patch/device
+- `bridge/*.py`:
+  bridge control and composition scripts
 
 ## Requirements
 
-- Python 3.10+ (stdlib-only scripts for core bridge workflows)
-- Ableton Live + Max for Live (for live bridge execution)
-- local UDP access on ports `9000` (commands) and `9001` (acks)
+- Ableton Live + Max for Live
+- Python 3.10+
+- local UDP access on ports `9000` (commands) and `9001` (ack/query responses)
 
 ## Quick Start
 
-1. Clone the repo:
+1. Clone:
 ```bash
-git clone <repo-url>
-cd <repo-dir>
+git clone https://github.com/sunflower-of-parchman/codex-live-bridge.git
+cd codex-live-bridge
 ```
 
-2. Load the Max for Live bridge device in Ableton Live:
-- drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track
-- source-edit fallback: use `bridge/m4l/LiveUdpBridge.maxpat`
-- ensure Live is listening on UDP `9000`
+2. In Ableton Live, drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track.
 
 3. Verify bridge connectivity:
 ```bash
@@ -66,74 +40,22 @@ python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature --
 python3 bridge/compose_arrangement.py --minutes 1
 ```
 
-## Live Registry Workflow
+## Source Editing
 
-The default runtime path is marimba-only:
+If you modify `bridge/m4l/live_udp_bridge.js` or
+`bridge/m4l/LiveUdpBridge.maxpat`:
 
-- default registry: `bridge/config/instrument_registry.marimba.v1.json`
-- default track naming mode: `registry`
-
-Additional registry examples are included:
-
-- `bridge/config/instrument_registry.v1.json`:
-  default template registry
-- `bridge/config/instrument_registry.live_set.v1.json`:
-  current Live-set-aligned registry with explicit register ranges
-
-Use a different registry at runtime:
-
-```bash
-python3 bridge/compose_arrangement.py \
-  --minutes 1 \
-  --instrument-registry-path bridge/config/instrument_registry.live_set.v1.json
-```
-
-## Memory Workflow
-
-Durable context lives in `memory/`:
-
-- `memory/index.toml`:
-  structured focus and references
-- `memory/canon.md`:
-  stable compositional guidance
-- `memory/fundamentals/`:
-  rhythm, timbre, harmony, velocity notes
-- `memory/moods.md`:
-  local mood shorthand and context links
-- `memory/instrument_ranges.md`:
-  range source map and range policy
-- `memory/sessions/`:
-  per-session learning snapshots
-
-Quick usage:
-
-```bash
-python3 -m memory.compositional_memory --list
-python3 -m memory.compositional_memory --fundamental rhythm
-```
+1. Copy updated JS into your Ableton User Library device folder.
+2. Reload the device in Live (remove it from the track, then drag it back in).
+3. Re-save `LiveUdpBridge.amxd` from Live/Max.
+4. Copy updated `LiveUdpBridge.amxd` back into `bridge/m4l/`.
 
 ## Testing
-
-Run arrangement and bridge tests:
 
 ```bash
 python3 -m unittest discover -s bridge -p "test_*.py"
 ```
 
-Run memory tests:
-
-```bash
-python3 -m unittest discover -s memory -p "test_*.py"
-```
-
-## Contributing
-
-Contributions are welcome.
-
-- open an issue for bugs, regressions, or composition workflow gaps
-- submit focused pull requests with clear rationale
-- include tests when behavior changes
-
 ## License
 
-This project is licensed under the MIT License. See `LICENSE`.
+MIT. See `LICENSE`.
