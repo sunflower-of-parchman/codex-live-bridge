@@ -7,6 +7,7 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 EXPORT_SCRIPT = REPO_ROOT / ".github" / "scripts" / "export_public_mirror.sh"
 ALLOWLIST_FILE = REPO_ROOT / ".github" / "public-mirror-allowlist.txt"
+PUBLIC_README = REPO_ROOT / "README.public.md"
 
 
 def _allowlist_paths() -> list[str]:
@@ -44,6 +45,22 @@ class PublicMirrorExportTests(unittest.TestCase):
             )
             self.assertFalse((destination / "memory" / "sessions").exists())
             self.assertFalse((destination / "memory" / "work_journal").exists())
+
+    def test_export_uses_public_readme_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            destination = pathlib.Path(tmpdir) / "public_payload"
+            subprocess.run(
+                [str(EXPORT_SCRIPT), str(destination)],
+                check=True,
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+            )
+            if PUBLIC_README.exists():
+                self.assertEqual(
+                    (destination / "README.md").read_text(encoding="utf-8"),
+                    PUBLIC_README.read_text(encoding="utf-8"),
+                )
 
 
 if __name__ == "__main__":
