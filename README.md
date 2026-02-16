@@ -1,7 +1,17 @@
 # codex-live-bridge
 
-`codex-live-bridge` is an Ableton Live bridge for OSC/UDP-driven composition
-workflows, built with Max for Live and Python.
+`codex-live-bridge` is an open-source bridge that lets the Codex app control
+Ableton Live for daily composition workflows.
+
+This project is designed for agent-assisted music production loops, not only
+raw transport/control commands.
+
+## What This Enables
+
+- Codex app orchestration of Ableton Live setup and composition tasks
+- meter/BPM coverage workflows driven by catalog metadata
+- repeatable "prepare the session and start composing" loops
+- automation-first creative routines without exposing private user data
 
 ## Included
 
@@ -13,6 +23,15 @@ workflows, built with Max for Live and Python.
   JavaScript router logic used by the patch/device
 - `bridge/*.py`:
   bridge control and composition scripts
+
+## Workflow Pattern
+
+Typical usage loop:
+
+1. Query catalog metadata (for example meter/BPM coverage) outside Live.
+2. Select the next target context to compose.
+3. Use this bridge to configure Ableton Live for that context.
+4. Generate, write, or iterate composition material in-session.
 
 ## Requirements
 
