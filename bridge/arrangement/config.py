@@ -83,6 +83,8 @@ class ArrangementConfig:
     multi_pass_on_replay: bool
     eval_log: bool
     eval_log_dir: str | None
+    memory_brief: bool
+    memory_brief_results: int
     dry_run: bool
 
 def parse_args(argv: Iterable[str]) -> ArrangementConfig:
@@ -280,6 +282,17 @@ def parse_args(argv: Iterable[str]) -> ArrangementConfig:
         help="Disable composition eval artifact logging for this run",
     )
     parser.add_argument(
+        "--memory-brief",
+        action="store_true",
+        help="Print a retrieval brief from local memory/eval context before composing",
+    )
+    parser.add_argument(
+        "--memory-brief-results",
+        type=int,
+        default=6,
+        help="How many retrieval hits to include in --memory-brief output (default: 6)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the plan without sending OSC messages",
@@ -311,6 +324,8 @@ def parse_args(argv: Iterable[str]) -> ArrangementConfig:
         parser.error("--ack-flush-interval must be > 0")
     if ns.composition_passes <= 0:
         parser.error("--composition-passes must be > 0")
+    if ns.memory_brief_results <= 0:
+        parser.error("--memory-brief-results must be > 0")
 
     return ArrangementConfig(
         minutes=None if ns.minutes is None else float(ns.minutes),
@@ -363,5 +378,7 @@ def parse_args(argv: Iterable[str]) -> ArrangementConfig:
         multi_pass_on_replay=bool(ns.multi_pass_on_replay),
         eval_log=not bool(ns.no_eval_log),
         eval_log_dir=None if ns.eval_log_dir in (None, "") else str(ns.eval_log_dir),
+        memory_brief=bool(ns.memory_brief),
+        memory_brief_results=int(ns.memory_brief_results),
         dry_run=bool(ns.dry_run),
     )

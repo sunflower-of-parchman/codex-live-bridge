@@ -184,6 +184,36 @@ def _print_multi_pass_reports(reports: Sequence[Mapping[str, Any]]) -> None:
         )
 
 
+def _maybe_print_memory_brief(
+    *,
+    cfg: ArrangementConfig,
+    sig_num: int,
+    sig_den: int,
+    bpm: float,
+    mood: str,
+) -> None:
+    if not cfg.memory_brief:
+        return
+    try:
+        repo_root = Path(__file__).resolve().parents[1]
+        if str(repo_root) not in sys.path:
+            sys.path.append(str(repo_root))
+        from memory import retrieval as memory_retrieval
+
+        brief = memory_retrieval.build_context_brief(
+            meter=f"{int(sig_num)}/{int(sig_den)}",
+            bpm=float(bpm),
+            mood=str(mood),
+            focus=cfg.focus,
+            max_results=max(1, int(cfg.memory_brief_results)),
+            repo_root=repo_root,
+        )
+        print("\nMemory context:")
+        print(brief)
+    except Exception as exc:  # noqa: BLE001 - retrieval should not break composition flow
+        print(f"warning: failed to build memory brief: {exc}", file=sys.stderr)
+
+
 def _merge_section_payloads_for_single_clip(
     section_payloads: Sequence[tuple[Section, Sequence[dict[str, Any]]]],
     beats_per_bar: float,
@@ -537,6 +567,14 @@ def run(cfg: ArrangementConfig) -> int:
             print(f"info: composition print saved to {composition_print_path}")
         except Exception as exc:  # noqa: BLE001 - print artifact should not break composition flow
             print(f"warning: failed to write composition print: {exc}", file=sys.stderr)
+
+    _maybe_print_memory_brief(
+        cfg=cfg,
+        sig_num=run_sig_num,
+        sig_den=run_sig_den,
+        bpm=run_bpm,
+        mood=run_mood,
+    )
 
     if cfg.dry_run:
         print("Arrangement plan (dry run):")

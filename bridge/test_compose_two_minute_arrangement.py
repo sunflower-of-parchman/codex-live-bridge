@@ -164,6 +164,26 @@ class ArrangementHelpersTests(unittest.TestCase):
         self.assertFalse(cfg.multi_pass_enabled)
         self.assertTrue(cfg.multi_pass_on_replay)
 
+    def test_parse_args_accepts_memory_brief_controls(self) -> None:
+        cfg = arrangement.parse_args(
+            [
+                "--memory-brief",
+                "--memory-brief-results",
+                "4",
+            ]
+        )
+        self.assertTrue(cfg.memory_brief)
+        self.assertEqual(cfg.memory_brief_results, 4)
+
+    def test_parse_args_rejects_non_positive_memory_brief_results(self) -> None:
+        with self.assertRaises(SystemExit):
+            arrangement.parse_args(
+                [
+                    "--memory-brief-results",
+                    "0",
+                ]
+            )
+
     def test_build_live_track_names_uses_slot_names(self) -> None:
         specs = [
             arrangement.InstrumentSpec(
