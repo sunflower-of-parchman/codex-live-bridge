@@ -105,6 +105,25 @@ Artifacts are persisted to:
 - `memory/evals/compositions/<date>/<run_id>.json`
 - `memory/evals/composition_index.json`
 
+## Eval-Driven Memory Governance
+
+The repo includes a bounded eval-to-memory loop:
+
+- `python3 -m memory.eval_governance summarize --lookback 30`
+- `python3 -m memory.eval_governance summarize --meter 5/4 --bpm 128 --lookback 20`
+- `python3 -m memory.eval_governance apply --date YYYY-MM-DD --dry-run`
+- `python3 -m memory.eval_governance apply --date YYYY-MM-DD`
+
+What it does:
+
+- Captures repeated eval signals into the current session note first.
+- Promotes repeated signals into durable memory docs with `[gov:*]` markers.
+- Demotes stale promoted rules into `memory/archive/demoted_guidance.md`.
+- Generates active promoted guidance at `memory/governance/active.md`.
+
+`python3 -m memory.retrieval brief ...` automatically includes this active
+governance guidance so new compose runs consume it.
+
 ## Capabilities
 
 Exact bridge command surface available now:
