@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+.env
+*.wav
+*.WAV
+
+# Generated run artifacts
+bridge/.cache/
+memory/composition_prints/
+memory/evals/
+output/
