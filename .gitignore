@@ -10,3 +10,14 @@ bridge/.cache/
 memory/composition_prints/
 memory/evals/
 output/
+
+# Private planning docs not for public repo
+docs/archive/plans/arrangementRefactorOneGoExecPlan.md
+docs/archive/plans/bridgeMidiWriteOptimizationExecPlan.md
+docs/archive/plans/deepAuditRemediationPlan.md
+docs/archive/plans/multiPassCompositionPipelineExecPlan.md
+docs/ABLETON_BRIDGE_VISION.md
+docs/DEEP_AUDIT_2026-02-02.md
+docs/REPO_SEPARATION_STRATEGY.md
+memoryArchitectureUpgrade.md
+abletonFullApiBridge.md
