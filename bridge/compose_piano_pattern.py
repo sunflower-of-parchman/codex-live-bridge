@@ -419,6 +419,7 @@ def build_piano_notes(
     velocity_center: int = 92,
     segment_bars: int = DEFAULT_SEGMENT_BARS,
     transpose_semitones: int = 0,
+    layer_mode: str = "full",
 ) -> Tuple[List[dict], float]:
     """Generate a full piano part using Cm7, AbMaj7, and Fm7.
 
@@ -432,7 +433,13 @@ def build_piano_notes(
         segment_bars=segment_bars,
         transpose_semitones=transpose_semitones,
     )
-    notes = chord_notes + motion_notes
+    resolved_mode = str(layer_mode).strip().lower()
+    if resolved_mode == "chords":
+        notes = chord_notes
+    elif resolved_mode == "motion":
+        notes = motion_notes
+    else:
+        notes = chord_notes + motion_notes
     notes.sort(key=lambda n: (n["start_time"], n["pitch"]))
     return notes, clip_length
 
@@ -449,6 +456,7 @@ class PianoConfig:
     velocity_center: int
     groove_name: str
     segment_bars: int
+    layer_mode: str
     ack_timeout_s: float
     dry_run: bool
 
@@ -493,6 +501,12 @@ def parse_args(argv: Iterable[str]) -> PianoConfig:
         help="Bars per chord segment (default: 2)",
     )
     parser.add_argument(
+        "--layer-mode",
+        choices=("full", "chords", "motion"),
+        default="full",
+        help="Piano layer mode (default: full)",
+    )
+    parser.add_argument(
         "--groove-name",
         default=DEFAULT_GROOVE_NAME,
         help=f"Groove Pool name to apply (default: {DEFAULT_GROOVE_NAME})",
@@ -531,6 +545,7 @@ def parse_args(argv: Iterable[str]) -> PianoConfig:
         velocity_center=int(ns.velocity_center),
         groove_name=str(ns.groove_name),
         segment_bars=int(ns.segment_bars),
+        layer_mode=str(ns.layer_mode),
         ack_timeout_s=float(ns.ack_timeout),
         dry_run=bool(ns.dry_run),
     )
@@ -546,6 +561,7 @@ def run(cfg: PianoConfig) -> int:
             beat_step=beat_step,
             velocity_center=cfg.velocity_center,
             segment_bars=cfg.segment_bars,
+            layer_mode=cfg.layer_mode,
         )
         clip_start = float(cfg.start_beats)
         clip_end = clip_start + clip_length
@@ -559,6 +575,7 @@ def run(cfg: PianoConfig) -> int:
         print(f"- clip end:    {clip_end:g}")
         print(f"- note count:  {len(notes)}")
         print(f"- velocity:    {cfg.velocity_center}")
+        print(f"- layer mode:  {cfg.layer_mode}")
         print(f"- groove:      {cfg.groove_name}")
         print("\nDry run only. No OSC messages were sent.")
         return 0
@@ -603,6 +620,9 @@ def run(cfg: PianoConfig) -> int:
         api_calls=(),
         api_children=(),
         api_describes=(),
+        ack_mode="per_command",
+        ack_flush_interval=10,
+        report_metrics=True,
         delay_ms=0,
         dry_run=False,
     )
@@ -667,6 +687,7 @@ def run(cfg: PianoConfig) -> int:
             beat_step=beat_step,
             velocity_center=cfg.velocity_center,
             segment_bars=cfg.segment_bars,
+            layer_mode=cfg.layer_mode,
         )
 
         clip_start = float(cfg.start_beats)
@@ -689,6 +710,7 @@ def run(cfg: PianoConfig) -> int:
         print(f"- clip length: {clip_length:g} beats")
         print(f"- clip end:    {clip_end:g}")
         print(f"- note count:  {len(notes)}")
+        print(f"- layer mode:  {cfg.layer_mode}")
         print("- palette:     Cm7, AbMaj7, Fm7")
 
         existing_track_index = kick._find_track_index_by_name(tracks_before, cfg.track_name)

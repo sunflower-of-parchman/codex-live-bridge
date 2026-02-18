@@ -7,6 +7,7 @@ import math
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 
@@ -15,6 +16,50 @@ import compose_piano_pattern as piano
 
 
 class PianoPatternTests(unittest.TestCase):
+    def test_build_piano_notes_layer_modes_split_chords_and_motion(self) -> None:
+        bars = 16
+        beats_per_bar = 5.0
+        beat_step = 1.0
+        segment_bars = 2
+
+        full_notes, full_length = piano.build_piano_notes(
+            bars=bars,
+            beats_per_bar=beats_per_bar,
+            beat_step=beat_step,
+            segment_bars=segment_bars,
+            layer_mode="full",
+        )
+        chord_notes, chord_length = piano.build_piano_notes(
+            bars=bars,
+            beats_per_bar=beats_per_bar,
+            beat_step=beat_step,
+            segment_bars=segment_bars,
+            layer_mode="chords",
+        )
+        motion_notes, motion_length = piano.build_piano_notes(
+            bars=bars,
+            beats_per_bar=beats_per_bar,
+            beat_step=beat_step,
+            segment_bars=segment_bars,
+            layer_mode="motion",
+        )
+
+        self.assertEqual(full_length, chord_length)
+        self.assertEqual(full_length, motion_length)
+        self.assertTrue(chord_notes, msg="expected chord-layer notes")
+        self.assertTrue(motion_notes, msg="expected motion-layer notes")
+        self.assertEqual(len(full_notes), len(chord_notes) + len(motion_notes))
+
+    def test_parse_args_accepts_layer_mode(self) -> None:
+        cfg = piano.parse_args(["--bars", "16", "--layer-mode", "chords"])
+        self.assertEqual(cfg.layer_mode, "chords")
+
+    def test_run_returns_error_when_ack_socket_unavailable(self) -> None:
+        cfg = piano.parse_args(["--bars", "8", "--track-name", "Piano", "--clip-name", "Test Piano"])
+        with mock.patch.object(piano.bridge, "open_ack_socket", return_value=None):
+            status = piano.run(cfg)
+        self.assertEqual(status, 1)
+
     def test_phrase_level_segments_cover_full_clip(self) -> None:
         bars = 32
         beats_per_bar = 4.0
