@@ -767,7 +767,7 @@ def _strategy_for_section(
     if label in {"intro", "release", "afterglow"}:
         return "lyrical_roll"
     if label in {"build"}:
-        rotation = ("ostinato_pulse", "broken_resonance", "lyrical_roll")
+        rotation = ("ostinato_pulse", "broken_resonance", "chord_bloom", "lyrical_roll")
         return rotation[int(section.index) % len(rotation)]
     if label in {"pre_climax"}:
         return "broken_resonance"
@@ -889,6 +889,98 @@ def _marimba_strategy_broken_resonance(
             )
             cursor += 1
     return out
+
+
+def _marimba_strategy_chord_bloom(
+    notes: Sequence[dict],
+    *,
+    section: Section,
+    beats_per_bar: float,
+    beat_step: float,
+    strategy: Mapping[str, Any],
+    midi_min_pitch: int,
+    midi_max_pitch: int,
+) -> List[dict]:
+    if not notes:
+        return []
+
+    steps_per_bar = max(1, int(round(float(beats_per_bar) / max(float(beat_step), 1e-6))))
+    attack_steps_raw = strategy.get("attack_steps_6_8", strategy.get("anchor_steps_6_8", [0, 2, 4]))
+    if not isinstance(attack_steps_raw, Sequence):
+        attack_steps_raw = [0, 2, 4]
+    attack_steps = sorted(
+        {int(step) % max(1, steps_per_bar) for step in attack_steps_raw}
+    ) or [0, max(1, steps_per_bar // 2)]
+
+    intervals_raw = strategy.get("chord_intervals", [0, 3, 7, 10])
+    if isinstance(intervals_raw, Sequence):
+        intervals = [int(value) for value in intervals_raw if isinstance(value, (int, float))]
+    else:
+        intervals = [0, 3, 7, 10]
+    if not intervals:
+        intervals = [0, 3, 7, 10]
+
+    chord_size = max(2, min(4, int(strategy.get("chord_size", 3) or 3)))
+    pulse_duration = max(float(beat_step), float(strategy.get("pulse_duration_beats", beat_step * 1.5)))
+    bloom_offset = max(0.0, float(strategy.get("bloom_offset_beats", beat_step * 0.25)))
+    stack_every = max(1, int(strategy.get("stack_every", 2) or 2))
+    section_length = float(section.bar_count) * float(beats_per_bar)
+
+    source = sorted(notes, key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 60))))
+    pitch_pool = [int(note.get("pitch", 60)) for note in source] or [72]
+
+    out: List[dict] = []
+    cursor = 0
+    for bar in range(max(1, int(section.bar_count))):
+        bar_offset = float(bar) * float(beats_per_bar)
+        shifted = sorted(
+            {
+                (int(step) + ((bar + int(section.index)) % 2)) % max(1, steps_per_bar)
+                for step in attack_steps
+            }
+        )
+        anchor_pattern = shifted if shifted else [0]
+        for event_idx, step in enumerate(anchor_pattern):
+            step_idx = int(step) % max(1, steps_per_bar)
+            start_time = bar_offset + (float(step_idx) * float(beat_step))
+            if start_time >= section_length:
+                continue
+            template = source[cursor % len(source)]
+            root_pitch = _fit_pitch_to_register(
+                int(pitch_pool[cursor % len(pitch_pool)]),
+                midi_min_pitch,
+                midi_max_pitch,
+            )
+            stacked_attack = ((bar + event_idx + int(section.index)) % stack_every) == 0
+            for voice_idx in range(chord_size):
+                interval = int(intervals[voice_idx % len(intervals)])
+                voice_pitch = _fit_pitch_to_register(
+                    int(root_pitch) + interval,
+                    midi_min_pitch,
+                    midi_max_pitch,
+                )
+                voice_start = start_time if stacked_attack else start_time + (float(voice_idx) * bloom_offset)
+                if voice_start >= section_length:
+                    continue
+                remaining = max(0.05, section_length - voice_start)
+                voice_duration = max(
+                    float(beat_step) * 0.5,
+                    float(pulse_duration) * max(0.62, 1.0 - (0.12 * float(voice_idx))),
+                )
+                velocity_scale = max(0.62, 1.0 - (0.1 * float(voice_idx)))
+                out.append(
+                    {
+                        "pitch": int(voice_pitch),
+                        "start_time": float(round(voice_start, 6)),
+                        "duration": float(round(min(voice_duration, remaining), 6)),
+                        "velocity": _clamp_velocity(float(template.get("velocity", 96)) * velocity_scale),
+                        "mute": int(template.get("mute", 0)),
+                    }
+                )
+            cursor += 1
+    out.sort(key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))))
+    return out
+
 
 def _marimba_strategy_lyrical_roll(
     notes: Sequence[dict],
@@ -1034,7 +1126,13 @@ def _apply_marimba_identity(
     if not isinstance(pair_rules_pool, Mapping):
         pair_rules_pool = {}
 
+    requested_strategy_token = str(requested_strategy or "").strip().lower()
+    explicit_strategy_requested = requested_strategy_token not in {"", "auto"}
     composition_family = str(identity.payload.get("composition_family_default", "legacy_sectional")).strip().lower()
+    strategy_override_names = {"ostinato_pulse", "broken_resonance", "lyrical_roll", "chord_bloom"}
+    if explicit_strategy_requested and requested_strategy_token in strategy_override_names:
+        # Explicit strategy requests should take precedence over family defaults.
+        composition_family = "legacy_sectional"
     hand_model = str(identity.payload.get("hand_model_default", "four_mallet")).strip().lower()
     if hand_model not in {"two_mallet", "four_mallet"}:
         hand_model = "four_mallet"
@@ -1191,6 +1289,16 @@ def _apply_marimba_identity(
             elif resolved_name == "lyrical_roll":
                 shaped = _marimba_strategy_lyrical_roll(
                     seed_notes,
+                    strategy=strategy,
+                    midi_min_pitch=marimba_spec.midi_min_pitch,
+                    midi_max_pitch=marimba_spec.midi_max_pitch,
+                )
+            elif resolved_name == "chord_bloom":
+                shaped = _marimba_strategy_chord_bloom(
+                    seed_notes,
+                    section=section,
+                    beats_per_bar=beats_per_bar,
+                    beat_step=beat_step,
                     strategy=strategy,
                     midi_min_pitch=marimba_spec.midi_min_pitch,
                     midi_max_pitch=marimba_spec.midi_max_pitch,

@@ -89,6 +89,27 @@ def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     return max(0.0, min(1.0, dot / (lmag * rmag)))
 
 
+def _style_profile_similarity(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> float | None:
+    shared = [key for key in left.keys() if key in right]
+    if not shared:
+        return None
+    sims: list[float] = []
+    for key in shared:
+        try:
+            lval = float(left.get(key, 0.0))
+            rval = float(right.get(key, 0.0))
+        except (TypeError, ValueError):
+            continue
+        diff = min(1.0, abs(lval - rval))
+        sims.append(max(0.0, 1.0 - diff))
+    if not sims:
+        return None
+    return _safe_mean(sims)
+
+
 def _section_count_paths(
     section_count: int,
     arranged_by_track: Mapping[str, Sequence[tuple[Any, Sequence[dict[str, Any]]]]],
@@ -106,6 +127,88 @@ def _section_count_paths(
 
 def _track_totals(paths: Mapping[str, Sequence[int]]) -> dict[str, int]:
     return {track: int(sum(counts)) for track, counts in paths.items()}
+
+
+def _beats_per_bar_from_signature(sig_num: int, sig_den: int) -> float:
+    numerator = max(1, int(sig_num))
+    denominator = max(1, int(sig_den))
+    return float(numerator) * (4.0 / float(denominator))
+
+
+def _track_style_profiles(
+    arranged_by_track: Mapping[str, Sequence[tuple[Any, Sequence[dict[str, Any]]]]],
+    *,
+    beats_per_bar: float,
+) -> dict[str, dict[str, float]]:
+    profiles: dict[str, dict[str, float]] = {}
+    bar_span = max(1e-6, float(beats_per_bar))
+    for track_name, payloads in arranged_by_track.items():
+        absolute_notes: list[dict[str, float | int]] = []
+        for section, notes in payloads:
+            section_start = float(getattr(section, "start_bar", 0.0)) * bar_span
+            for note in notes:
+                absolute_notes.append(
+                    {
+                        "start_time": float(note.get("start_time", 0.0)) + section_start,
+                        "duration": float(note.get("duration", 0.0)),
+                        "pitch": int(note.get("pitch", 0)),
+                    }
+                )
+        if not absolute_notes:
+            continue
+        absolute_notes.sort(key=lambda n: (float(n["start_time"]), int(n["pitch"])))
+        note_count = len(absolute_notes)
+
+        onset_groups: dict[float, int] = {}
+        for note in absolute_notes:
+            onset_key = round(float(note["start_time"]), 4)
+            onset_groups[onset_key] = onset_groups.get(onset_key, 0) + 1
+
+        onsets_sorted = sorted(onset_groups.keys())
+        onset_count = len(onsets_sorted)
+        chord_onset_count = sum(1 for count in onset_groups.values() if count >= 2)
+        notes_in_chords = sum(count for count in onset_groups.values() if count >= 2)
+
+        downbeat_count = 0
+        short_count = 0
+        long_count = 0
+        pitches: list[int] = []
+        pitch_classes: set[int] = set()
+        for note in absolute_notes:
+            start_time = float(note["start_time"])
+            duration = max(0.0, float(note["duration"]))
+            pitch = int(note["pitch"])
+            pitches.append(pitch)
+            pitch_classes.add(pitch % 12)
+            if abs(start_time - round(start_time)) <= 0.03:
+                downbeat_count += 1
+            if duration <= 0.5:
+                short_count += 1
+            if duration >= 1.0:
+                long_count += 1
+
+        mean_ioi = 0.0
+        if onset_count > 1:
+            diffs = [
+                max(0.0, float(onsets_sorted[idx + 1]) - float(onsets_sorted[idx]))
+                for idx in range(onset_count - 1)
+            ]
+            mean_ioi = _safe_mean(diffs)
+        pitch_span = 0
+        if pitches:
+            pitch_span = max(pitches) - min(pitches)
+
+        profiles[str(track_name)] = {
+            "simultaneous_note_ratio": round(float(notes_in_chords) / float(max(1, note_count)), 4),
+            "chord_onset_ratio": round(float(chord_onset_count) / float(max(1, onset_count)), 4),
+            "downbeat_onset_ratio": round(float(downbeat_count) / float(max(1, note_count)), 4),
+            "short_duration_ratio": round(float(short_count) / float(max(1, note_count)), 4),
+            "long_duration_ratio": round(float(long_count) / float(max(1, note_count)), 4),
+            "pitch_span_ratio": round(min(1.0, float(pitch_span) / 36.0), 4),
+            "pitch_class_diversity_ratio": round(float(len(pitch_classes)) / 12.0, 4),
+            "mean_ioi_ratio": round(min(1.0, float(mean_ioi) / 2.0), 4),
+        }
+    return profiles
 
 
 def _find_track_key(mapping: Mapping[str, Any], wanted: str) -> str | None:
@@ -340,6 +443,7 @@ def _build_fingerprints(
     bpm: float,
     sections: Sequence[Any],
     note_count_paths: Mapping[str, Sequence[int]],
+    track_style_profiles: Mapping[str, Mapping[str, float]],
 ) -> dict[str, Any]:
     form_labels = [str(getattr(section, "label", "")) for section in sections]
     hat_density_path = [str(getattr(section, "hat_density", "")) for section in sections]
@@ -351,6 +455,10 @@ def _build_fingerprints(
         "hat_density_path": hat_density_path,
         "piano_mode_path": piano_mode_path,
         "note_count_paths": {track: list(counts) for track, counts in note_count_paths.items()},
+        "track_style_profiles": {
+            str(track): {str(k): float(v) for k, v in profile.items()}
+            for track, profile in track_style_profiles.items()
+        },
     }
     payload["fingerprint_hash"] = _sha256_text(_stable_json(payload))
     return payload
@@ -404,22 +512,29 @@ def _compute_similarity(
     if reference_fp is None:
         return None, {}, [], None
 
-    scores: dict[str, float] = {}
-    scores["form_labels"] = _sequence_similarity(
-        _normalize_seq(current_fp.get("form_labels", [])),
-        _normalize_seq(reference_fp.get("form_labels", [])),
-    )
-    scores["hat_density_path"] = _sequence_similarity(
-        _normalize_seq(current_fp.get("hat_density_path", [])),
-        _normalize_seq(reference_fp.get("hat_density_path", [])),
-    )
-    scores["piano_mode_path"] = _sequence_similarity(
-        _normalize_seq(current_fp.get("piano_mode_path", [])),
-        _normalize_seq(reference_fp.get("piano_mode_path", [])),
-    )
-
     current_paths = current_fp.get("note_count_paths", {})
     reference_paths = reference_fp.get("note_count_paths", {})
+    track_names_lower: set[str] = set()
+    if isinstance(current_paths, Mapping):
+        track_names_lower = {str(track).strip().lower() for track in current_paths.keys()}
+
+    scores: dict[str, float] = {
+        "form_labels": _sequence_similarity(
+        _normalize_seq(current_fp.get("form_labels", [])),
+        _normalize_seq(reference_fp.get("form_labels", [])),
+        ),
+    }
+    if any("hat" in name for name in track_names_lower):
+        scores["hat_density_path"] = _sequence_similarity(
+            _normalize_seq(current_fp.get("hat_density_path", [])),
+            _normalize_seq(reference_fp.get("hat_density_path", [])),
+        )
+    if any("piano" in name for name in track_names_lower):
+        scores["piano_mode_path"] = _sequence_similarity(
+            _normalize_seq(current_fp.get("piano_mode_path", [])),
+            _normalize_seq(reference_fp.get("piano_mode_path", [])),
+        )
+
     if isinstance(current_paths, Mapping) and isinstance(reference_paths, Mapping):
         for track, current_counts in current_paths.items():
             if track not in reference_paths:
@@ -435,6 +550,21 @@ def _compute_similarity(
                 [float(v) for v in ref_counts],
             )
 
+    current_styles = current_fp.get("track_style_profiles", {})
+    reference_styles = reference_fp.get("track_style_profiles", {})
+    if isinstance(current_styles, Mapping) and isinstance(reference_styles, Mapping):
+        for track, current_profile in current_styles.items():
+            if track not in reference_styles:
+                continue
+            reference_profile = reference_styles.get(track)
+            if not isinstance(current_profile, Mapping):
+                continue
+            if not isinstance(reference_profile, Mapping):
+                continue
+            style_similarity = _style_profile_similarity(current_profile, reference_profile)
+            if style_similarity is not None:
+                scores[f"style:{track}"] = style_similarity
+
     if not scores:
         return None, {}, [], None
 
@@ -446,6 +576,9 @@ def _compute_similarity(
         flags.append("hat_density_trajectory_repeated")
     if scores.get("piano_mode_path", 0.0) >= 0.99:
         flags.append("piano_mode_trajectory_repeated")
+    marimba_style_keys = [key for key in scores.keys() if key.startswith("style:marimba")]
+    if marimba_style_keys and max(scores[key] for key in marimba_style_keys) >= 0.98:
+        flags.append("marimba_style_highly_similar_to_recent_run")
 
     reference_run_id = reference_fp.get("fingerprint_hash") if isinstance(reference_fp, Mapping) else None
     return round(overall, 4), {k: round(v, 4) for k, v in scores.items()}, flags, str(reference_run_id) if reference_run_id else None
@@ -473,6 +606,10 @@ def _reflection_prompts(
     if "overall_structure_highly_similar_to_recent_run" in repetition_flags:
         prompts.append(
             "Overall structure was highly similar to a recent run; alter one macro form decision while keeping musical intent."
+        )
+    if "marimba_style_highly_similar_to_recent_run" in repetition_flags:
+        prompts.append(
+            "Marimba style remained highly similar; change one macro gesture family (for example, add chordal stacks or sustained dyads) next run."
         )
     identity_flags = [str(flag) for flag in (instrument_identity_flags or []) if str(flag).strip()]
     if "marimba_range_adherence_below_target" in identity_flags:
@@ -520,7 +657,16 @@ def build_composition_artifact(
 
     section_count = len(sections)
     note_count_paths = _section_count_paths(section_count, arranged_by_track)
-    fingerprints = _build_fingerprints(sig_num, sig_den, bpm, sections, note_count_paths)
+    beats_per_bar = _beats_per_bar_from_signature(sig_num, sig_den)
+    track_style_profiles = _track_style_profiles(arranged_by_track, beats_per_bar=beats_per_bar)
+    fingerprints = _build_fingerprints(
+        sig_num,
+        sig_den,
+        bpm,
+        sections,
+        note_count_paths,
+        track_style_profiles,
+    )
 
     recent = _load_recent_artifacts(root, limit=50)
     reference_artifact = _pick_reference_artifact(str(fingerprints["meter_bpm"]), recent)

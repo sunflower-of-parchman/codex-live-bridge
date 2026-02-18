@@ -77,6 +77,36 @@ def _marimba_pair_payload(
     }
 
 
+def _marimba_style_payload(
+    sections: Sequence[_Section],
+    *,
+    stacked: bool,
+) -> dict[str, list[tuple[_Section, list[dict[str, float | int]]]]]:
+    timeline: list[list[dict[str, float | int]]] = []
+    for _section in sections:
+        if stacked:
+            notes = [
+                {"pitch": 62, "start_time": 0.0, "duration": 1.0, "velocity": 96, "mute": 0},
+                {"pitch": 65, "start_time": 0.0, "duration": 0.75, "velocity": 88, "mute": 0},
+                {"pitch": 69, "start_time": 1.0, "duration": 1.0, "velocity": 98, "mute": 0},
+                {"pitch": 72, "start_time": 1.0, "duration": 0.75, "velocity": 86, "mute": 0},
+            ]
+        else:
+            notes = [
+                {"pitch": 62, "start_time": 0.0, "duration": 1.0, "velocity": 96, "mute": 0},
+                {"pitch": 65, "start_time": 0.5, "duration": 0.75, "velocity": 88, "mute": 0},
+                {"pitch": 69, "start_time": 1.0, "duration": 1.0, "velocity": 98, "mute": 0},
+                {"pitch": 72, "start_time": 1.5, "duration": 0.75, "velocity": 86, "mute": 0},
+            ]
+        timeline.append(notes)
+    return {
+        "Marimba": [
+            (section, [dict(note) for note in notes])
+            for section, notes in zip(sections, timeline)
+        ]
+    }
+
+
 class CompositionFeedbackLoopTests(unittest.TestCase):
     def test_log_composition_run_persists_artifact_and_index(self) -> None:
         sections = [
@@ -225,6 +255,59 @@ class CompositionFeedbackLoopTests(unittest.TestCase):
             self.assertEqual(identity["pair_track"], "Vibraphone")
             self.assertIn("range_adherence_ratio", identity["marimba"])
             self.assertIn("overlap_ratio", identity["pair"])
+
+    def test_style_fingerprint_detects_polyphonic_shift_even_with_same_note_counts(self) -> None:
+        sections = [
+            _Section(index=0, label="intro", piano_mode="chords", hat_density="quarter"),
+            _Section(index=1, label="build", piano_mode="chords", hat_density="eighth"),
+            _Section(index=2, label="release", piano_mode="chords", hat_density="quarter"),
+        ]
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            feedback.log_composition_run(
+                mood="Energetic",
+                key_name="D minor",
+                bpm=120.0,
+                sig_num=4,
+                sig_den=4,
+                minutes=2.0,
+                bars=24,
+                section_bars=8,
+                sections=sections,
+                arranged_by_track=_marimba_style_payload(sections, stacked=False),
+                created_clips_by_track={"Marimba": 3},
+                status="success",
+                repo_root=root,
+            )
+
+            second, _ = feedback.log_composition_run(
+                mood="Energetic",
+                key_name="D minor",
+                bpm=120.0,
+                sig_num=4,
+                sig_den=4,
+                minutes=2.0,
+                bars=24,
+                section_bars=8,
+                sections=sections,
+                arranged_by_track=_marimba_style_payload(sections, stacked=True),
+                created_clips_by_track={"Marimba": 3},
+                status="success",
+                repo_root=root,
+            )
+
+            reflection = second["reflection"]
+            self.assertIn("style:Marimba", reflection["similarity_breakdown"])
+            self.assertLess(reflection["similarity_breakdown"]["style:Marimba"], 0.95)
+            self.assertLess(
+                reflection["similarity_breakdown"]["style:Marimba"],
+                reflection["similarity_breakdown"]["note_shape:Marimba"],
+            )
+            self.assertGreater(reflection["novelty_score"], 0.0)
+            self.assertNotIn("hat_density_trajectory_repeated", reflection["repetition_flags"])
+            self.assertNotIn("piano_mode_trajectory_repeated", reflection["repetition_flags"])
 
 
 if __name__ == "__main__":

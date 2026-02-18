@@ -46,6 +46,17 @@
       "pulse_duration_beats": 0.6,
       "density_scale": 0.58
     },
+    "chord_bloom": {
+      "description": "Downbeat chord blooms with occasional spread attacks.",
+      "grid": "eighth",
+      "attack_steps_6_8": [0, 2, 4],
+      "chord_size": 3,
+      "pulse_duration_beats": 0.9,
+      "bloom_offset_beats": 0.0,
+      "stack_every": 2,
+      "chord_intervals": [0, 3, 7, 10],
+      "density_scale": 0.62
+    },
     "lyrical_roll": {
       "description": "Sustain illusion through controlled reiterated attacks.",
       "grid": "sixteenth",

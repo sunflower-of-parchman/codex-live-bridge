@@ -69,7 +69,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--marimba-strategy",
-        choices=("auto", "ostinato_pulse", "broken_resonance", "lyrical_roll"),
+        choices=("auto", "ostinato_pulse", "broken_resonance", "chord_bloom", "lyrical_roll"),
         default="auto",
         help="Marimba identity strategy",
     )

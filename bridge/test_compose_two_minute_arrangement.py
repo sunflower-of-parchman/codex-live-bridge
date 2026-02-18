@@ -151,6 +151,10 @@ class ArrangementHelpersTests(unittest.TestCase):
         self.assertEqual(cfg.focus, "Marimba")
         self.assertEqual(cfg.pair, "Vibraphone")
 
+    def test_parse_args_accepts_chord_bloom_marimba_strategy(self) -> None:
+        cfg = arrangement.parse_args(["--marimba-strategy", "chord_bloom"])
+        self.assertEqual(cfg.marimba_strategy, "chord_bloom")
+
     def test_parse_args_accepts_multi_pass_controls(self) -> None:
         cfg = arrangement.parse_args(
             [
@@ -877,6 +881,99 @@ class ArrangementHelpersTests(unittest.TestCase):
             bar_idx = int(float(note["start_time"]) // 5.0)
             bar_counts[bar_idx] = bar_counts.get(bar_idx, 0) + 1
         self.assertGreater(bar_counts.get(5, 0), bar_counts.get(0, 0))
+
+    def test_apply_marimba_identity_explicit_chord_bloom_overrides_default_family(self) -> None:
+        sections = arrangement._build_sections(total_bars=8, section_bars=4)
+        marimba_seed = [
+            {"pitch": 62, "start_time": 0.0, "duration": 1.0, "velocity": 90, "mute": 0},
+            {"pitch": 67, "start_time": 1.0, "duration": 1.0, "velocity": 94, "mute": 0},
+            {"pitch": 74, "start_time": 2.0, "duration": 1.0, "velocity": 98, "mute": 0},
+        ]
+        arranged = {
+            "Marimba": [
+                (sections[0], [dict(note) for note in marimba_seed]),
+                (sections[1], [dict(note) for note in marimba_seed]),
+            ]
+        }
+        specs = [
+            arrangement.InstrumentSpec(
+                name="Marimba",
+                source="piano_chords",
+                role="motif",
+                priority=1,
+                required=True,
+                active_min=2,
+                active_max=2,
+                pitch_shift=0,
+                velocity_scale=1.0,
+                keep_ratio_scale=1.0,
+                allow_labels=(),
+                apply_groove=False,
+                midi_min_pitch=55,
+                midi_max_pitch=96,
+            )
+        ]
+        identity = arrangement.MarimbaIdentityConfig(
+            path=pathlib.Path("bridge/config/marimba_identity.v1.json"),
+            payload={
+                "enabled": True,
+                "track_name": "Marimba",
+                "pair_track_name": "Vibraphone",
+                "composition_family_default": "left_hand_ostinato_right_hand_melody",
+                "strategy_default": "ostinato_pulse",
+                "pair_mode_default": "off",
+                "constraints": {
+                    "max_leap_semitones": 12,
+                    "max_density_notes_per_bar": 24,
+                    "preferred_durations_beats": [0.5, 1.0],
+                },
+                "strategies": {
+                    "chord_bloom": {
+                        "attack_steps_6_8": [0, 2, 4],
+                        "pulse_duration_beats": 1.0,
+                        "chord_size": 3,
+                        "bloom_offset_beats": 0.0,
+                        "stack_every": 1,
+                    }
+                },
+            },
+            track_name="Marimba",
+            pair_track_name="Vibraphone",
+            strategy_default="ostinato_pulse",
+            pair_mode_default="off",
+        )
+
+        updated, meta = arrangement._apply_marimba_identity(
+            arranged_by_track=arranged,
+            specs=specs,
+            sections=sections,
+            beats_per_bar=4.0,
+            beat_step=1.0,
+            bpm=120.0,
+            identity=identity,
+            requested_strategy="chord_bloom",
+            key_name="D minor",
+            pair_mode="off",
+            focus_track="Marimba",
+            pair_track=None,
+        )
+
+        self.assertTrue(meta["enabled"])
+        self.assertEqual(meta["composition_family"], "legacy_sectional")
+        self.assertIn("chord_bloom", meta["strategy_usage"])
+
+        marimba_out = updated["Marimba"]
+        self.assertTrue(all(len(notes) > 0 for _section, notes in marimba_out))
+        simultaneous_onsets = False
+        for _section, notes in marimba_out:
+            starts: dict[float, int] = {}
+            for note in notes:
+                key = round(float(note["start_time"]), 6)
+                starts[key] = starts.get(key, 0) + 1
+            if any(count >= 2 for count in starts.values()):
+                simultaneous_onsets = True
+                break
+        self.assertTrue(simultaneous_onsets)
 
     def test_overwrite_existing_clip_sets_clip_signature(self) -> None:
         observed_sets: list[tuple[str, object]] = []
