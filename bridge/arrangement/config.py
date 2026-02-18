@@ -67,6 +67,7 @@ class ArrangementConfig:
     cache_path: str | None
     instrument_registry_path: str | None
     marimba_identity_path: str | None
+    marimba_family: str
     marimba_strategy: str
     marimba_pair_mode: MarimbaPairMode
     focus: str | None
@@ -194,6 +195,12 @@ def parse_args(argv: Iterable[str]) -> ArrangementConfig:
         "--marimba-identity-path",
         default=str(DEFAULT_MARIMBA_IDENTITY_PATH),
         help=f"Marimba identity config path (default: {DEFAULT_MARIMBA_IDENTITY_PATH})",
+    )
+    parser.add_argument(
+        "--marimba-family",
+        choices=("auto", "legacy_sectional", "evolving_ostinato", "left_hand_ostinato_right_hand_melody"),
+        default="auto",
+        help="Marimba macro composition family (default: auto)",
     )
     parser.add_argument(
         "--marimba-strategy",
@@ -358,6 +365,7 @@ def parse_args(argv: Iterable[str]) -> ArrangementConfig:
         marimba_identity_path=None
         if ns.marimba_identity_path in (None, "")
         else str(ns.marimba_identity_path),
+        marimba_family=str(ns.marimba_family),
         marimba_strategy=str(ns.marimba_strategy),
         marimba_pair_mode=str(ns.marimba_pair_mode),  # type: ignore[arg-type]
         focus=None if ns.focus in (None, "") else str(ns.focus),

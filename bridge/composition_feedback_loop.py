@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import re
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -17,7 +18,7 @@ MAX_INDEX_ENTRIES = 300
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
+    return datetime.now(timezone.utc)
 
 
 def _iso_utc(ts: datetime) -> str:
@@ -127,6 +128,13 @@ def _section_count_paths(
 
 def _track_totals(paths: Mapping[str, Sequence[int]]) -> dict[str, int]:
     return {track: int(sum(counts)) for track, counts in paths.items()}
+
+
+def _ensemble_signature(note_count_paths: Mapping[str, Sequence[int]]) -> str:
+    names = sorted(_safe_token(str(track), fallback="track") for track in note_count_paths.keys())
+    if not names:
+        return "none"
+    return "+".join(names)
 
 
 def _beats_per_bar_from_signature(sig_num: int, sig_den: int) -> float:
@@ -455,6 +463,8 @@ def _build_fingerprints(
         "hat_density_path": hat_density_path,
         "piano_mode_path": piano_mode_path,
         "note_count_paths": {track: list(counts) for track, counts in note_count_paths.items()},
+        "ensemble_signature": _ensemble_signature(note_count_paths),
+        "track_count": len(note_count_paths),
         "track_style_profiles": {
             str(track): {str(k): float(v) for k, v in profile.items()}
             for track, profile in track_style_profiles.items()
@@ -494,15 +504,92 @@ def _load_recent_artifacts(repo_root: Path, limit: int = 50) -> list[dict[str, A
     return artifacts
 
 
+def _status_class(status: str) -> str:
+    token = str(status).strip().lower()
+    if token == "dry_run":
+        return "dry_run"
+    return "live"
+
+
+def _run_family_token(run_metadata: Mapping[str, Any] | None) -> str:
+    if not isinstance(run_metadata, Mapping):
+        return ""
+    marimba_runtime = run_metadata.get("marimba_runtime")
+    if isinstance(marimba_runtime, Mapping):
+        family = str(marimba_runtime.get("composition_family", "")).strip()
+        if family:
+            return family
+    family = str(run_metadata.get("section_profile_family", "")).strip()
+    return family
+
+
+def _artifact_ensemble_signature(artifact: Mapping[str, Any]) -> str:
+    fingerprints = artifact.get("fingerprints")
+    if isinstance(fingerprints, Mapping):
+        direct = str(fingerprints.get("ensemble_signature", "")).strip()
+        if direct:
+            return direct
+        paths = fingerprints.get("note_count_paths")
+        if isinstance(paths, Mapping):
+            normalized: dict[str, list[int]] = {}
+            for track, counts in paths.items():
+                if isinstance(counts, Sequence) and not isinstance(counts, (str, bytes)):
+                    normalized[str(track)] = [int(value) for value in counts if isinstance(value, (int, float))]
+            return _ensemble_signature(normalized)
+    return ""
+
+
 def _pick_reference_artifact(
+    *,
     current_meter_bpm: str,
+    current_ensemble_signature: str,
+    current_status: str,
+    current_run_metadata: Mapping[str, Any] | None,
     recent_artifacts: Sequence[Mapping[str, Any]],
-) -> Mapping[str, Any] | None:
-    for artifact in recent_artifacts:
-        fp = artifact.get("fingerprints")
-        if isinstance(fp, Mapping) and str(fp.get("meter_bpm", "")) == current_meter_bpm:
-            return artifact
-    return recent_artifacts[0] if recent_artifacts else None
+) -> tuple[Mapping[str, Any] | None, str | None]:
+    current_status_token = _status_class(current_status)
+    current_family = _run_family_token(current_run_metadata)
+    best_artifact: Mapping[str, Any] | None = None
+    best_rank: tuple[int, int, int, int] | None = None
+    best_reason: str | None = None
+
+    for idx, artifact in enumerate(recent_artifacts):
+        fingerprints = artifact.get("fingerprints")
+        if not isinstance(fingerprints, Mapping):
+            continue
+        if str(fingerprints.get("meter_bpm", "")) != current_meter_bpm:
+            continue
+        candidate_ensemble = _artifact_ensemble_signature(artifact)
+        candidate_status = _status_class(str(artifact.get("status", "")))
+        candidate_run = artifact.get("run")
+        candidate_family = _run_family_token(candidate_run if isinstance(candidate_run, Mapping) else {})
+        ensemble_match = 0 if candidate_ensemble and candidate_ensemble == current_ensemble_signature else 1
+        family_match = 0 if candidate_family and current_family and candidate_family == current_family else 1
+        status_match = 0 if candidate_status == current_status_token else 1
+        rank = (ensemble_match, family_match, status_match, idx)
+        if best_rank is None or rank < best_rank:
+            best_rank = rank
+            best_artifact = artifact
+            best_reason = (
+                f"meter_bpm+ensemble{'' if ensemble_match == 0 else '~'}"
+                f"+family{'' if family_match == 0 else '~'}"
+                f"+status{'' if status_match == 0 else '~'}"
+            )
+
+    return best_artifact, best_reason
+
+
+def _similarity_weight(metric_key: str) -> float:
+    key = str(metric_key).strip().lower()
+    if key == "form_labels":
+        return 0.12
+    if key in {"hat_density_path", "piano_mode_path"}:
+        return 0.08
+    if key.startswith("note_shape:"):
+        return 0.26
+    if key.startswith("style:"):
+        return 0.46
+    return 0.20
 
 
 def _compute_similarity(
@@ -568,7 +655,9 @@ def _compute_similarity(
     if not scores:
         return None, {}, [], None
 
-    overall = sum(scores.values()) / float(len(scores))
+    weights = {key: _similarity_weight(key) for key in scores.keys()}
+    total_weight = max(1e-6, sum(weights.values()))
+    overall = sum(scores[key] * weights[key] for key in scores.keys()) / total_weight
     flags: list[str] = []
     if overall >= 0.90:
         flags.append("overall_structure_highly_similar_to_recent_run")
@@ -648,11 +737,12 @@ def build_composition_artifact(
     root = _repo_root(repo_root)
     now = _utc_now()
     run_id = (
-        f"{now.strftime('%Y%m%dT%H%M%SZ')}"
+        f"{now.strftime('%Y%m%dT%H%M%S%fZ')}"
         f"-{sig_num}_{sig_den}"
         f"-{_safe_bpm_text(bpm)}bpm"
         f"-{_safe_token(str(mood), fallback='mood')}"
-        f"-{_sha256_text(str(now.timestamp()))[:8]}"
+        f"-{_sha256_text(_iso_utc(now))[:8]}"
+        f"-{secrets.token_hex(2)}"
     )
 
     section_count = len(sections)
@@ -669,15 +759,27 @@ def build_composition_artifact(
     )
 
     recent = _load_recent_artifacts(root, limit=50)
-    reference_artifact = _pick_reference_artifact(str(fingerprints["meter_bpm"]), recent)
+    reference_artifact, reference_match = _pick_reference_artifact(
+        current_meter_bpm=str(fingerprints["meter_bpm"]),
+        current_ensemble_signature=str(fingerprints.get("ensemble_signature", "")),
+        current_status=str(status),
+        current_run_metadata=run_metadata,
+        recent_artifacts=recent,
+    )
     reference_fp = reference_artifact.get("fingerprints") if isinstance(reference_artifact, Mapping) else None
     if not isinstance(reference_fp, Mapping):
         reference_fp = None
+    reference_run_id = None
+    if isinstance(reference_artifact, Mapping):
+        reference_run_id = str(reference_artifact.get("run_id", "")).strip() or None
 
     similarity, similarity_breakdown, repetition_flags, reference_fingerprint = _compute_similarity(
         fingerprints,
         reference_fp,
     )
+    similarity_weights = {
+        key: round(_similarity_weight(key), 4) for key in similarity_breakdown.keys()
+    }
 
     novelty_score = None if similarity is None else round(1.0 - similarity, 4)
     track_totals = _track_totals(note_count_paths)
@@ -731,7 +833,10 @@ def build_composition_artifact(
             "novelty_score": novelty_score,
             "similarity_to_reference": similarity,
             "similarity_breakdown": similarity_breakdown,
+            "similarity_weights": similarity_weights,
             "reference_fingerprint": reference_fingerprint,
+            "reference_run_id": reference_run_id,
+            "reference_match": reference_match,
             "repetition_flags": repetition_flags,
             "merit_rubric": merit_rubric,
             "instrument_identity": instrument_identity,
@@ -766,6 +871,16 @@ def persist_artifact(
 
     artifact_rel_path = relative_log_dir / date_part / f"{run_id}.json"
     artifact_abs_path = root / artifact_rel_path
+    if artifact_abs_path.exists():
+        suffix = 1
+        while True:
+            candidate_rel_path = relative_log_dir / date_part / f"{run_id}-{suffix}.json"
+            candidate_abs_path = root / candidate_rel_path
+            if not candidate_abs_path.exists():
+                artifact_rel_path = candidate_rel_path
+                artifact_abs_path = candidate_abs_path
+                break
+            suffix += 1
     _write_json(artifact_abs_path, artifact)
 
     index_abs_path = root / relative_index_path
@@ -784,7 +899,11 @@ def persist_artifact(
         "novelty_score": artifact.get("reflection", {}).get("novelty_score"),
     }
 
-    existing = [item for item in entries if isinstance(item, dict) and item.get("run_id") != run_id]
+    existing = [
+        item
+        for item in entries
+        if isinstance(item, dict) and str(item.get("artifact_path", "")) != str(artifact_rel_path)
+    ]
     updated_entries = [entry] + existing
     updated_entries = updated_entries[:MAX_INDEX_ENTRIES]
 

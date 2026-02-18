@@ -71,6 +71,7 @@ OscAck = Tuple[str, List[bridge.OscArg]]
 PianoMode = Literal["full", "chords", "motion", "out"]
 
 HatDensity = Literal["quarter", "eighth", "sixteenth"]
+SectionProfileFamily = Literal["legacy_arc", "lift_release", "wave_train"]
 
 WriteStrategy = Literal["full_replace", "delta_update"]
 
@@ -174,20 +175,31 @@ class Section:
 def _clamp_ratio(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
-def _section_profile(
+def _section_profile_landmarks(
     index: int,
     total_sections: int,
-) -> tuple[str, bool, bool, bool, PianoMode, float, float, float, HatDensity]:
-    """Return an arc-shaped arrangement profile for the given section index."""
+) -> tuple[int, int]:
     if total_sections <= 0:
         raise ValueError("total_sections must be > 0")
-
     last_index = total_sections - 1
     if total_sections <= 3:
         climax_index = last_index
     else:
         climax_index = max(1, int(math.floor(float(total_sections) * (2.0 / 3.0))))
     pre_climax_index = max(1, climax_index - 1)
+    return pre_climax_index, climax_index
+
+
+def _section_profile_legacy(
+    index: int,
+    total_sections: int,
+) -> tuple[str, bool, bool, bool, PianoMode, float, float, float, HatDensity]:
+    """Return the original arc-shaped arrangement profile."""
+    if total_sections <= 0:
+        raise ValueError("total_sections must be > 0")
+
+    last_index = total_sections - 1
+    pre_climax_index, climax_index = _section_profile_landmarks(index, total_sections)
 
     # Intro: light elements only, with hats marking time gently.
     if index == 0:
@@ -211,7 +223,98 @@ def _section_profile(
 
     return ("afterglow", True, False, True, "chords", 0.75, 0.0, 0.85, "eighth")
 
-def _build_sections(total_bars: int, section_bars: int) -> List[Section]:
+
+def _section_profile_lift_release(
+    index: int,
+    total_sections: int,
+) -> tuple[str, bool, bool, bool, PianoMode, float, float, float, HatDensity]:
+    """Return a profile with clearer harmonic lift and explicit release thinning."""
+    if total_sections <= 0:
+        raise ValueError("total_sections must be > 0")
+    last_index = total_sections - 1
+    pre_climax_index, climax_index = _section_profile_landmarks(index, total_sections)
+
+    if index == 0:
+        return ("intro", False, False, True, "out", 0.0, 0.0, 0.62, "quarter")
+    if index == climax_index:
+        return ("climax", True, True, True, "full", 1.0, 0.85, 1.0, "sixteenth")
+    if index == pre_climax_index:
+        return ("pre_climax", True, False, True, "chords", 0.72, 0.0, 0.95, "eighth")
+    if index >= last_index:
+        return ("release", True, False, True, "out", 0.52, 0.0, 0.58, "quarter")
+    if index < pre_climax_index:
+        return ("build", False, False, True, "motion", 0.0, 0.0, 0.82, "eighth")
+    return ("afterglow", True, False, True, "motion", 0.62, 0.0, 0.72, "eighth")
+
+
+def _section_profile_wave_train(
+    index: int,
+    total_sections: int,
+) -> tuple[str, bool, bool, bool, PianoMode, float, float, float, HatDensity]:
+    """Return a profile with repeating intensity waves before final release."""
+    if total_sections <= 0:
+        raise ValueError("total_sections must be > 0")
+    last_index = total_sections - 1
+    if total_sections <= 3:
+        return _section_profile_legacy(index, total_sections)
+
+    if index == 0:
+        return ("intro", False, False, True, "chords", 0.0, 0.0, 0.70, "quarter")
+    if index >= last_index:
+        return ("release", True, False, True, "out", 0.55, 0.0, 0.62, "quarter")
+    if index == last_index - 1:
+        return ("afterglow", True, False, True, "chords", 0.66, 0.0, 0.74, "eighth")
+
+    phase = (index - 1) % 3
+    if phase == 0:
+        return ("build", False, False, True, "motion", 0.0, 0.0, 0.86, "eighth")
+    if phase == 1:
+        return ("pre_climax", True, False, True, "chords", 0.72, 0.0, 0.96, "eighth")
+    return ("climax", True, True, True, "full", 0.92, 0.72, 1.0, "sixteenth")
+
+
+def _section_profile(
+    index: int,
+    total_sections: int,
+    profile_family: SectionProfileFamily = "legacy_arc",
+) -> tuple[str, bool, bool, bool, PianoMode, float, float, float, HatDensity]:
+    family = str(profile_family).strip().lower()
+    if family == "lift_release":
+        return _section_profile_lift_release(index, total_sections)
+    if family == "wave_train":
+        return _section_profile_wave_train(index, total_sections)
+    return _section_profile_legacy(index, total_sections)
+
+
+def _select_section_profile_family(
+    *,
+    sig_num: int,
+    sig_den: int,
+    bpm: float,
+    mood: str,
+    seed: int,
+) -> SectionProfileFamily:
+    mood_token = str(mood).strip().lower()
+    candidates: tuple[SectionProfileFamily, ...] = ("legacy_arc", "lift_release", "wave_train")
+    if any(token in mood_token for token in ("ambient", "calm", "dream", "soft", "beautiful")):
+        candidates = ("legacy_arc", "lift_release")
+    elif any(token in mood_token for token in ("energetic", "driving", "aggressive", "tense")):
+        candidates = ("wave_train", "legacy_arc")
+    elif float(bpm) >= 132.0:
+        candidates = ("wave_train", "lift_release", "legacy_arc")
+
+    value = _stable_hash_to_unit(seed, sig_num, sig_den, bpm, mood_token, "section_profile_family")
+    pick = int(math.floor(value * len(candidates)))
+    if pick >= len(candidates):
+        pick = len(candidates) - 1
+    return candidates[pick]
+
+
+def _build_sections(
+    total_bars: int,
+    section_bars: int,
+    profile_family: SectionProfileFamily = "legacy_arc",
+) -> List[Section]:
     if total_bars <= 0:
         raise ValueError("total_bars must be > 0")
     if section_bars <= 0:
@@ -234,7 +337,7 @@ def _build_sections(total_bars: int, section_bars: int) -> List[Section]:
             rim_keep_ratio,
             hat_keep_ratio,
             hat_density,
-        ) = _section_profile(index, total_sections)
+        ) = _section_profile(index, total_sections, profile_family=profile_family)
         sections.append(
             Section(
                 index=index,

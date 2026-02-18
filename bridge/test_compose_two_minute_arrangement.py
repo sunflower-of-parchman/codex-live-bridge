@@ -44,6 +44,33 @@ class ArrangementHelpersTests(unittest.TestCase):
         self.assertEqual(last_length, 6 * 6.0)
         self.assertEqual(last_end, last_start + last_length)
 
+    def test_select_section_profile_family_is_deterministic(self) -> None:
+        first = arrangement._select_section_profile_family(
+            sig_num=4,
+            sig_den=4,
+            bpm=120.0,
+            mood="Ambient",
+            seed=17,
+        )
+        second = arrangement._select_section_profile_family(
+            sig_num=4,
+            sig_den=4,
+            bpm=120.0,
+            mood="Ambient",
+            seed=17,
+        )
+        self.assertEqual(first, second)
+        self.assertIn(first, {"legacy_arc", "lift_release", "wave_train"})
+
+    def test_build_sections_lift_release_includes_out_or_motion_piano_modes(self) -> None:
+        sections = arrangement._build_sections(
+            total_bars=24,
+            section_bars=4,
+            profile_family="lift_release",
+        )
+        modes = {str(section.piano_mode) for section in sections}
+        self.assertTrue({"out", "motion"} & modes)
+
     def test_slice_and_clamp_shifts_to_section_time_and_limits_duration(self) -> None:
         notes = [
             {"pitch": 60, "start_time": 5.5, "duration": 2.0, "velocity": 100, "mute": 0},
@@ -135,6 +162,8 @@ class ArrangementHelpersTests(unittest.TestCase):
             [
                 "--marimba-identity-path",
                 "bridge/config/marimba_identity.v1.json",
+                "--marimba-family",
+                "evolving_ostinato",
                 "--marimba-strategy",
                 "broken_resonance",
                 "--marimba-pair-mode",
@@ -146,10 +175,15 @@ class ArrangementHelpersTests(unittest.TestCase):
             ]
         )
         self.assertEqual(cfg.marimba_identity_path, "bridge/config/marimba_identity.v1.json")
+        self.assertEqual(cfg.marimba_family, "evolving_ostinato")
         self.assertEqual(cfg.marimba_strategy, "broken_resonance")
         self.assertEqual(cfg.marimba_pair_mode, "attack_answer")
         self.assertEqual(cfg.focus, "Marimba")
         self.assertEqual(cfg.pair, "Vibraphone")
+
+    def test_parse_args_accepts_marimba_family(self) -> None:
+        cfg = arrangement.parse_args(["--marimba-family", "left_hand_ostinato_right_hand_melody"])
+        self.assertEqual(cfg.marimba_family, "left_hand_ostinato_right_hand_melody")
 
     def test_parse_args_accepts_chord_bloom_marimba_strategy(self) -> None:
         cfg = arrangement.parse_args(["--marimba-strategy", "chord_bloom"])
@@ -643,6 +677,7 @@ class ArrangementHelpersTests(unittest.TestCase):
             bpm=92.0,
             identity=identity,
             requested_strategy="ostinato_pulse",
+            requested_family="auto",
             key_name="G# minor",
             pair_mode="attack_answer",
             focus_track="Marimba",
@@ -716,6 +751,7 @@ class ArrangementHelpersTests(unittest.TestCase):
             bpm=112.0,
             identity=identity,
             requested_strategy="auto",
+            requested_family="auto",
             key_name="D minor",
             pair_mode="off",
             focus_track="Marimba",
@@ -849,6 +885,7 @@ class ArrangementHelpersTests(unittest.TestCase):
             bpm=128.0,
             identity=identity,
             requested_strategy="auto",
+            requested_family="auto",
             key_name="G# minor",
             pair_mode="off",
             focus_track="Marimba",
@@ -952,6 +989,7 @@ class ArrangementHelpersTests(unittest.TestCase):
             bpm=120.0,
             identity=identity,
             requested_strategy="chord_bloom",
+            requested_family="auto",
             key_name="D minor",
             pair_mode="off",
             focus_track="Marimba",
@@ -959,7 +997,9 @@ class ArrangementHelpersTests(unittest.TestCase):
         )
 
         self.assertTrue(meta["enabled"])
-        self.assertEqual(meta["composition_family"], "legacy_sectional")
+        self.assertEqual(meta["composition_family"], "left_hand_ostinato_right_hand_melody")
+        self.assertEqual(meta["strategy_layer_mode"], "family_plus_micro")
+        self.assertIn("left_hand_ostinato_right_hand_melody", meta["strategy_usage"])
         self.assertIn("chord_bloom", meta["strategy_usage"])
 
         marimba_out = updated["Marimba"]
@@ -1192,6 +1232,7 @@ class ArrangementHelpersTests(unittest.TestCase):
                 bars=8,
                 section_bars=4,
                 start_beats=0.0,
+                section_profile_family="lift_release",
                 registry_path=pathlib.Path("bridge/config/instrument_registry.v1.json"),
                 track_naming_mode="slot",
                 sections=sections,
@@ -1203,11 +1244,13 @@ class ArrangementHelpersTests(unittest.TestCase):
             raw = json.loads(print_path.read_text(encoding="utf-8"))
             self.assertEqual(raw["run_label"], "4_120")
             self.assertEqual(raw["composition"]["bpm"], 120.0)
+            self.assertEqual(raw["section_profile_family"], "lift_release")
 
             loaded = arrangement._load_composition_print(print_path)
             loaded_sections = loaded["sections"]
             loaded_arranged = loaded["arranged_by_track"]
             self.assertEqual(len(loaded_sections), 2)
+            self.assertEqual(loaded["section_profile_family"], "lift_release")
             self.assertEqual(loaded_sections[0].label, sections[0].label)
             self.assertEqual(len(loaded_arranged["Kick Drum"]), 2)
             self.assertEqual(loaded_arranged["Kick Drum"][0][1][0]["pitch"], 36)

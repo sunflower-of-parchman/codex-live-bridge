@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Sequence
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 
@@ -142,12 +144,103 @@ class CompositionFeedbackLoopTests(unittest.TestCase):
             self.assertIn("-4_4-120bpm-ambient-", artifact["run_id"])
             self.assertIn("merit_rubric", artifact["reflection"])
             self.assertIn("instrument_diversity_proxy", artifact["reflection"]["merit_rubric"])
+            self.assertIn("similarity_weights", artifact["reflection"])
 
             index_path = root / feedback.DEFAULT_RELATIVE_INDEX_PATH
             self.assertTrue(index_path.exists())
             entries = feedback._load_json(index_path, {}).get("entries", [])
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["run_id"], artifact["run_id"])
+
+    def test_same_second_runs_get_unique_run_ids_and_index_entries(self) -> None:
+        sections = [
+            _Section(index=0, label="intro", piano_mode="chords", hat_density="quarter"),
+            _Section(index=1, label="build", piano_mode="chords", hat_density="eighth"),
+            _Section(index=2, label="release", piano_mode="chords", hat_density="quarter"),
+        ]
+        fixed_now = datetime(2026, 2, 18, 23, 10, 0, 123456, tzinfo=timezone.utc)
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                mock.patch.object(feedback, "_utc_now", return_value=fixed_now),
+                mock.patch.object(feedback.secrets, "token_hex", side_effect=["a1b2", "c3d4"]),
+            ):
+                first, first_path = feedback.log_composition_run(
+                    mood="Ambient",
+                    key_name="D minor",
+                    bpm=120.0,
+                    sig_num=4,
+                    sig_den=4,
+                    minutes=2.0,
+                    bars=24,
+                    section_bars=8,
+                    sections=sections,
+                    arranged_by_track=_arranged_payload(sections),
+                    created_clips_by_track={"Kick Drum": 3, "RIM": 3, "HAT": 3, "Piano": 3},
+                    status="success",
+                    repo_root=root,
+                )
+                second, second_path = feedback.log_composition_run(
+                    mood="Ambient",
+                    key_name="D minor",
+                    bpm=120.0,
+                    sig_num=4,
+                    sig_den=4,
+                    minutes=2.0,
+                    bars=24,
+                    section_bars=8,
+                    sections=sections,
+                    arranged_by_track=_arranged_payload(sections),
+                    created_clips_by_track={"Kick Drum": 3, "RIM": 3, "HAT": 3, "Piano": 3},
+                    status="success",
+                    repo_root=root,
+                )
+
+            self.assertNotEqual(first["run_id"], second["run_id"])
+            self.assertNotEqual(first_path, second_path)
+            entries = feedback._load_json(root / feedback.DEFAULT_RELATIVE_INDEX_PATH, {}).get("entries", [])
+            self.assertEqual(len(entries), 2)
+
+    def test_reference_selection_prefers_matching_ensemble_signature(self) -> None:
+        current = {
+            "fingerprints": {
+                "meter_bpm": "4/4@120",
+                "note_count_paths": {"Marimba": [4, 6, 8]},
+                "ensemble_signature": "marimba",
+            },
+            "status": "success",
+            "run": {"marimba_runtime": {"composition_family": "left_hand_ostinato_right_hand_melody"}},
+        }
+        candidate_meter_only = {
+            "fingerprints": {
+                "meter_bpm": "4/4@120",
+                "note_count_paths": {"Piano": [4, 6, 8]},
+                "ensemble_signature": "piano",
+            },
+            "status": "success",
+            "run": {},
+        }
+        candidate_ensemble_match = {
+            "fingerprints": {
+                "meter_bpm": "4/4@120",
+                "note_count_paths": {"Marimba": [5, 7, 9]},
+                "ensemble_signature": "marimba",
+            },
+            "status": "success",
+            "run": {},
+        }
+
+        picked, reason = feedback._pick_reference_artifact(
+            current_meter_bpm="4/4@120",
+            current_ensemble_signature="marimba",
+            current_status="success",
+            current_run_metadata=current["run"],
+            recent_artifacts=[candidate_meter_only, candidate_ensemble_match],
+        )
+        self.assertIsNotNone(picked)
+        self.assertIs(picked, candidate_ensemble_match)
+        self.assertIsNotNone(reason)
 
     def test_second_similar_run_reports_repetition_flags(self) -> None:
         sections = [

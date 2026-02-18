@@ -775,6 +775,57 @@ def _strategy_for_section(
         return "broken_resonance"
     return str(identity.strategy_default or "ostinato_pulse")
 
+
+def _apply_marimba_strategy_raw(
+    *,
+    resolved_name: str,
+    seed_notes: Sequence[dict],
+    section: Section,
+    beats_per_bar: float,
+    beat_step: float,
+    strategy: Mapping[str, Any],
+    constraints: Mapping[str, Any],
+    midi_min_pitch: int,
+    midi_max_pitch: int,
+) -> List[dict]:
+    if resolved_name == "broken_resonance":
+        return _marimba_strategy_broken_resonance(
+            seed_notes,
+            section=section,
+            beats_per_bar=beats_per_bar,
+            beat_step=beat_step,
+            strategy=strategy,
+            midi_min_pitch=midi_min_pitch,
+            midi_max_pitch=midi_max_pitch,
+        )
+    if resolved_name == "lyrical_roll":
+        return _marimba_strategy_lyrical_roll(
+            seed_notes,
+            strategy=strategy,
+            midi_min_pitch=midi_min_pitch,
+            midi_max_pitch=midi_max_pitch,
+        )
+    if resolved_name == "chord_bloom":
+        return _marimba_strategy_chord_bloom(
+            seed_notes,
+            section=section,
+            beats_per_bar=beats_per_bar,
+            beat_step=beat_step,
+            strategy=strategy,
+            midi_min_pitch=midi_min_pitch,
+            midi_max_pitch=midi_max_pitch,
+        )
+    return _marimba_strategy_ostinato(
+        seed_notes,
+        section=section,
+        beats_per_bar=beats_per_bar,
+        beat_step=beat_step,
+        strategy=strategy,
+        constraints=constraints,
+        midi_min_pitch=midi_min_pitch,
+        midi_max_pitch=midi_max_pitch,
+    )
+
 def _marimba_strategy_ostinato(
     notes: Sequence[dict],
     *,
@@ -1076,6 +1127,7 @@ def _apply_marimba_identity(
     beat_step: float,
     identity: MarimbaIdentityConfig | None,
     requested_strategy: str,
+    requested_family: str,
     key_name: str,
     pair_mode: MarimbaPairMode,
     focus_track: str | None,
@@ -1128,10 +1180,13 @@ def _apply_marimba_identity(
 
     requested_strategy_token = str(requested_strategy or "").strip().lower()
     explicit_strategy_requested = requested_strategy_token not in {"", "auto"}
-    composition_family = str(identity.payload.get("composition_family_default", "legacy_sectional")).strip().lower()
-    strategy_override_names = {"ostinato_pulse", "broken_resonance", "lyrical_roll", "chord_bloom"}
-    if explicit_strategy_requested and requested_strategy_token in strategy_override_names:
-        # Explicit strategy requests should take precedence over family defaults.
+    requested_family_token = str(requested_family or "").strip().lower()
+    default_family = str(identity.payload.get("composition_family_default", "legacy_sectional")).strip().lower()
+    composition_family = default_family
+    if requested_family_token not in {"", "auto"}:
+        composition_family = requested_family_token
+    valid_families = {"legacy_sectional", "evolving_ostinato", "left_hand_ostinato_right_hand_melody"}
+    if composition_family not in valid_families:
         composition_family = "legacy_sectional"
     hand_model = str(identity.payload.get("hand_model_default", "four_mallet")).strip().lower()
     if hand_model not in {"two_mallet", "four_mallet"}:
@@ -1154,8 +1209,23 @@ def _apply_marimba_identity(
     max_simultaneous = 2 if hand_model == "two_mallet" else 4
 
     strategy_usage: dict[str, int] = {}
+    layer_mode = "sectional_only"
     marimba_payload = copied.get(marimba_key, [])
+    harmony_blocks: list[tuple[int, int, int]] = []
+    form_arc_raw = identity.payload.get("form_arc", {})
+    if not isinstance(form_arc_raw, Mapping):
+        form_arc_raw = {}
+    form_arc_enabled = bool(form_arc_raw.get("enabled", True))
+    form_arc_peak_ratio = float(form_arc_raw.get("peak_ratio", 0.68))
+    density_start_scale = float(form_arc_raw.get("density_start_scale", 0.8))
+    density_peak_scale = float(form_arc_raw.get("density_peak_scale", 1.0))
+    density_end_scale = float(form_arc_raw.get("density_end_scale", 0.78))
+    velocity_start_scale = float(form_arc_raw.get("velocity_start_scale", 0.9))
+    velocity_peak_scale = float(form_arc_raw.get("velocity_peak_scale", 1.15))
+    velocity_end_scale = float(form_arc_raw.get("velocity_end_scale", 0.9))
+
     if composition_family in {"evolving_ostinato", "left_hand_ostinato_right_hand_melody"} and sections:
+        layer_mode = "family_plus_micro"
         total_bars = sum(max(1, int(section.bar_count)) for section in sections)
         windows = _mutation_windows(total_bars, mutation_window_bars)
         progression = _harmony_degree_cycle(harmony_motion_profile)
@@ -1196,6 +1266,61 @@ def _apply_marimba_identity(
             grid_step_beats=rhythm_step_beats,
             clip_length_beats=float(total_bars) * float(beats_per_bar),
         )
+        family_payload = _split_timeline_notes_by_sections(
+            timeline_notes,
+            sections=sections,
+            beats_per_bar=beats_per_bar,
+            grid_step_beats=rhythm_step_beats,
+        )
+        layered_payload: list[tuple[Section, List[dict]]] = []
+        for idx, (section, notes) in enumerate(family_payload):
+            seed_notes = [dict(n) for n in notes]
+            if not seed_notes:
+                seed_notes = _seed_notes_for_section(
+                    copied,
+                    idx,
+                    preferred_tracks=("Piano", "Rhodes", "Vibraphone", "Acoustic Guitar"),
+                )
+            if not seed_notes:
+                seed_notes = [
+                    {
+                        "pitch": 72,
+                        "start_time": 0.0,
+                        "duration": max(beat_step, 0.5),
+                        "velocity": 96,
+                        "mute": 0,
+                    }
+                ]
+            resolved_name, strategy = _extract_strategy(
+                identity,
+                _strategy_for_section(section, requested_strategy, identity),
+            )
+            strategy_usage[resolved_name] = strategy_usage.get(resolved_name, 0) + 1
+            shaped = _apply_marimba_strategy_raw(
+                resolved_name=resolved_name,
+                seed_notes=seed_notes,
+                section=section,
+                beats_per_bar=beats_per_bar,
+                beat_step=beat_step,
+                strategy=strategy,
+                constraints=constraints,
+                midi_min_pitch=marimba_spec.midi_min_pitch,
+                midi_max_pitch=marimba_spec.midi_max_pitch,
+            )
+            if not shaped:
+                shaped = [dict(n) for n in seed_notes]
+            layered_payload.append((section, shaped))
+
+        strategy_usage[composition_family] = len(sections)
+        timeline_notes = _merge_section_notes_to_timeline(
+            layered_payload,
+            beats_per_bar=beats_per_bar,
+        )
+        timeline_notes = _quantize_notes_to_grid(
+            timeline_notes,
+            grid_step_beats=rhythm_step_beats,
+            clip_length_beats=float(total_bars) * float(beats_per_bar),
+        )
         timeline_notes = _enforce_max_leap(
             timeline_notes,
             max_leap_semitones=max_leap,
@@ -1208,17 +1333,6 @@ def _apply_marimba_identity(
             midi_min_pitch=marimba_spec.midi_min_pitch,
             midi_max_pitch=marimba_spec.midi_max_pitch,
         )
-        form_arc_raw = identity.payload.get("form_arc", {})
-        if not isinstance(form_arc_raw, Mapping):
-            form_arc_raw = {}
-        form_arc_enabled = bool(form_arc_raw.get("enabled", True))
-        form_arc_peak_ratio = float(form_arc_raw.get("peak_ratio", 0.68))
-        density_start_scale = float(form_arc_raw.get("density_start_scale", 0.8))
-        density_peak_scale = float(form_arc_raw.get("density_peak_scale", 1.0))
-        density_end_scale = float(form_arc_raw.get("density_end_scale", 0.78))
-        velocity_start_scale = float(form_arc_raw.get("velocity_start_scale", 0.9))
-        velocity_peak_scale = float(form_arc_raw.get("velocity_peak_scale", 1.15))
-        velocity_end_scale = float(form_arc_raw.get("velocity_end_scale", 0.9))
         if form_arc_enabled:
             timeline_notes = _apply_form_arc(
                 timeline_notes,
@@ -1245,9 +1359,8 @@ def _apply_marimba_identity(
             timeline_notes,
             sections=sections,
             beats_per_bar=beats_per_bar,
-            grid_step_beats=grid_step_beats,
+            grid_step_beats=rhythm_step_beats,
         )
-        strategy_usage[composition_family] = len(sections)
     else:
         harmony_blocks = []
         form_arc_enabled = False
@@ -1276,44 +1389,17 @@ def _apply_marimba_identity(
                 _strategy_for_section(section, requested_strategy, identity),
             )
             strategy_usage[resolved_name] = strategy_usage.get(resolved_name, 0) + 1
-            if resolved_name == "broken_resonance":
-                shaped = _marimba_strategy_broken_resonance(
-                    seed_notes,
-                    section=section,
-                    beats_per_bar=beats_per_bar,
-                    beat_step=beat_step,
-                    strategy=strategy,
-                    midi_min_pitch=marimba_spec.midi_min_pitch,
-                    midi_max_pitch=marimba_spec.midi_max_pitch,
-                )
-            elif resolved_name == "lyrical_roll":
-                shaped = _marimba_strategy_lyrical_roll(
-                    seed_notes,
-                    strategy=strategy,
-                    midi_min_pitch=marimba_spec.midi_min_pitch,
-                    midi_max_pitch=marimba_spec.midi_max_pitch,
-                )
-            elif resolved_name == "chord_bloom":
-                shaped = _marimba_strategy_chord_bloom(
-                    seed_notes,
-                    section=section,
-                    beats_per_bar=beats_per_bar,
-                    beat_step=beat_step,
-                    strategy=strategy,
-                    midi_min_pitch=marimba_spec.midi_min_pitch,
-                    midi_max_pitch=marimba_spec.midi_max_pitch,
-                )
-            else:
-                shaped = _marimba_strategy_ostinato(
-                    seed_notes,
-                    section=section,
-                    beats_per_bar=beats_per_bar,
-                    beat_step=beat_step,
-                    strategy=strategy,
-                    constraints=constraints,
-                    midi_min_pitch=marimba_spec.midi_min_pitch,
-                    midi_max_pitch=marimba_spec.midi_max_pitch,
-                )
+            shaped = _apply_marimba_strategy_raw(
+                resolved_name=resolved_name,
+                seed_notes=seed_notes,
+                section=section,
+                beats_per_bar=beats_per_bar,
+                beat_step=beat_step,
+                strategy=strategy,
+                constraints=constraints,
+                midi_min_pitch=marimba_spec.midi_min_pitch,
+                midi_max_pitch=marimba_spec.midi_max_pitch,
+            )
 
             shaped = _enforce_max_leap(
                 shaped,
@@ -1365,8 +1451,11 @@ def _apply_marimba_identity(
         "marimba_track": marimba_key,
         "pair_track": pair_key,
         "requested_strategy": requested_strategy,
+        "requested_family": requested_family,
         "resolved_pair_mode": resolved_pair_mode,
         "composition_family": composition_family,
+        "strategy_layer_mode": layer_mode,
+        "explicit_strategy_requested": bool(explicit_strategy_requested),
         "hand_model": hand_model,
         "grid_step_beats": float(grid_step_beats),
         "rhythm_step_beats": float(rhythm_step_beats),

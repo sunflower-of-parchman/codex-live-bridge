@@ -409,6 +409,7 @@ def run(cfg: ArrangementConfig) -> int:
     source_print_path: str | None = None
     multi_pass_reports: list[dict[str, Any]] = []
     marimba_runtime_meta: dict[str, Any] = {"enabled": False, "status": "not_applied"}
+    section_profile_family = "legacy_arc"
     force_active: list[str] = []
     if cfg.focus:
         force_active.append(cfg.focus)
@@ -437,6 +438,9 @@ def run(cfg: ArrangementConfig) -> int:
             bars = 0
         sections = loaded["sections"]
         arranged_by_track = loaded["arranged_by_track"]
+        loaded_family = str(loaded.get("section_profile_family", "")).strip().lower()
+        if loaded_family in {"legacy_arc", "lift_release", "wave_train"}:
+            section_profile_family = loaded_family
         run_label = str(loaded.get("run_label", "")).strip() or _run_label(
             run_sig_num,
             run_sig_den,
@@ -482,7 +486,18 @@ def run(cfg: ArrangementConfig) -> int:
         )
         bars = _bars_for_minutes(run_bpm, beats_per_bar, selected_minutes)
         clip_length = float(bars) * float(beats_per_bar)
-        sections = _build_sections(bars, run_section_bars)
+        section_profile_family = _select_section_profile_family(
+            sig_num=run_sig_num,
+            sig_den=run_sig_den,
+            bpm=run_bpm,
+            mood=run_mood,
+            seed=cfg.duration_seed,
+        )
+        sections = _build_sections(
+            bars,
+            run_section_bars,
+            profile_family=section_profile_family,
+        )
         sources = _build_source_sections(
             sections=sections,
             bars=bars,
@@ -525,6 +540,7 @@ def run(cfg: ArrangementConfig) -> int:
         beat_step=beat_step,
         identity=marimba_identity,
         requested_strategy=cfg.marimba_strategy,
+        requested_family=cfg.marimba_family,
         key_name=run_key_name,
         pair_mode=cfg.marimba_pair_mode,
         focus_track=cfg.focus,
@@ -556,6 +572,7 @@ def run(cfg: ArrangementConfig) -> int:
                 bars=bars,
                 section_bars=run_section_bars,
                 start_beats=run_start_beats,
+                section_profile_family=section_profile_family,
                 registry_path=registry_path,
                 track_naming_mode=cfg.track_naming_mode,
                 sections=sections,
@@ -592,6 +609,8 @@ def run(cfg: ArrangementConfig) -> int:
         print(f"- instruments: {len(specs)} (registry: {registry_path})")
         print(f"- track names: {cfg.track_naming_mode}")
         print(f"- clip mode:   {cfg.clip_write_mode}")
+        print(f"- form family: {section_profile_family}")
+        print(f"- marimba family: {cfg.marimba_family}")
         print(f"- marimba strategy: {cfg.marimba_strategy}")
         print(f"- marimba pair: {cfg.marimba_pair_mode}")
         print(f"- multi-pass:  {'on' if cfg.multi_pass_enabled else 'off'} ({cfg.composition_passes} pass(es))")
@@ -635,6 +654,7 @@ def run(cfg: ArrangementConfig) -> int:
                         "save_policy": cfg.save_policy,
                         "instrument_count": len(specs),
                         "run_label": run_label,
+                        "section_profile_family": section_profile_family,
                         "marimba_runtime": marimba_runtime_meta,
                         "multi_pass_enabled": cfg.multi_pass_enabled,
                         "composition_passes": cfg.composition_passes,
@@ -775,6 +795,8 @@ def run(cfg: ArrangementConfig) -> int:
         print(f"- sections:    {len(sections)} x ~{run_section_bars} bars")
         print(f"- instruments: {len(specs)} (registry: {registry_path})")
         print(f"- track names: {cfg.track_naming_mode}")
+        print(f"- form family: {section_profile_family}")
+        print(f"- marimba family: {cfg.marimba_family}")
         print(f"- marimba strategy: {cfg.marimba_strategy}")
         print(f"- marimba pair: {cfg.marimba_pair_mode}")
         print(f"- multi-pass:  {'on' if cfg.multi_pass_enabled else 'off'} ({cfg.composition_passes} pass(es))")
@@ -1140,6 +1162,7 @@ def run(cfg: ArrangementConfig) -> int:
                     "minutes_max": cfg.minutes_max,
                     "selected_minutes": selected_minutes,
                     "run_label": run_label,
+                    "section_profile_family": section_profile_family,
                     "save": save_result,
                     "instrument_count": len(specs),
                     "registry_path": str(registry_path),

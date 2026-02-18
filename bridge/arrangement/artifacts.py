@@ -126,6 +126,7 @@ def _persist_composition_print(
     bars: int,
     section_bars: int,
     start_beats: float,
+    section_profile_family: str | None,
     registry_path: Path,
     track_naming_mode: str,
     sections: Sequence[Section],
@@ -154,6 +155,7 @@ def _persist_composition_print(
             "section_bars": int(section_bars),
             "start_beats": float(start_beats),
         },
+        "section_profile_family": str(section_profile_family or "").strip() or "legacy_arc",
         "registry_path": str(registry_path),
         "track_naming_mode": str(track_naming_mode),
         "sections": [_serialize_section(section) for section in sections],
@@ -184,6 +186,7 @@ def _load_composition_print(path: Path) -> dict[str, Any]:
     return {
         "run_label": str(raw.get("run_label", "")),
         "composition": composition,
+        "section_profile_family": str(raw.get("section_profile_family", "")).strip() or "legacy_arc",
         "sections": sections,
         "arranged_by_track": arranged_by_track,
         "source_path": str(path),
