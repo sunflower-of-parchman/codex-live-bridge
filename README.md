@@ -52,10 +52,11 @@ Live Object Model reference:
 A supported usage pattern in this repo is:
 
 1. Keep track 1 in Ableton Live as `codex-bridge` (control/bridge, no instrument).
-2. Put the first active instrument on track 2 (current default: `Marimba`).
-3. Choose meter, BPM, mood, and key, then compose with workflow scripts.
-4. Review eval artifacts, adjust constraints/guidance, and compose again.
-5. Grow the ensemble one instrument at a time by updating registry/config and repeating the same compose+eval loop.
+2. Put `Marimba` on track 2.
+3. Put `Piano` on track 3.
+4. Choose meter, BPM, mood, and key, then compose with workflow scripts.
+5. Review eval artifacts, adjust constraints/guidance, and compose again.
+6. Grow the ensemble one instrument at a time by updating registry/config and repeating the same compose+eval loop.
 
 This pattern is implemented by shipped scripts such as
 `bridge/setup_marimba_environment.py`, `bridge/compose_arrangement.py`,
@@ -63,6 +64,19 @@ This pattern is implemented by shipped scripts such as
 
 Current runtime default registry is marimba-only:
 `bridge/config/instrument_registry.marimba.v1.json`.
+
+Two-instrument marimba+piano registry:
+`bridge/config/instrument_registry.marimba_piano.v1.json`.
+
+## Current Composition Architecture
+
+The current runtime uses layered composition decisions:
+
+1. Macro form family (`legacy_arc`, `lift_release`, `wave_train`) is selected per run.
+2. Section builder emits section labels plus per-section behavior paths (`piano_mode`, `hat_density`, keep-ratios).
+3. Instrument registry maps source materials (`piano_chords`, `piano_motion`, drums) to named tracks.
+4. Marimba identity applies family-level shaping plus micro strategy routing (`ostinato_pulse`, `broken_resonance`, `chord_bloom`, `lyrical_roll`).
+5. Eval logging records run metadata, fingerprints, and reflection for next-run adaptation.
 
 ## Current Eval Coverage
 
@@ -78,8 +92,10 @@ Current artifact fields include:
 
 Similarity/novelty behavior:
 
-- compares current fingerprint to a recent reference run (prefers same meter+BPM)
-- computes `similarity_to_reference` and `novelty_score = 1 - similarity`
+- compares current fingerprint to a recent reference run using meter+BPM, ensemble signature, run family, and run status
+- computes weighted `similarity_to_reference` and `novelty_score = 1 - similarity`
+- records `reference_run_id`, `reference_match`, and `similarity_weights` in reflection
+- uses high-resolution run IDs and collision-safe artifact paths
 - emits repetition flags when trajectories repeat:
   - `overall_structure_highly_similar_to_recent_run`
   - `hat_density_trajectory_repeated`
@@ -190,7 +206,7 @@ ACK behavior:
 - `bridge/compose_hat_pattern.py`: hat arrangement clip writer
 - `bridge/compose_piano_pattern.py`: piano arrangement clip writer
 - `bridge/compose_codex_arpeggio.py`: demo session-clip arpeggio writer
-- `bridge/run_next_track.py`: high-level next-track orchestration wrapper
+- `bridge/run_next_track.py`: high-level next-track orchestration wrapper (supports `--instrument-registry-path`)
 - `bridge/dump_marimba_params.py`: dump exposed device parameter values via
   `/api/*`
 - `bridge/full_surface_smoke_test.py`: full-surface bridge smoke script
@@ -220,6 +236,11 @@ python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature --
 4. Optional composition example:
 ```bash
 python3 bridge/compose_arrangement.py --minutes 1
+```
+
+5. Optional two-instrument composition example:
+```bash
+python3 bridge/compose_arrangement.py --minutes 2 --instrument-registry-path bridge/config/instrument_registry.marimba_piano.v1.json
 ```
 
 ## Source Editing

@@ -93,6 +93,24 @@ class RunNextTrackTests(unittest.TestCase):
         seed_idx = compose_argv.index("--duration-seed")
         self.assertEqual(compose_argv[seed_idx + 1], "123456")
 
+    def test_compose_args_honors_custom_registry_path(self) -> None:
+        ns = runner.parse_args(
+            [
+                "--bpm",
+                "96",
+                "--meter",
+                "4/4",
+                "--instrument-registry-path",
+                "bridge/config/instrument_registry.marimba_piano.v1.json",
+            ]
+        )
+        compose_argv = runner._compose_args(ns)
+        registry_idx = compose_argv.index("--instrument-registry-path")
+        self.assertEqual(
+            compose_argv[registry_idx + 1],
+            "bridge/config/instrument_registry.marimba_piano.v1.json",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

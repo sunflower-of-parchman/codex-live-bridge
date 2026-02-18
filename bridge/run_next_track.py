@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a complete next-track workflow with a direct marimba composition."""
+"""Run a complete next-track workflow with direct arrangement composition."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         "--minutes",
         type=float,
         default=5.0,
-        help="Target minutes for the Marimba setup clip and composition",
+        help="Target minutes for the setup clip and composition",
     )
     parser.add_argument(
         "--track-name",
@@ -78,6 +78,11 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         choices=("auto", "off", "attack_answer"),
         default="auto",
         help="Marimba pair mode",
+    )
+    parser.add_argument(
+        "--instrument-registry-path",
+        default=str(DEFAULT_MARIMBA_REGISTRY_PATH),
+        help="Instrument registry path for composition (default: marimba-only registry)",
     )
     parser.add_argument(
         "--no-write-cache",
@@ -129,7 +134,7 @@ def _compose_args(ns: argparse.Namespace) -> list[str]:
         "--marimba-pair-mode",
         ns.marimba_pair_mode,
         "--instrument-registry-path",
-        str(DEFAULT_MARIMBA_REGISTRY_PATH),
+        str(ns.instrument_registry_path),
         "--clip-write-mode",
         "single_clip",
         "--no-write-cache",

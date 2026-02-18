@@ -535,6 +535,15 @@ class ArrangementHelpersTests(unittest.TestCase):
         self.assertEqual(specs[0].midi_min_pitch, 24)
         self.assertEqual(specs[0].midi_max_pitch, 48)
 
+    def test_load_instrument_registry_marimba_piano_registry(self) -> None:
+        path = pathlib.Path(__file__).resolve().parent / "config" / "instrument_registry.marimba_piano.v1.json"
+        specs = arrangement._load_instrument_registry(path)
+        self.assertEqual([spec.name for spec in specs], ["Marimba", "Piano"])
+        self.assertEqual(specs[0].source, "piano_chords")
+        self.assertEqual(specs[1].source, "piano_chords")
+        self.assertTrue(specs[0].required)
+        self.assertTrue(specs[1].required)
+
     def test_fit_pitch_to_register_preserves_pitch_class_when_possible(self) -> None:
         # C6 should fold down by octaves into the target range as C4.
         self.assertEqual(arrangement._fit_pitch_to_register(84, 48, 60), 60)
