@@ -487,7 +487,7 @@ def _load_instrument_registry(path: Path) -> List[InstrumentSpec]:
         seen.add(name)
 
         source = str(entry.get("source", "")).strip().lower()
-        if source not in {"kick", "rim", "hat", "piano_chords", "piano_motion"}:
+        if source not in {"kick", "rim", "hat", "piano_chords", "piano_motion", "piano_layers"}:
             raise ValueError(f"unsupported source '{source}' for instrument '{name}'")
 
         role = str(entry.get("role", "support")).strip().lower() or "support"
@@ -1001,12 +1001,20 @@ def _build_source_sections(
         beats_per_bar,
         beat_step,
     )
+    piano_layers = _arrange_piano(
+        chord_notes,
+        motion_notes,
+        sections,
+        beats_per_bar,
+        beat_step,
+    )
     return {
         "kick": kick_sections,
         "rim": rim_sections,
         "hat": hat_sections,
         "piano_chords": piano_chords,
         "piano_motion": piano_motion,
+        "piano_layers": piano_layers,
     }
 
 def _arrange_from_registry(

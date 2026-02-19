@@ -20,7 +20,7 @@
     },
     {
       "name": "Piano",
-      "source": "piano_chords",
+      "source": "piano_layers",
       "role": "harmony_anchor",
       "priority": 2,
       "required": true,

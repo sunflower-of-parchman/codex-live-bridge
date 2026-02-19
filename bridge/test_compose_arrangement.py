@@ -540,9 +540,29 @@ class ArrangementHelpersTests(unittest.TestCase):
         specs = arrangement._load_instrument_registry(path)
         self.assertEqual([spec.name for spec in specs], ["Marimba", "Piano"])
         self.assertEqual(specs[0].source, "piano_chords")
-        self.assertEqual(specs[1].source, "piano_chords")
+        self.assertEqual(specs[1].source, "piano_layers")
         self.assertTrue(specs[0].required)
         self.assertTrue(specs[1].required)
+
+    def test_build_source_sections_include_piano_layers_with_motion_and_chords(self) -> None:
+        sections = arrangement._build_sections(
+            total_bars=32,
+            section_bars=4,
+            profile_family="wave_train",
+        )
+        sources = arrangement._build_source_sections(
+            sections=sections,
+            bars=32,
+            beats_per_bar=5.0,
+            beat_step=1.0,
+            transpose_semitones=2,
+        )
+        self.assertIn("piano_layers", sources)
+
+        layers = sources["piano_layers"]
+        mode_note_counts = {section.piano_mode: len(notes) for section, notes in layers}
+        self.assertGreater(mode_note_counts.get("chords", 0), 0)
+        self.assertGreater(mode_note_counts.get("motion", 0), 0)
 
     def test_fit_pitch_to_register_preserves_pitch_class_when_possible(self) -> None:
         # C6 should fold down by octaves into the target range as C4.
