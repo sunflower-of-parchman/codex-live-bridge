@@ -60,6 +60,40 @@ def _arranged_payload(
     }
 
 
+def _piano_variation_payload(
+    sections: Sequence[_Section],
+) -> dict[str, list[tuple[_Section, list[dict[str, float | int]]]]]:
+    return {
+        "Piano": [
+            (
+                sections[0],
+                [
+                    {"pitch": 48, "start_time": 0.0, "duration": 4.5, "velocity": 72, "mute": 0},
+                    {"pitch": 64, "start_time": 0.25, "duration": 0.25, "velocity": 84, "mute": 0},
+                    {"pitch": 67, "start_time": 3.0, "duration": 4.0, "velocity": 80, "mute": 0},
+                ],
+            ),
+            (
+                sections[1],
+                [
+                    {"pitch": 50, "start_time": 0.0, "duration": 4.0, "velocity": 74, "mute": 0},
+                    {"pitch": 64, "start_time": 0.5, "duration": 0.5, "velocity": 86, "mute": 0},
+                    {"pitch": 69, "start_time": 1.25, "duration": 0.25, "velocity": 82, "mute": 0},
+                    {"pitch": 71, "start_time": 2.5, "duration": 3.5, "velocity": 78, "mute": 0},
+                ],
+            ),
+            (
+                sections[2],
+                [
+                    {"pitch": 52, "start_time": 0.0, "duration": 4.0, "velocity": 70, "mute": 0},
+                    {"pitch": 64, "start_time": 0.75, "duration": 0.25, "velocity": 83, "mute": 0},
+                    {"pitch": 67, "start_time": 3.5, "duration": 4.25, "velocity": 76, "mute": 0},
+                ],
+            ),
+        ]
+    }
+
+
 def _marimba_pair_payload(
     sections: Sequence[_Section],
 ) -> dict[str, list[tuple[_Section, list[dict[str, float | int]]]]]:
@@ -143,7 +177,9 @@ class CompositionFeedbackLoopTests(unittest.TestCase):
             self.assertEqual(artifact["run"]["save_policy"], "ephemeral")
             self.assertIn("-4_4-120bpm-ambient-", artifact["run_id"])
             self.assertEqual(artifact["human_feedback"]["status"], "not_provided")
+            self.assertTrue(str(artifact["goal"]["job_to_be_done"]).strip())
             self.assertIn("merit_rubric", artifact["reflection"])
+            self.assertIn("piano_variation", artifact["reflection"])
             self.assertIn("instrument_diversity_proxy", artifact["reflection"]["merit_rubric"])
             self.assertIn("similarity_weights", artifact["reflection"])
 
@@ -188,6 +224,45 @@ class CompositionFeedbackLoopTests(unittest.TestCase):
                 artifact["human_feedback"]["text"],
                 "Piano and marimba were in different keys; this run was a miss.",
             )
+
+    def test_log_composition_run_stores_goal_and_piano_variation_metrics(self) -> None:
+        sections = [
+            _Section(index=0, label="intro", piano_mode="chords", hat_density="quarter"),
+            _Section(index=1, label="build", piano_mode="motion", hat_density="eighth"),
+            _Section(index=2, label="release", piano_mode="out", hat_density="quarter"),
+        ]
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact, _artifact_path = feedback.log_composition_run(
+                mood="Beautiful",
+                key_name="E major",
+                bpm=142.0,
+                sig_num=4,
+                sig_den=4,
+                minutes=5.0,
+                bars=24,
+                section_bars=8,
+                sections=sections,
+                arranged_by_track=_piano_variation_payload(sections),
+                created_clips_by_track={"Piano": 3},
+                status="success",
+                run_metadata={
+                    "composition_goal": "Keep left hand stable and vary right hand rhythms with silence.",
+                },
+                repo_root=root,
+            )
+
+            self.assertEqual(
+                artifact["goal"]["job_to_be_done"],
+                "Keep left hand stable and vary right hand rhythms with silence.",
+            )
+            piano_variation = artifact["reflection"]["piano_variation"]
+            self.assertTrue(piano_variation["enabled"])
+            self.assertEqual(piano_variation["track_name"], "Piano")
+            self.assertGreater(float(piano_variation["upper_silence_ratio"]), 0.05)
+            self.assertGreater(float(piano_variation["upper_short_duration_ratio"]), 0.0)
+            self.assertGreater(float(piano_variation["upper_long_duration_ratio"]), 0.0)
 
     def test_same_second_runs_get_unique_run_ids_and_index_entries(self) -> None:
         sections = [

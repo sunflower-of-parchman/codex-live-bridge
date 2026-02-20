@@ -990,12 +990,196 @@ def _arrange_drums(
         arranged.append((section, notes))
     return arranged
 
+
+def _piano_section_energy(section: Section) -> float:
+    label = str(section.label).strip().lower()
+    if label == "intro":
+        return 0.2
+    if label == "build":
+        return 0.45
+    if label == "pre_climax":
+        return 0.65
+    if label == "climax":
+        return 0.85
+    if label == "release":
+        return 0.25
+    if label == "afterglow":
+        return 0.5
+    return 0.5
+
+
+def _shape_piano_layers_section(
+    section: Section,
+    notes: Sequence[dict],
+    *,
+    beats_per_bar: float,
+    beat_step: float,
+    split_pitch: int = 60,
+) -> List[dict]:
+    if not notes:
+        return []
+
+    _, _, section_length = _section_bounds(section, beats_per_bar)
+    if section_length <= 0:
+        copied = [dict(note) for note in notes]
+        copied.sort(key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))))
+        return copied
+
+    energy = _piano_section_energy(section)
+    note_gap = max(0.01, float(beat_step) * 0.02)
+    min_duration = max(0.12, float(beat_step) * 0.1)
+
+    lower_notes = [
+        dict(note)
+        for note in notes
+        if int(note.get("pitch", 0)) <= int(split_pitch)
+    ]
+    upper_notes = [
+        dict(note)
+        for note in notes
+        if int(note.get("pitch", 0)) > int(split_pitch)
+    ]
+    lower_notes.sort(key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))))
+    upper_notes.sort(key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))))
+
+    shaped_lower: list[dict] = []
+    for note in lower_notes:
+        start_time = max(0.0, float(note.get("start_time", 0.0)))
+        if start_time >= section_length - note_gap:
+            continue
+        remaining = max(0.0, float(section_length) - start_time - note_gap)
+        sustain_target = max(1.0, float(beat_step) * 2.0)
+        duration = min(remaining, max(float(note.get("duration", 0.25)), sustain_target))
+        if duration < min_duration:
+            continue
+        copied = dict(note)
+        copied["start_time"] = float(round(start_time, 6))
+        copied["duration"] = float(round(duration, 6))
+        shaped_lower.append(copied)
+
+    silence_window_len = max(
+        float(beat_step) * 0.5,
+        min(float(section_length) * (0.18 if energy >= 0.6 else 0.28), float(beats_per_bar) * 1.25),
+    )
+    silence_window_len = min(float(section_length), silence_window_len)
+    silence_window_range = max(0.0, float(section_length) - silence_window_len)
+    silence_window_start = (
+        _stable_hash_to_unit("piano_upper_silence", section.index, section.label)
+        * silence_window_range
+    )
+    silence_window_end = silence_window_start + silence_window_len
+
+    keep_ratio = max(0.2, min(0.95, 0.4 + (energy * 0.45)))
+    upper_echo_offsets: tuple[float, ...] = ()
+    if energy >= 0.8:
+        upper_echo_offsets = (0.25, 0.5)
+    elif energy >= 0.6:
+        upper_echo_offsets = (0.5,)
+
+    shaped_upper: list[dict] = []
+    for idx, note in enumerate(upper_notes):
+        start_time = max(0.0, float(note.get("start_time", 0.0)))
+        if start_time >= section_length - note_gap:
+            continue
+        if silence_window_start <= start_time < silence_window_end:
+            continue
+        keep_unit = _stable_hash_to_unit(
+            "piano_upper_keep",
+            section.index,
+            idx,
+            int(note.get("pitch", 0)),
+        )
+        if keep_unit > keep_ratio:
+            continue
+
+        duration_unit = _stable_hash_to_unit(
+            "piano_upper_duration",
+            section.index,
+            idx,
+            int(note.get("pitch", 0)),
+        )
+        if energy >= 0.75:
+            desired_duration = 0.25 if duration_unit < 0.45 else 0.5
+        elif energy >= 0.5:
+            desired_duration = 0.5 if duration_unit < 0.65 else 1.0
+        else:
+            desired_duration = max(float(beats_per_bar) * 1.25, 3.0) if duration_unit < 0.55 else max(1.0, float(beats_per_bar) * 0.5)
+
+        remaining = max(0.0, float(section_length) - start_time - note_gap)
+        duration = min(remaining, max(min_duration, desired_duration))
+        if duration < min_duration:
+            continue
+
+        copied = dict(note)
+        copied["start_time"] = float(round(start_time, 6))
+        copied["duration"] = float(round(duration, 6))
+        shaped_upper.append(copied)
+
+        for echo_idx, echo_offset in enumerate(upper_echo_offsets):
+            echo_unit = _stable_hash_to_unit(
+                "piano_upper_echo",
+                section.index,
+                idx,
+                echo_idx,
+                int(note.get("pitch", 0)),
+            )
+            threshold = 0.35 if echo_offset <= 0.25 else 0.6
+            if echo_unit > threshold:
+                continue
+            echo_start = start_time + float(echo_offset)
+            if echo_start >= section_length - note_gap:
+                continue
+            if silence_window_start <= echo_start < silence_window_end:
+                continue
+            echo_remaining = max(0.0, float(section_length) - echo_start - note_gap)
+            echo_duration_target = 0.25 if echo_offset <= 0.25 else 0.5
+            echo_duration = min(echo_remaining, max(min_duration, echo_duration_target))
+            if echo_duration < min_duration:
+                continue
+            echo_note = dict(copied)
+            echo_note["start_time"] = float(round(echo_start, 6))
+            echo_note["duration"] = float(round(echo_duration, 6))
+            velocity = int(echo_note.get("velocity", 90))
+            echo_note["velocity"] = max(1, min(127, int(round(float(velocity) * 0.9))))
+            shaped_upper.append(echo_note)
+
+    if upper_notes and not shaped_upper:
+        fallback = dict(upper_notes[0])
+        fallback_start = max(0.0, min(float(section_length) - note_gap, float(fallback.get("start_time", 0.0))))
+        fallback["start_time"] = float(round(fallback_start, 6))
+        fallback["duration"] = float(
+            round(min(float(section_length) - fallback_start - note_gap, max(min_duration, 0.5)), 6)
+        )
+        shaped_upper.append(fallback)
+
+    merged_by_position: dict[tuple[int, float], dict] = {}
+    for note in shaped_lower + shaped_upper:
+        pitch = int(note.get("pitch", 0))
+        start_time = float(round(float(note.get("start_time", 0.0)), 6))
+        key = (pitch, start_time)
+        previous = merged_by_position.get(key)
+        if previous is None:
+            merged_by_position[key] = dict(note)
+            continue
+        previous_duration = float(previous.get("duration", 0.0))
+        next_duration = float(note.get("duration", 0.0))
+        if next_duration > previous_duration:
+            merged = dict(previous)
+            merged.update(note)
+            merged_by_position[key] = merged
+
+    shaped = list(merged_by_position.values())
+    shaped.sort(key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))))
+    return _slice_and_clamp_notes(shaped, 0.0, float(section_length), beat_step)
+
+
 def _arrange_piano(
     chord_notes: Sequence[dict],
     motion_notes: Sequence[dict],
     sections: Sequence[Section],
     beats_per_bar: float,
     beat_step: float,
+    apply_layer_variation: bool = False,
 ) -> List[tuple[Section, List[dict]]]:
     arranged: List[tuple[Section, List[dict]]] = []
     for section in sections:
@@ -1013,6 +1197,13 @@ def _arrange_piano(
             notes = chords + motion
 
         notes = list(notes)
+        if apply_layer_variation and notes:
+            notes = _shape_piano_layers_section(
+                section,
+                notes,
+                beats_per_bar=beats_per_bar,
+                beat_step=beat_step,
+            )
         if notes:
             notes.sort(key=lambda n: (n["start_time"], n["pitch"]))
         arranged.append((section, notes))
@@ -1107,6 +1298,7 @@ def _build_source_sections(
         sections,
         beats_per_bar,
         beat_step,
+        apply_layer_variation=True,
     )
     return {
         "kick": kick_sections,

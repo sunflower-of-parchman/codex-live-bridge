@@ -86,6 +86,7 @@ class ArrangementConfig:
     eval_log_dir: str | None
     memory_brief: bool
     memory_brief_results: int
+    composition_goal: str
     human_feedback_mode: str
     human_feedback_text: str | None
     dry_run: bool
@@ -302,6 +303,11 @@ def parse_args(argv: Iterable[str]) -> ArrangementConfig:
         help="How many retrieval hits to include in --memory-brief output (default: 6)",
     )
     parser.add_argument(
+        "--composition-goal",
+        default=None,
+        help="Optional job-to-be-done goal statement to store in eval artifacts",
+    )
+    parser.add_argument(
         "--human-feedback-mode",
         choices=("written", "verbal"),
         default="written",
@@ -401,6 +407,9 @@ def parse_args(argv: Iterable[str]) -> ArrangementConfig:
         eval_log_dir=None if ns.eval_log_dir in (None, "") else str(ns.eval_log_dir),
         memory_brief=bool(ns.memory_brief),
         memory_brief_results=int(ns.memory_brief_results),
+        composition_goal=""
+        if ns.composition_goal in (None, "")
+        else str(ns.composition_goal),
         human_feedback_mode=str(ns.human_feedback_mode),
         human_feedback_text=None
         if ns.human_feedback_text in (None, "")

@@ -225,6 +225,18 @@ class ArrangementHelpersTests(unittest.TestCase):
         self.assertEqual(cfg.human_feedback_mode, "verbal")
         self.assertEqual(cfg.human_feedback_text, "Piano and marimba were in different keys.")
 
+    def test_parse_args_accepts_composition_goal(self) -> None:
+        cfg = arrangement.parse_args(
+            [
+                "--composition-goal",
+                "Keep left hand stable and vary right hand with silence.",
+            ]
+        )
+        self.assertEqual(
+            cfg.composition_goal,
+            "Keep left hand stable and vary right hand with silence.",
+        )
+
     def test_parse_args_rejects_non_positive_memory_brief_results(self) -> None:
         with self.assertRaises(SystemExit):
             arrangement.parse_args(
@@ -597,6 +609,47 @@ class ArrangementHelpersTests(unittest.TestCase):
             for _section, notes in payload:
                 for note in notes:
                     self.assertIn(int(note["pitch"]) % 12, allowed_pitch_classes)
+
+    def test_build_source_sections_shapes_piano_layers_with_register_roles_and_silence(self) -> None:
+        sections = arrangement._build_sections(
+            total_bars=24,
+            section_bars=4,
+            profile_family="lift_release",
+        )
+        sources = arrangement._build_source_sections(
+            sections=sections,
+            bars=24,
+            beats_per_bar=4.0,
+            beat_step=1.0,
+            transpose_semitones=2,
+            key_name="E major",
+        )
+        layers = sources["piano_layers"]
+
+        lower_durations: list[float] = []
+        upper_durations: list[float] = []
+        upper_gaps: list[float] = []
+
+        for _section, notes in layers:
+            lower = [dict(note) for note in notes if int(note["pitch"]) <= 60]
+            upper = [dict(note) for note in notes if int(note["pitch"]) > 60]
+            lower_durations.extend(float(note["duration"]) for note in lower)
+            upper_durations.extend(float(note["duration"]) for note in upper)
+            ordered_upper = sorted(upper, key=lambda n: float(n["start_time"]))
+            for idx in range(len(ordered_upper) - 1):
+                left_end = float(ordered_upper[idx]["start_time"]) + float(ordered_upper[idx]["duration"])
+                right_start = float(ordered_upper[idx + 1]["start_time"])
+                upper_gaps.append(max(0.0, right_start - left_end))
+
+        self.assertTrue(lower_durations)
+        self.assertTrue(upper_durations)
+        self.assertGreater(
+            sum(lower_durations) / len(lower_durations),
+            sum(upper_durations) / len(upper_durations),
+        )
+        self.assertTrue(any(duration <= 0.5 + 1e-6 for duration in upper_durations))
+        self.assertTrue(any(duration >= 3.5 for duration in upper_durations))
+        self.assertTrue(any(gap >= 0.5 for gap in upper_gaps))
 
     def test_fit_pitch_to_register_preserves_pitch_class_when_possible(self) -> None:
         # C6 should fold down by octaves into the target range as C4.

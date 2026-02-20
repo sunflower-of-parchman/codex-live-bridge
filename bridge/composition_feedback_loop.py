@@ -15,6 +15,34 @@ from typing import Any, Mapping, Sequence
 DEFAULT_RELATIVE_LOG_DIR = Path("memory/evals/compositions")
 DEFAULT_RELATIVE_INDEX_PATH = Path("memory/evals/composition_index.json")
 MAX_INDEX_ENTRIES = 300
+DEFAULT_COMPOSITION_GOAL = (
+    "Compose one evolving piece in a single key where piano keeps a stable left-hand foundation, "
+    "uses varied right-hand rhythms and durations, and applies intentional silence across the form."
+)
+
+NOTE_TO_PITCH_CLASS = {
+    "c": 0,
+    "b#": 0,
+    "c#": 1,
+    "db": 1,
+    "d": 2,
+    "d#": 3,
+    "eb": 3,
+    "e": 4,
+    "fb": 4,
+    "e#": 5,
+    "f": 5,
+    "f#": 6,
+    "gb": 6,
+    "g": 7,
+    "g#": 8,
+    "ab": 8,
+    "a": 9,
+    "a#": 10,
+    "bb": 10,
+    "b": 11,
+    "cb": 11,
+}
 
 
 def _utc_now() -> datetime:
@@ -217,6 +245,228 @@ def _track_style_profiles(
             "mean_ioi_ratio": round(min(1.0, float(mean_ioi) / 2.0), 4),
         }
     return profiles
+
+
+def _normalize_note_token(token: str) -> str:
+    text = str(token).strip().lower()
+    text = text.replace("♯", "#").replace("♭", "b")
+    text = text.replace("sharp", "#").replace("flat", "b")
+    return text
+
+
+def _key_pitch_classes(key_name: str) -> set[int] | None:
+    if not key_name:
+        return None
+    parts = str(key_name).strip().split()
+    if len(parts) < 2:
+        return None
+    root = _normalize_note_token(parts[0])
+    quality = str(parts[1]).strip().lower()
+    root_pc = NOTE_TO_PITCH_CLASS.get(root)
+    if root_pc is None:
+        return None
+    if quality.startswith("maj"):
+        intervals = (0, 2, 4, 5, 7, 9, 11)
+    elif quality.startswith("min"):
+        intervals = (0, 2, 3, 5, 7, 8, 10)
+    else:
+        return None
+    return {(root_pc + interval) % 12 for interval in intervals}
+
+
+def _find_piano_track_key(
+    arranged_by_track: Mapping[str, Sequence[tuple[Any, Sequence[dict[str, Any]]]]],
+) -> str | None:
+    exact_match: str | None = None
+    contains_match: str | None = None
+    for key in arranged_by_track.keys():
+        token = str(key).strip().lower()
+        if token == "piano":
+            exact_match = str(key)
+            break
+        if contains_match is None and any(label in token for label in ("piano", "keys", "rhodes")):
+            contains_match = str(key)
+    return exact_match or contains_match
+
+
+def _flatten_track_notes_absolute(
+    arranged_by_track: Mapping[str, Sequence[tuple[Any, Sequence[dict[str, Any]]]]],
+    track_name: str,
+    *,
+    beats_per_bar: float,
+) -> list[dict[str, float | int]]:
+    payloads = arranged_by_track.get(track_name, ())
+    bar_span = max(1e-6, float(beats_per_bar))
+    events: list[dict[str, float | int]] = []
+    for section, notes in payloads:
+        section_idx = int(getattr(section, "index", 0))
+        section_start = float(getattr(section, "start_bar", 0.0)) * bar_span
+        for note in notes:
+            local_start = float(note.get("start_time", 0.0))
+            events.append(
+                {
+                    "section_index": section_idx,
+                    "start_time": section_start + local_start,
+                    "duration": float(note.get("duration", 0.0)),
+                    "pitch": int(note.get("pitch", 0)),
+                    "velocity": int(note.get("velocity", 0)),
+                }
+            )
+    events.sort(key=lambda n: (float(n["start_time"]), int(n["pitch"])))
+    return events
+
+
+def _interval_coverage_ratio(
+    notes: Sequence[Mapping[str, Any]],
+    *,
+    total_length_beats: float,
+) -> float:
+    total_length = max(1e-6, float(total_length_beats))
+    if not notes:
+        return 0.0
+
+    intervals: list[tuple[float, float]] = []
+    for note in notes:
+        start = max(0.0, float(note.get("start_time", 0.0)))
+        duration = max(0.0, float(note.get("duration", 0.0)))
+        end = min(total_length, start + duration)
+        if end <= start:
+            continue
+        intervals.append((start, end))
+    if not intervals:
+        return 0.0
+
+    intervals.sort(key=lambda span: (span[0], span[1]))
+    merged: list[tuple[float, float]] = []
+    cur_start, cur_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= cur_end + 1e-6:
+            cur_end = max(cur_end, end)
+            continue
+        merged.append((cur_start, cur_end))
+        cur_start, cur_end = start, end
+    merged.append((cur_start, cur_end))
+
+    covered = sum(max(0.0, end - start) for start, end in merged)
+    return max(0.0, min(1.0, covered / total_length))
+
+
+def _compute_piano_variation_metrics(
+    *,
+    arranged_by_track: Mapping[str, Sequence[tuple[Any, Sequence[dict[str, Any]]]]],
+    key_name: str,
+    bars: int,
+    beats_per_bar: float,
+) -> dict[str, Any]:
+    piano_key = _find_piano_track_key(arranged_by_track)
+    if piano_key is None:
+        return {
+            "enabled": False,
+            "status": "piano_track_missing",
+            "track_name": None,
+        }
+
+    events = _flatten_track_notes_absolute(arranged_by_track, piano_key, beats_per_bar=beats_per_bar)
+    if not events:
+        return {
+            "enabled": False,
+            "status": "piano_has_no_notes",
+            "track_name": piano_key,
+        }
+
+    total_notes = len(events)
+    lower_notes = [event for event in events if int(event["pitch"]) <= 60]
+    upper_notes = [event for event in events if int(event["pitch"]) > 60]
+    total_length_beats = max(1.0, float(max(1, int(bars))) * float(beats_per_bar))
+
+    lower_anchor_ratio = float(len(lower_notes)) / float(max(1, total_notes))
+    lower_long_duration_ratio = _safe_mean(
+        [1.0 if float(event["duration"]) >= 1.0 else 0.0 for event in lower_notes]
+    )
+
+    upper_short_duration_ratio = _safe_mean(
+        [1.0 if float(event["duration"]) <= 0.5 else 0.0 for event in upper_notes]
+    )
+    upper_long_duration_ratio = _safe_mean(
+        [1.0 if float(event["duration"]) >= 4.0 else 0.0 for event in upper_notes]
+    )
+    upper_occupied_ratio = _interval_coverage_ratio(
+        upper_notes,
+        total_length_beats=total_length_beats,
+    )
+    upper_silence_ratio = max(0.0, min(1.0, 1.0 - upper_occupied_ratio))
+
+    section_upper_counts: list[float] = []
+    for _section, notes in arranged_by_track.get(piano_key, ()):
+        section_upper_counts.append(
+            float(sum(1 for note in notes if int(note.get("pitch", 0)) > 60))
+        )
+    upper_activity_cv = 0.0
+    if section_upper_counts:
+        mean_upper = _safe_mean(section_upper_counts)
+        if mean_upper > 0.0:
+            variance = _safe_mean([(value - mean_upper) ** 2 for value in section_upper_counts])
+            upper_activity_cv = math.sqrt(max(0.0, variance)) / mean_upper
+
+    allowed_pitch_classes = _key_pitch_classes(key_name)
+    in_key_ratio: float | None = None
+    if allowed_pitch_classes:
+        in_key_count = sum(
+            1 for event in events if int(event["pitch"]) % 12 in allowed_pitch_classes
+        )
+        in_key_ratio = float(in_key_count) / float(max(1, total_notes))
+
+    progress_checks = [
+        min(1.0, lower_anchor_ratio / 0.4),
+        min(1.0, lower_long_duration_ratio / 0.6),
+        min(1.0, upper_short_duration_ratio / 0.15),
+        min(1.0, upper_long_duration_ratio / 0.08),
+        min(1.0, upper_silence_ratio / 0.12),
+        min(1.0, upper_activity_cv / 0.2),
+    ]
+    if in_key_ratio is not None:
+        progress_checks.append(min(1.0, in_key_ratio / 0.99))
+    goal_progress_score = _safe_mean(progress_checks)
+
+    flags: list[str] = []
+    if in_key_ratio is not None and in_key_ratio < 0.99:
+        flags.append("piano_key_adherence_below_target")
+    if lower_anchor_ratio < 0.33:
+        flags.append("piano_left_hand_anchor_low")
+    if lower_long_duration_ratio < 0.55:
+        flags.append("piano_left_hand_sustain_low")
+    if upper_short_duration_ratio < 0.12:
+        flags.append("piano_upper_short_note_activity_low")
+    if upper_long_duration_ratio < 0.06:
+        flags.append("piano_upper_long_duration_variety_low")
+    if upper_silence_ratio < 0.08:
+        flags.append("piano_upper_silence_low")
+    if upper_activity_cv < 0.18:
+        flags.append("piano_upper_activity_too_uniform")
+
+    return {
+        "enabled": True,
+        "status": "ok",
+        "track_name": piano_key,
+        "total_notes": int(total_notes),
+        "in_key_ratio": None if in_key_ratio is None else round(float(in_key_ratio), 4),
+        "lower_anchor_ratio": round(float(lower_anchor_ratio), 4),
+        "lower_long_duration_ratio": round(float(lower_long_duration_ratio), 4),
+        "upper_short_duration_ratio": round(float(upper_short_duration_ratio), 4),
+        "upper_long_duration_ratio": round(float(upper_long_duration_ratio), 4),
+        "upper_silence_ratio": round(float(upper_silence_ratio), 4),
+        "upper_activity_cv": round(float(upper_activity_cv), 4),
+        "goal_progress_score": round(float(goal_progress_score), 4),
+        "flags": flags,
+    }
+
+
+def _resolve_composition_goal(run_metadata: Mapping[str, Any] | None) -> str:
+    if isinstance(run_metadata, Mapping):
+        raw_goal = str(run_metadata.get("composition_goal", "")).strip()
+        if raw_goal:
+            return raw_goal
+    return DEFAULT_COMPOSITION_GOAL
 
 
 def _find_track_key(mapping: Mapping[str, Any], wanted: str) -> str | None:
@@ -676,6 +926,7 @@ def _compute_similarity(
 def _reflection_prompts(
     repetition_flags: Sequence[str],
     instrument_identity_flags: Sequence[str] | None = None,
+    piano_variation_flags: Sequence[str] | None = None,
 ) -> list[str]:
     prompts = [
         "What compositional risk did this run attempt that your previous run did not?",
@@ -712,6 +963,35 @@ def _reflection_prompts(
     if "marimba_vibraphone_overlap_above_target" in identity_flags:
         prompts.append(
             "Marimba and vibraphone overlapped heavily; increase onset separation and role contrast."
+        )
+    piano_flags = [str(flag) for flag in (piano_variation_flags or []) if str(flag).strip()]
+    if "piano_key_adherence_below_target" in piano_flags:
+        prompts.append(
+            "Piano key adherence slipped; enforce key lock before exploring extra rhythmic variation."
+        )
+    if "piano_left_hand_anchor_low" in piano_flags:
+        prompts.append(
+            "Piano left hand is under-anchored; stabilize lower-register support before adding new motifs."
+        )
+    if "piano_left_hand_sustain_low" in piano_flags:
+        prompts.append(
+            "Piano low register is too short-note heavy; extend lower-note sustains to strengthen harmonic grounding."
+        )
+    if "piano_upper_short_note_activity_low" in piano_flags:
+        prompts.append(
+            "Piano upper register lacks short-note motion; introduce clearer eighth/sixteenth activity."
+        )
+    if "piano_upper_long_duration_variety_low" in piano_flags:
+        prompts.append(
+            "Piano upper register lacks sustained tones; add occasional long notes to widen phrase contrast."
+        )
+    if "piano_upper_silence_low" in piano_flags:
+        prompts.append(
+            "Piano texture is too continuously occupied; introduce intentional rests as arrangement material."
+        )
+    if "piano_upper_activity_too_uniform" in piano_flags:
+        prompts.append(
+            "Piano upper activity is too uniform section-to-section; vary density across form."
         )
     return prompts
 
@@ -808,9 +1088,16 @@ def build_composition_artifact(
     novelty_score = None if similarity is None else round(1.0 - similarity, 4)
     track_totals = _track_totals(note_count_paths)
     normalized_human_feedback = _normalize_human_feedback(human_feedback)
+    composition_goal = _resolve_composition_goal(run_metadata)
     instrument_identity = _compute_instrument_identity_metrics(
         arranged_by_track=arranged_by_track,
         contract=instrument_identity_contract,
+    )
+    piano_variation = _compute_piano_variation_metrics(
+        arranged_by_track=arranged_by_track,
+        key_name=key_name,
+        bars=bars,
+        beats_per_bar=beats_per_bar,
     )
     merit_rubric = _merit_rubric(
         note_count_paths=note_count_paths,
@@ -831,6 +1118,10 @@ def build_composition_artifact(
             "minutes": float(minutes),
             "bars": int(bars),
             "section_bars": int(section_bars),
+        },
+        "goal": {
+            "job_to_be_done": composition_goal,
+            "metric_family": "piano_variation_and_key_coherence",
         },
         "run": dict(run_metadata or {}),
         "human_feedback": normalized_human_feedback,
@@ -865,10 +1156,12 @@ def build_composition_artifact(
             "reference_match": reference_match,
             "repetition_flags": repetition_flags,
             "merit_rubric": merit_rubric,
+            "piano_variation": piano_variation,
             "instrument_identity": instrument_identity,
             "prompts": _reflection_prompts(
                 repetition_flags,
                 instrument_identity.get("flags", []) if isinstance(instrument_identity, Mapping) else [],
+                piano_variation.get("flags", []) if isinstance(piano_variation, Mapping) else [],
             ),
         },
     }

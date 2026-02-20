@@ -101,6 +101,11 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         help="Optional written/verbal human feedback text to include in eval artifacts",
     )
     parser.add_argument(
+        "--composition-goal",
+        default=None,
+        help="Optional job-to-be-done goal statement to include in eval artifacts",
+    )
+    parser.add_argument(
         "--launch-ableton",
         dest="launch_ableton",
         action="store_true",
@@ -160,6 +165,8 @@ def _compose_args(ns: argparse.Namespace) -> list[str]:
     if ns.human_feedback_text:
         compose_argv.extend(["--human-feedback-mode", ns.human_feedback_mode])
         compose_argv.extend(["--human-feedback-text", ns.human_feedback_text])
+    if ns.composition_goal:
+        compose_argv.extend(["--composition-goal", ns.composition_goal])
     if ns.dry_run:
         compose_argv.append("--dry-run")
     return compose_argv

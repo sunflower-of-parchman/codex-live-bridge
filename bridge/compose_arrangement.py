@@ -615,6 +615,8 @@ def run(cfg: ArrangementConfig) -> int:
         print(f"- marimba strategy: {cfg.marimba_strategy}")
         print(f"- marimba pair: {cfg.marimba_pair_mode}")
         print(f"- multi-pass:  {'on' if cfg.multi_pass_enabled else 'off'} ({cfg.composition_passes} pass(es))")
+        if cfg.composition_goal:
+            print(f"- goal:        {cfg.composition_goal}")
         if cfg.focus:
             print(f"- focus:       {cfg.focus}")
         if cfg.pair:
@@ -663,6 +665,7 @@ def run(cfg: ArrangementConfig) -> int:
                         "multi_pass_reports": multi_pass_reports,
                         "focus": cfg.focus,
                         "pair": cfg.pair,
+                        "composition_goal": cfg.composition_goal,
                         "composition_print_source": source_print_path,
                         "composition_print_path": None
                         if composition_print_path is None
@@ -1178,6 +1181,7 @@ def run(cfg: ArrangementConfig) -> int:
                     "multi_pass_reports": multi_pass_reports,
                     "focus": cfg.focus,
                     "pair": cfg.pair,
+                    "composition_goal": cfg.composition_goal,
                     "composition_print_source": source_print_path,
                     "composition_print_path": None
                     if composition_print_path is None

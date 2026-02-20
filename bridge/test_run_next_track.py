@@ -114,6 +114,24 @@ class RunNextTrackTests(unittest.TestCase):
             "bridge/config/instrument_registry.marimba_piano.v1.json",
         )
 
+    def test_compose_args_passes_composition_goal(self) -> None:
+        ns = runner.parse_args(
+            [
+                "--bpm",
+                "96",
+                "--meter",
+                "4/4",
+                "--composition-goal",
+                "Maintain left-hand anchors and right-hand rhythmic contrast with silence.",
+            ]
+        )
+        compose_argv = runner._compose_args(ns)
+        goal_idx = compose_argv.index("--composition-goal")
+        self.assertEqual(
+            compose_argv[goal_idx + 1],
+            "Maintain left-hand anchors and right-hand rhythmic contrast with silence.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
