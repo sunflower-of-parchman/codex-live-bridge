@@ -704,6 +704,88 @@ class ArrangementHelpersTests(unittest.TestCase):
         self.assertTrue(lower_pitch_classes.issubset({4, 11}))
         self.assertIn(4, lower_pitch_classes)
 
+    def test_enforce_piano_key_lock_uses_marimba_section_guide_for_low_register(self) -> None:
+        section = arrangement.Section(
+            index=0,
+            start_bar=0,
+            bar_count=4,
+            label="build",
+            kick_on=True,
+            rim_on=True,
+            hat_on=True,
+            piano_mode="layers",
+            kick_keep_ratio=1.0,
+            rim_keep_ratio=1.0,
+            hat_keep_ratio=1.0,
+            hat_density="quarter",
+        )
+        specs = [
+            arrangement.InstrumentSpec(
+                name="Piano",
+                source="piano_layers",
+                role="harmony_anchor",
+                priority=1,
+                required=True,
+                active_min=1,
+                active_max=1,
+                pitch_shift=0,
+                velocity_scale=1.0,
+                keep_ratio_scale=1.0,
+                allow_labels=(),
+                apply_groove=False,
+                midi_min_pitch=36,
+                midi_max_pitch=84,
+            ),
+            arrangement.InstrumentSpec(
+                name="Marimba",
+                source="piano_chords",
+                role="motif",
+                priority=1,
+                required=True,
+                active_min=1,
+                active_max=1,
+                pitch_shift=0,
+                velocity_scale=1.0,
+                keep_ratio_scale=1.0,
+                allow_labels=(),
+                apply_groove=False,
+                midi_min_pitch=55,
+                midi_max_pitch=96,
+            ),
+        ]
+        arranged_by_track = {
+            "Marimba": [
+                (
+                    section,
+                    [
+                        {"pitch": 66, "start_time": 0.0, "duration": 1.0, "velocity": 100, "mute": 0},  # F#
+                        {"pitch": 66, "start_time": 2.0, "duration": 1.0, "velocity": 100, "mute": 0},  # F#
+                        {"pitch": 69, "start_time": 1.0, "duration": 1.0, "velocity": 90, "mute": 0},   # A
+                    ],
+                )
+            ],
+            "Piano": [
+                (
+                    section,
+                    [
+                        {"pitch": 49, "start_time": 0.0, "duration": 1.0, "velocity": 90, "mute": 0},  # C#
+                        {"pitch": 52, "start_time": 2.0, "duration": 1.0, "velocity": 90, "mute": 0},  # E
+                    ],
+                )
+            ],
+        }
+        constrained, _summaries = arrangement._enforce_piano_key_lock(
+            arranged_by_track=arranged_by_track,
+            specs=specs,
+            key_name="E major",
+            beats_per_bar=4.0,
+        )
+
+        constrained_notes = constrained["Piano"][0][1]
+        low_by_beat = {int(round(float(note["start_time"]))): int(note["pitch"]) % 12 for note in constrained_notes if int(note["pitch"]) <= 60}
+        self.assertEqual(low_by_beat.get(0), 4, "bar downbeat should remain tonic-centered")
+        self.assertEqual(low_by_beat.get(2), 6, "mid-bar support should follow marimba section guide when present")
+
     def test_build_source_sections_shapes_piano_layers_with_register_roles_and_silence(self) -> None:
         sections = arrangement._build_sections(
             total_bars=24,

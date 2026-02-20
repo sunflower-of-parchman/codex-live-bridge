@@ -274,6 +274,7 @@ def _enforce_piano_key_lock(
     arranged_by_track: Mapping[str, Sequence[tuple[Section, Sequence[dict[str, Any]]]]],
     specs: Sequence[InstrumentSpec],
     key_name: str,
+    beats_per_bar: float = 4.0,
 ) -> tuple[dict[str, list[tuple[Section, list[dict[str, Any]]]]], list[dict[str, int | str]]]:
     allowed_pitch_classes = _key_pitch_classes(key_name)
     root_pitch_class = _key_root_pitch_class(key_name)
@@ -281,6 +282,36 @@ def _enforce_piano_key_lock(
     spec_by_name = {str(spec.name): spec for spec in specs}
     updated: dict[str, list[tuple[Section, list[dict[str, Any]]]]] = {}
     summaries: list[dict[str, int | str]] = []
+    beats_per_bar_int = max(1, int(round(float(beats_per_bar))))
+
+    marimba_weights_by_section: dict[int, dict[int, float]] = {}
+    for track_name, payloads in arranged_by_track.items():
+        if "marimba" not in str(track_name).strip().lower():
+            continue
+        for section, notes in payloads:
+            section_key = int(section.index)
+            section_weights = marimba_weights_by_section.setdefault(section_key, {})
+            for note in notes:
+                pitch = int(note.get("pitch", 0))
+                pc = int(pitch % 12)
+                if allowed_pitch_classes and pc not in allowed_pitch_classes:
+                    continue
+                duration = max(0.25, float(note.get("duration", 0.25)))
+                velocity = max(1.0, min(127.0, float(note.get("velocity", 90.0))))
+                weight = duration * (0.4 + ((velocity / 127.0) * 0.6))
+                section_weights[pc] = float(section_weights.get(pc, 0.0) + weight)
+
+    marimba_guide_by_section: dict[int, list[int]] = {}
+    for section_idx, weights in marimba_weights_by_section.items():
+        ranked = sorted(
+            weights.items(),
+            key=lambda item: (
+                -float(item[1]),
+                0 if root_pitch_class is None else abs((int(item[0]) - int(root_pitch_class)) % 12),
+                int(item[0]),
+            ),
+        )
+        marimba_guide_by_section[int(section_idx)] = [int(pc) for pc, _ in ranked[:4]]
 
     def _nearest_pitch_for_pc(
         *,
@@ -334,24 +365,52 @@ def _enforce_piano_key_lock(
             )
             if root_pitch_class is not None:
                 low_register_max = min(int(midi_max), 60)
+                guide = list(marimba_guide_by_section.get(int(section.index), ()))
+                primary_pc = int(root_pitch_class)
+                secondary_pc: int | None = None
+                if fifth_pitch_class is not None:
+                    secondary_pc = int(fifth_pitch_class)
+                if guide:
+                    # Keep tonic gravity but let section marimba content steer supporting color.
+                    if int(primary_pc) not in guide:
+                        guide.insert(0, int(primary_pc))
+                    if secondary_pc is None or secondary_pc not in guide:
+                        for pc in guide:
+                            if int(pc) != int(primary_pc):
+                                secondary_pc = int(pc)
+                                break
+                if secondary_pc == primary_pc:
+                    secondary_pc = None
+                allowed_low_pcs: set[int] = {int(primary_pc)}
+                if secondary_pc is not None:
+                    allowed_low_pcs.add(int(secondary_pc))
+                for pc in guide:
+                    if len(allowed_low_pcs) >= 4:
+                        break
+                    allowed_low_pcs.add(int(pc))
+
                 for note in constrained:
                     pitch_value = int(note.get("pitch", 0))
                     if pitch_value > low_register_max:
                         continue
                     start_time = float(note.get("start_time", 0.0))
                     beat_index = int(round(start_time))
-                    bar_index = max(0, beat_index // 4)
-                    use_fifth = (
-                        fifth_pitch_class is not None
-                        and fifth_pitch_class != root_pitch_class
-                        and (bar_index % 4) == 2
-                    )
-                    target_pc = int(fifth_pitch_class) if use_fifth else int(root_pitch_class)
-                    preferred_center = 47 if use_fifth else 40
+                    beat_in_bar = int(beat_index % beats_per_bar_int)
+                    current_pc = int(pitch_value % 12)
+                    target_pc: int | None = None
+                    if beat_in_bar == 0:
+                        target_pc = int(primary_pc)
+                    elif beat_in_bar == max(0, beats_per_bar_int // 2) and secondary_pc is not None:
+                        target_pc = int(secondary_pc)
+                    elif current_pc not in allowed_low_pcs:
+                        target_pc = int(primary_pc)
+                    if target_pc is None or int(current_pc) == int(target_pc):
+                        continue
+                    preferred_center = 40 if int(target_pc) == int(primary_pc) else 47
                     note["pitch"] = int(
                         _nearest_pitch_for_pc(
                             pitch=pitch_value,
-                            target_pitch_class=target_pc,
+                            target_pitch_class=int(target_pc),
                             midi_min_pitch=midi_min,
                             midi_max_pitch=low_register_max,
                             preferred_center=preferred_center,
@@ -761,6 +820,7 @@ def run(cfg: ArrangementConfig) -> int:
         arranged_by_track=arranged_by_track,
         specs=specs,
         key_name=run_key_name,
+        beats_per_bar=beats_per_bar,
     )
     for summary in piano_key_lock_summaries:
         print(
