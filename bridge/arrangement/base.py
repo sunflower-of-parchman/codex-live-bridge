@@ -1076,9 +1076,45 @@ def _shape_piano_layers_section(
     elif energy >= 0.6:
         upper_echo_offsets = (0.5,)
 
+    def _snap_to_grid(value: float, step: float) -> float:
+        if step <= 0:
+            return float(round(value, 6))
+        snapped = round(float(value) / float(step)) * float(step)
+        return float(round(snapped, 6))
+
     shaped_upper: list[dict] = []
     for idx, note in enumerate(upper_notes):
-        start_time = max(0.0, float(note.get("start_time", 0.0)))
+        original_start = max(0.0, float(note.get("start_time", 0.0)))
+        pitch = int(note.get("pitch", 0))
+        start_time = original_start
+        offbeat_unit = _stable_hash_to_unit(
+            "piano_upper_offbeat",
+            section.index,
+            idx,
+            pitch,
+        )
+        if energy >= 0.75:
+            offbeat_probability = 0.82
+            offbeat_choices = (0.25, 0.5, 0.75)
+        elif energy >= 0.5:
+            offbeat_probability = 0.68
+            offbeat_choices = (0.25, 0.5)
+        else:
+            offbeat_probability = 0.45
+            offbeat_choices = (0.5,)
+        if offbeat_unit < offbeat_probability and offbeat_choices:
+            offset_unit = _stable_hash_to_unit(
+                "piano_upper_offset",
+                section.index,
+                idx,
+                pitch,
+            )
+            offset_index = min(
+                len(offbeat_choices) - 1,
+                int(offset_unit * len(offbeat_choices)),
+            )
+            start_time = original_start + float(offbeat_choices[offset_index])
+        start_time = _snap_to_grid(start_time, 0.25)
         if start_time >= section_length - note_gap:
             continue
         if silence_window_start <= start_time < silence_window_end:
@@ -1087,7 +1123,7 @@ def _shape_piano_layers_section(
             "piano_upper_keep",
             section.index,
             idx,
-            int(note.get("pitch", 0)),
+            pitch,
         )
         if keep_unit > keep_ratio:
             continue
@@ -1096,7 +1132,7 @@ def _shape_piano_layers_section(
             "piano_upper_duration",
             section.index,
             idx,
-            int(note.get("pitch", 0)),
+            pitch,
         )
         if energy >= 0.75:
             desired_duration = 0.25 if duration_unit < 0.45 else 0.5
@@ -1121,12 +1157,13 @@ def _shape_piano_layers_section(
                 section.index,
                 idx,
                 echo_idx,
-                int(note.get("pitch", 0)),
+                pitch,
             )
             threshold = 0.35 if echo_offset <= 0.25 else 0.6
             if echo_unit > threshold:
                 continue
             echo_start = start_time + float(echo_offset)
+            echo_start = _snap_to_grid(echo_start, 0.25)
             if echo_start >= section_length - note_gap:
                 continue
             if silence_window_start <= echo_start < silence_window_end:

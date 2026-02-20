@@ -719,12 +719,14 @@ class ArrangementHelpersTests(unittest.TestCase):
         lower_durations: list[float] = []
         upper_durations: list[float] = []
         upper_gaps: list[float] = []
+        upper_starts: list[float] = []
 
         for _section, notes in layers:
             lower = [dict(note) for note in notes if int(note["pitch"]) <= 60]
             upper = [dict(note) for note in notes if int(note["pitch"]) > 60]
             lower_durations.extend(float(note["duration"]) for note in lower)
             upper_durations.extend(float(note["duration"]) for note in upper)
+            upper_starts.extend(float(note["start_time"]) for note in upper)
             ordered_upper = sorted(upper, key=lambda n: float(n["start_time"]))
             for idx in range(len(ordered_upper) - 1):
                 left_end = float(ordered_upper[idx]["start_time"]) + float(ordered_upper[idx]["duration"])
@@ -740,6 +742,10 @@ class ArrangementHelpersTests(unittest.TestCase):
         self.assertTrue(any(duration <= 0.5 + 1e-6 for duration in upper_durations))
         self.assertTrue(any(duration >= 3.5 for duration in upper_durations))
         self.assertTrue(any(gap >= 0.5 for gap in upper_gaps))
+        self.assertTrue(
+            any(abs(start - round(start)) > 1e-6 for start in upper_starts),
+            "upper register should include off-beat starts, not only whole-beat onsets",
+        )
 
     def test_fit_pitch_to_register_preserves_pitch_class_when_possible(self) -> None:
         # C6 should fold down by octaves into the target range as C4.
