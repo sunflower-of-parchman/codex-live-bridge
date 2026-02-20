@@ -679,6 +679,7 @@ class ArrangementHelpersTests(unittest.TestCase):
                 (
                     section,
                     [
+                        {"pitch": 49, "start_time": 0.0, "duration": 1.0, "velocity": 90, "mute": 0},  # C# (low)
                         {"pitch": 67, "start_time": 0.0, "duration": 1.0, "velocity": 90, "mute": 0},  # G (out)
                         {"pitch": 64, "start_time": 1.0, "duration": 1.0, "velocity": 90, "mute": 0},  # E (in)
                         {"pitch": 65, "start_time": 2.0, "duration": 1.0, "velocity": 90, "mute": 0},  # F (out)
@@ -699,6 +700,9 @@ class ArrangementHelpersTests(unittest.TestCase):
         allowed_pitch_classes = {4, 6, 8, 9, 11, 1, 3}
         for note in constrained_notes:
             self.assertIn(int(note["pitch"]) % 12, allowed_pitch_classes)
+        lower_pitch_classes = {int(note["pitch"]) % 12 for note in constrained_notes if int(note["pitch"]) <= 60}
+        self.assertTrue(lower_pitch_classes.issubset({4, 11}))
+        self.assertIn(4, lower_pitch_classes)
 
     def test_build_source_sections_shapes_piano_layers_with_register_roles_and_silence(self) -> None:
         sections = arrangement._build_sections(
@@ -742,8 +746,8 @@ class ArrangementHelpersTests(unittest.TestCase):
         self.assertTrue(upper_durations)
         self.assertTrue(any(duration >= 1.0 - 1e-6 for duration in lower_durations))
         self.assertTrue(
-            any(abs(start - round(start)) <= 1e-6 for start in lower_starts),
-            "lower register should keep on-beat/downbeat anchors",
+            all(abs(start - round(start)) <= 1e-6 for start in lower_starts),
+            "lower register should stay on whole-beat anchors for rhythmic stability",
         )
         self.assertTrue(any(duration <= 0.5 + 1e-6 for duration in upper_durations))
         self.assertTrue(any(duration >= 3.5 for duration in upper_durations))
@@ -787,6 +791,44 @@ class ArrangementHelpersTests(unittest.TestCase):
 
         self.assertTrue(any(int(note["pitch"]) > 60 for note in shaped))
         self.assertFalse(any(int(note["pitch"]) <= 60 for note in shaped))
+
+    def test_shape_piano_layers_section_prefers_key_tonic_in_low_register(self) -> None:
+        section = arrangement.Section(
+            index=1,
+            start_bar=0,
+            bar_count=4,
+            label="build",
+            kick_on=True,
+            rim_on=True,
+            hat_on=True,
+            piano_mode="full",
+            kick_keep_ratio=1.0,
+            rim_keep_ratio=1.0,
+            hat_keep_ratio=1.0,
+            hat_density="eighth",
+        )
+        notes = [
+            # Seed lower notes bias toward C# to ensure key tonic override is applied.
+            {"pitch": 49, "start_time": 0.0, "duration": 1.0, "velocity": 88, "mute": 0},  # C#
+            {"pitch": 49, "start_time": 2.0, "duration": 1.0, "velocity": 88, "mute": 0},  # C#
+            {"pitch": 68, "start_time": 0.0, "duration": 0.5, "velocity": 96, "mute": 0},
+            {"pitch": 71, "start_time": 1.0, "duration": 0.5, "velocity": 96, "mute": 0},
+            {"pitch": 76, "start_time": 2.0, "duration": 0.5, "velocity": 96, "mute": 0},
+        ]
+
+        shaped = arrangement._shape_piano_layers_section(
+            section,
+            notes,
+            beats_per_bar=4.0,
+            beat_step=1.0,
+            key_name="E major",
+        )
+
+        lower = [note for note in shaped if int(note["pitch"]) <= 60]
+        self.assertTrue(lower, "expected left-hand support notes for build section")
+        lower_pitch_classes = {int(note["pitch"]) % 12 for note in lower}
+        self.assertIn(4, lower_pitch_classes, "left-hand should anchor tonic E in E major")
+        self.assertTrue(lower_pitch_classes.issubset({4, 11}))
 
     def test_fit_pitch_to_register_preserves_pitch_class_when_possible(self) -> None:
         # C6 should fold down by octaves into the target range as C4.

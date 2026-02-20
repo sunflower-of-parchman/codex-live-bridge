@@ -276,9 +276,37 @@ def _enforce_piano_key_lock(
     key_name: str,
 ) -> tuple[dict[str, list[tuple[Section, list[dict[str, Any]]]]], list[dict[str, int | str]]]:
     allowed_pitch_classes = _key_pitch_classes(key_name)
+    root_pitch_class = _key_root_pitch_class(key_name)
+    fifth_pitch_class = None if root_pitch_class is None else int((int(root_pitch_class) + 7) % 12)
     spec_by_name = {str(spec.name): spec for spec in specs}
     updated: dict[str, list[tuple[Section, list[dict[str, Any]]]]] = {}
     summaries: list[dict[str, int | str]] = []
+
+    def _nearest_pitch_for_pc(
+        *,
+        pitch: int,
+        target_pitch_class: int,
+        midi_min_pitch: int,
+        midi_max_pitch: int,
+        preferred_center: int,
+    ) -> int:
+        low = max(0, min(127, int(midi_min_pitch)))
+        high = max(0, min(127, int(midi_max_pitch)))
+        if low > high:
+            low, high = high, low
+        candidates = [value for value in range(low, high + 1) if value % 12 == int(target_pitch_class)]
+        if not candidates:
+            return int(max(low, min(high, int(pitch))))
+        return int(
+            min(
+                candidates,
+                key=lambda value: (
+                    abs(value - int(preferred_center)),
+                    abs(value - int(pitch)),
+                    value,
+                ),
+            )
+        )
 
     for track_name, payloads in arranged_by_track.items():
         token = str(track_name).strip().lower()
@@ -304,6 +332,31 @@ def _enforce_piano_key_lock(
                 midi_min_pitch=midi_min,
                 midi_max_pitch=midi_max,
             )
+            if root_pitch_class is not None:
+                low_register_max = min(int(midi_max), 60)
+                for note in constrained:
+                    pitch_value = int(note.get("pitch", 0))
+                    if pitch_value > low_register_max:
+                        continue
+                    start_time = float(note.get("start_time", 0.0))
+                    beat_index = int(round(start_time))
+                    bar_index = max(0, beat_index // 4)
+                    use_fifth = (
+                        fifth_pitch_class is not None
+                        and fifth_pitch_class != root_pitch_class
+                        and (bar_index % 4) == 2
+                    )
+                    target_pc = int(fifth_pitch_class) if use_fifth else int(root_pitch_class)
+                    preferred_center = 47 if use_fifth else 40
+                    note["pitch"] = int(
+                        _nearest_pitch_for_pc(
+                            pitch=pitch_value,
+                            target_pitch_class=target_pc,
+                            midi_min_pitch=midi_min,
+                            midi_max_pitch=low_register_max,
+                            preferred_center=preferred_center,
+                        )
+                    )
             if allowed_pitch_classes:
                 before_out += sum(
                     1

@@ -1060,15 +1060,22 @@ def _shape_piano_layers_section(
     upper_notes.sort(key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))))
 
     def _fallback_lower_root_pitch() -> int:
+        root_pitch_class = _key_root_pitch_class(key_name)
+        if root_pitch_class is not None:
+            candidates = [pitch for pitch in range(36, int(split_pitch) + 1) if pitch % 12 == root_pitch_class]
+            if candidates:
+                # Keep the bass anchor close to E2-like territory rather than drifting upward.
+                return int(min(candidates, key=lambda pitch: abs(pitch - 40)))
         if lower_notes:
             return int(min(lower_notes, key=lambda n: int(n.get("pitch", 60))).get("pitch", 48))
-        root_pitch_class = _key_root_pitch_class(key_name)
-        if root_pitch_class is None:
-            return 48
-        candidates = [pitch for pitch in range(36, int(split_pitch) + 1) if pitch % 12 == root_pitch_class]
-        if candidates:
-            return int(min(candidates, key=lambda pitch: abs(pitch - 48)))
         return 48
+
+    def _fallback_lower_fifth_pitch(root_pitch: int) -> int:
+        target_pc = (int(root_pitch) + 7) % 12
+        candidates = [pitch for pitch in range(36, int(split_pitch) + 1) if pitch % 12 == target_pc]
+        if not candidates:
+            return int(root_pitch)
+        return int(min(candidates, key=lambda pitch: abs(pitch - (int(root_pitch) + 7))))
 
     mode_unit = _stable_hash_to_unit("piano_lower_mode", section.index, section.label)
     if energy < 0.35:
@@ -1095,64 +1102,55 @@ def _shape_piano_layers_section(
 
     shaped_lower: list[dict] = []
     if lower_mode == "anchor":
-        if lower_notes:
-            anchor_seed = sorted(
-                (dict(note) for note in lower_notes),
-                key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))),
-            )
-        else:
-            anchor_seed = [
-                {
-                    "pitch": int(_fallback_lower_root_pitch()),
-                    "start_time": 0.0,
-                    "duration": max(1.0, float(beat_step) * 2.0),
-                    "velocity": int(min(127, max(1, 68 + int(energy * 18)))),
-                    "mute": 0,
-                }
-            ]
+        root_pitch = _fallback_lower_root_pitch()
+        fifth_pitch = _fallback_lower_fifth_pitch(root_pitch)
+        anchor_velocity = int(min(127, max(1, 68 + int(energy * 14))))
         anchor_idx = 0
         bar_cursor = 0.0
         while bar_cursor < section_length - note_gap:
             start_time = _snap_to_grid(bar_cursor, 1.0)
             if start_time >= section_length - note_gap:
                 break
-            sparse_unit = _stable_hash_to_unit("piano_lower_anchor_sparse", section.index, anchor_idx)
-            if energy < 0.35 and sparse_unit < 0.08:
+            if energy < 0.35 and (anchor_idx % 4) == 3:
+                # Intro/release sparseness without random skips.
                 anchor_idx += 1
                 bar_cursor = _snap_to_grid(bar_cursor + float(beats_per_bar), 1.0)
                 continue
-            source_unit = _stable_hash_to_unit("piano_lower_anchor_source", section.index, anchor_idx)
-            source_idx = min(len(anchor_seed) - 1, int(source_unit * len(anchor_seed)))
-            source = anchor_seed[source_idx]
+            if energy >= 0.55 and fifth_pitch != root_pitch and (anchor_idx % 4) == 2:
+                pitch = int(fifth_pitch)
+            else:
+                pitch = int(root_pitch)
             remaining = max(0.0, float(section_length) - start_time - note_gap)
             sustain_target = max(
                 1.0,
-                float(beats_per_bar) * (0.48 if energy >= 0.75 else 0.62),
+                float(beats_per_bar) * (0.52 if energy >= 0.75 else 0.68),
             )
             duration = min(remaining, max(min_duration, sustain_target))
             if duration >= min_duration:
-                velocity_base = int(source.get("velocity", 72))
                 shaped_lower.append(
                     {
-                        "pitch": int(source.get("pitch", _fallback_lower_root_pitch())),
+                        "pitch": pitch,
                         "start_time": float(round(start_time, 6)),
                         "duration": float(round(duration, 6)),
-                        "velocity": int(min(127, max(1, velocity_base + int(energy * 10)))),
-                        "mute": int(source.get("mute", 0)),
+                        "velocity": anchor_velocity,
+                        "mute": 0,
                     }
                 )
             anchor_idx += 1
             bar_cursor = _snap_to_grid(bar_cursor + float(beats_per_bar), 1.0)
     elif lower_mode == "ostinato_window":
         root_pitch = _fallback_lower_root_pitch()
+        fifth_pitch = _fallback_lower_fifth_pitch(root_pitch)
         window_bars = 2 if energy < 0.65 else 3
         window_length = min(float(section_length), float(window_bars) * float(beats_per_bar))
-        window_range = max(0.0, float(section_length) - window_length)
-        window_start = _stable_hash_to_unit("piano_lower_window_start", section.index, section.label) * window_range
-        window_start = _snap_to_grid(window_start, 0.5)
+        if energy >= 0.6:
+            window_start = max(0.0, float(section_length) - window_length)
+        else:
+            window_start = 0.0
+        window_start = _snap_to_grid(window_start, float(beats_per_bar))
         window_end = min(float(section_length), window_start + window_length)
-        pulse_step = 1.0
-        pulse_duration = 1.2 if energy < 0.7 else 1.0
+        pulse_step = 2.0
+        pulse_duration = 1.75
         pulse_count = 0
         cursor = float(window_start)
         while cursor < window_end - note_gap:
@@ -1160,8 +1158,12 @@ def _shape_piano_layers_section(
             duration = min(remaining, max(min_duration, pulse_duration))
             if duration < min_duration:
                 break
+            if fifth_pitch != root_pitch and (pulse_count % 4) == 2:
+                pitch = int(fifth_pitch)
+            else:
+                pitch = int(root_pitch)
             pulse = {
-                "pitch": int(root_pitch),
+                "pitch": pitch,
                 "start_time": float(round(cursor, 6)),
                 "duration": float(round(duration, 6)),
                 "velocity": int(min(127, max(1, 62 + int(energy * 22) + (8 if pulse_count == 0 else 0)))),
@@ -1169,7 +1171,7 @@ def _shape_piano_layers_section(
             }
             shaped_lower.append(pulse)
             pulse_count += 1
-            cursor = _snap_to_grid(cursor + pulse_step, 0.5)
+            cursor = _snap_to_grid(cursor + pulse_step, 1.0)
 
     silence_window_len = max(
         float(beat_step) * 0.5,
