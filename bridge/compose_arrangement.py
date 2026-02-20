@@ -504,6 +504,7 @@ def run(cfg: ArrangementConfig) -> int:
             beats_per_bar=beats_per_bar,
             beat_step=beat_step,
             transpose_semitones=cfg.transpose_semitones,
+            key_name=run_key_name,
         )
         activation_mask = _build_activation_mask(
             specs,
@@ -670,6 +671,10 @@ def run(cfg: ArrangementConfig) -> int:
                     instrument_identity_contract=None
                     if marimba_identity is None
                     else marimba_identity.payload,
+                    human_feedback={
+                        "mode": cfg.human_feedback_mode,
+                        "text": cfg.human_feedback_text,
+                    },
                 )
                 novelty = artifact.get("reflection", {}).get("novelty_score")
                 print(f"info: eval artifact saved to {artifact_path}")
@@ -1181,6 +1186,10 @@ def run(cfg: ArrangementConfig) -> int:
                 instrument_identity_contract=None
                 if marimba_identity is None
                 else marimba_identity.payload,
+                human_feedback={
+                    "mode": cfg.human_feedback_mode,
+                    "text": cfg.human_feedback_text,
+                },
             )
             novelty = artifact.get("reflection", {}).get("novelty_score")
             print(f"info: eval artifact saved to {artifact_path}")

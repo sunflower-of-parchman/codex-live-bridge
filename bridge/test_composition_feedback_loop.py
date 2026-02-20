@@ -142,6 +142,7 @@ class CompositionFeedbackLoopTests(unittest.TestCase):
             self.assertEqual(artifact["fingerprints"]["meter_bpm"], "4/4@120")
             self.assertEqual(artifact["run"]["save_policy"], "ephemeral")
             self.assertIn("-4_4-120bpm-ambient-", artifact["run_id"])
+            self.assertEqual(artifact["human_feedback"]["status"], "not_provided")
             self.assertIn("merit_rubric", artifact["reflection"])
             self.assertIn("instrument_diversity_proxy", artifact["reflection"]["merit_rubric"])
             self.assertIn("similarity_weights", artifact["reflection"])
@@ -151,6 +152,42 @@ class CompositionFeedbackLoopTests(unittest.TestCase):
             entries = feedback._load_json(index_path, {}).get("entries", [])
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["run_id"], artifact["run_id"])
+
+    def test_log_composition_run_persists_human_feedback_section(self) -> None:
+        sections = [
+            _Section(index=0, label="intro", piano_mode="chords", hat_density="quarter"),
+            _Section(index=1, label="build", piano_mode="chords", hat_density="eighth"),
+            _Section(index=2, label="release", piano_mode="chords", hat_density="quarter"),
+        ]
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact, _artifact_path = feedback.log_composition_run(
+                mood="Ambient",
+                key_name="D minor",
+                bpm=120.0,
+                sig_num=4,
+                sig_den=4,
+                minutes=2.0,
+                bars=24,
+                section_bars=8,
+                sections=sections,
+                arranged_by_track=_arranged_payload(sections),
+                created_clips_by_track={"Kick Drum": 3, "RIM": 3, "HAT": 3, "Piano": 3},
+                status="success",
+                human_feedback={
+                    "mode": "verbal",
+                    "text": "Piano and marimba were in different keys; this run was a miss.",
+                },
+                repo_root=root,
+            )
+
+            self.assertEqual(artifact["human_feedback"]["status"], "provided")
+            self.assertEqual(artifact["human_feedback"]["mode"], "verbal")
+            self.assertEqual(
+                artifact["human_feedback"]["text"],
+                "Piano and marimba were in different keys; this run was a miss.",
+            )
 
     def test_same_second_runs_get_unique_run_ids_and_index_entries(self) -> None:
         sections = [

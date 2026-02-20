@@ -86,6 +86,8 @@ class ArrangementConfig:
     eval_log_dir: str | None
     memory_brief: bool
     memory_brief_results: int
+    human_feedback_mode: str
+    human_feedback_text: str | None
     dry_run: bool
 
 def parse_args(argv: Iterable[str]) -> ArrangementConfig:
@@ -300,6 +302,17 @@ def parse_args(argv: Iterable[str]) -> ArrangementConfig:
         help="How many retrieval hits to include in --memory-brief output (default: 6)",
     )
     parser.add_argument(
+        "--human-feedback-mode",
+        choices=("written", "verbal"),
+        default="written",
+        help="Human feedback mode stored in eval artifacts when feedback text is provided",
+    )
+    parser.add_argument(
+        "--human-feedback-text",
+        default=None,
+        help="Optional written/verbal human feedback text to include in eval artifacts",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the plan without sending OSC messages",
@@ -388,5 +401,9 @@ def parse_args(argv: Iterable[str]) -> ArrangementConfig:
         eval_log_dir=None if ns.eval_log_dir in (None, "") else str(ns.eval_log_dir),
         memory_brief=bool(ns.memory_brief),
         memory_brief_results=int(ns.memory_brief_results),
+        human_feedback_mode=str(ns.human_feedback_mode),
+        human_feedback_text=None
+        if ns.human_feedback_text in (None, "")
+        else str(ns.human_feedback_text),
         dry_run=bool(ns.dry_run),
     )

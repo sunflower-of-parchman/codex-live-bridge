@@ -87,6 +87,30 @@ DEFAULT_TRACK_NAMING_MODE: TrackNamingMode = "registry"
 
 DEFAULT_CLIP_WRITE_MODE: ClipWriteMode = "section_clips"
 
+NOTE_TO_PITCH_CLASS = {
+    "c": 0,
+    "b#": 0,
+    "c#": 1,
+    "db": 1,
+    "d": 2,
+    "d#": 3,
+    "eb": 3,
+    "e": 4,
+    "fb": 4,
+    "e#": 5,
+    "f": 5,
+    "f#": 6,
+    "gb": 6,
+    "g": 7,
+    "g#": 8,
+    "ab": 8,
+    "a": 9,
+    "a#": 10,
+    "bb": 10,
+    "b": 11,
+    "cb": 11,
+}
+
 def _req_id(*parts: object) -> str:
     raw = "-".join(str(p) for p in parts if p is not None)
     return raw.replace(" ", "_")
@@ -174,6 +198,79 @@ class Section:
 
 def _clamp_ratio(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
+
+def _normalize_note_token(token: str) -> str:
+    text = str(token).strip().lower()
+    text = text.replace("♯", "#").replace("♭", "b")
+    text = text.replace("sharp", "#").replace("flat", "b")
+    return text
+
+
+def _key_pitch_classes(key_name: str) -> set[int] | None:
+    if not key_name:
+        return None
+    parts = str(key_name).strip().split()
+    if len(parts) < 2:
+        return None
+    root = _normalize_note_token(parts[0])
+    quality = str(parts[1]).strip().lower()
+    root_pc = NOTE_TO_PITCH_CLASS.get(root)
+    if root_pc is None:
+        return None
+    if quality.startswith("maj"):
+        intervals = (0, 2, 4, 5, 7, 9, 11)
+    elif quality.startswith("min"):
+        intervals = (0, 2, 3, 5, 7, 8, 10)
+    else:
+        return None
+    return {(root_pc + interval) % 12 for interval in intervals}
+
+
+def _nearest_pitch_in_key(
+    pitch: int,
+    *,
+    allowed_pitch_classes: set[int],
+    midi_min_pitch: int = 0,
+    midi_max_pitch: int = 127,
+) -> int:
+    low = max(0, min(127, int(midi_min_pitch)))
+    high = max(0, min(127, int(midi_max_pitch)))
+    if low > high:
+        low, high = high, low
+    in_range = max(low, min(high, int(pitch)))
+    if in_range % 12 in allowed_pitch_classes:
+        return in_range
+    candidates = [value for value in range(low, high + 1) if value % 12 in allowed_pitch_classes]
+    if not candidates:
+        return in_range
+    return int(min(candidates, key=lambda value: (abs(value - in_range), value)))
+
+
+def _constrain_notes_to_key(
+    notes: Sequence[dict],
+    *,
+    key_name: str,
+    midi_min_pitch: int = 0,
+    midi_max_pitch: int = 127,
+) -> List[dict]:
+    allowed = _key_pitch_classes(key_name)
+    if not allowed:
+        return [dict(n) for n in notes]
+    constrained: List[dict] = []
+    for note in notes:
+        copied = dict(note)
+        copied["pitch"] = int(
+            _nearest_pitch_in_key(
+                int(copied.get("pitch", 60)),
+                allowed_pitch_classes=allowed,
+                midi_min_pitch=midi_min_pitch,
+                midi_max_pitch=midi_max_pitch,
+            )
+        )
+        constrained.append(copied)
+    constrained.sort(key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))))
+    return constrained
+
 
 def _section_profile_landmarks(
     index: int,
@@ -928,6 +1025,7 @@ def _build_source_sections(
     beats_per_bar: float,
     beat_step: float,
     transpose_semitones: int,
+    key_name: str,
 ) -> dict[str, List[tuple[Section, List[dict]]]]:
     kick_notes, _ = kick.build_kick_notes(
         bars=bars,
@@ -961,6 +1059,8 @@ def _build_source_sections(
         segment_bars=piano.DEFAULT_SEGMENT_BARS,
         transpose_semitones=transpose_semitones,
     )
+    chord_notes = _constrain_notes_to_key(chord_notes, key_name=key_name)
+    motion_notes = _constrain_notes_to_key(motion_notes, key_name=key_name)
 
     kick_sections = _arrange_drums(
         kick_notes,

@@ -213,6 +213,18 @@ class ArrangementHelpersTests(unittest.TestCase):
         self.assertTrue(cfg.memory_brief)
         self.assertEqual(cfg.memory_brief_results, 4)
 
+    def test_parse_args_accepts_human_feedback_controls(self) -> None:
+        cfg = arrangement.parse_args(
+            [
+                "--human-feedback-mode",
+                "verbal",
+                "--human-feedback-text",
+                "Piano and marimba were in different keys.",
+            ]
+        )
+        self.assertEqual(cfg.human_feedback_mode, "verbal")
+        self.assertEqual(cfg.human_feedback_text, "Piano and marimba were in different keys.")
+
     def test_parse_args_rejects_non_positive_memory_brief_results(self) -> None:
         with self.assertRaises(SystemExit):
             arrangement.parse_args(
@@ -556,6 +568,7 @@ class ArrangementHelpersTests(unittest.TestCase):
             beats_per_bar=5.0,
             beat_step=1.0,
             transpose_semitones=2,
+            key_name="D minor",
         )
         self.assertIn("piano_layers", sources)
 
@@ -563,6 +576,27 @@ class ArrangementHelpersTests(unittest.TestCase):
         mode_note_counts = {section.piano_mode: len(notes) for section, notes in layers}
         self.assertGreater(mode_note_counts.get("chords", 0), 0)
         self.assertGreater(mode_note_counts.get("motion", 0), 0)
+
+    def test_build_source_sections_locks_piano_notes_to_key(self) -> None:
+        sections = arrangement._build_sections(
+            total_bars=16,
+            section_bars=4,
+            profile_family="legacy_arc",
+        )
+        sources = arrangement._build_source_sections(
+            sections=sections,
+            bars=16,
+            beats_per_bar=4.0,
+            beat_step=1.0,
+            transpose_semitones=2,
+            key_name="E major",
+        )
+        allowed_pitch_classes = {4, 6, 8, 9, 11, 1, 3}
+        for source_name in ("piano_chords", "piano_motion", "piano_layers"):
+            payload = sources[source_name]
+            for _section, notes in payload:
+                for note in notes:
+                    self.assertIn(int(note["pitch"]) % 12, allowed_pitch_classes)
 
     def test_fit_pitch_to_register_preserves_pitch_class_when_possible(self) -> None:
         # C6 should fold down by octaves into the target range as C4.

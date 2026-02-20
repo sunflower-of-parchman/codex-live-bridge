@@ -90,6 +90,17 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         help="Bypass arrangement write cache to force fresh clip writes",
     )
     parser.add_argument(
+        "--human-feedback-mode",
+        choices=("written", "verbal"),
+        default="written",
+        help="Human feedback mode stored in eval artifacts when feedback text is provided",
+    )
+    parser.add_argument(
+        "--human-feedback-text",
+        default=None,
+        help="Optional written/verbal human feedback text to include in eval artifacts",
+    )
+    parser.add_argument(
         "--launch-ableton",
         dest="launch_ableton",
         action="store_true",
@@ -146,6 +157,9 @@ def _compose_args(ns: argparse.Namespace) -> list[str]:
         compose_argv.append("--no-write-cache")
     if ns.archive_dir:
         compose_argv.extend(["--archive-dir", ns.archive_dir])
+    if ns.human_feedback_text:
+        compose_argv.extend(["--human-feedback-mode", ns.human_feedback_mode])
+        compose_argv.extend(["--human-feedback-text", ns.human_feedback_text])
     if ns.dry_run:
         compose_argv.append("--dry-run")
     return compose_argv

@@ -716,6 +716,29 @@ def _reflection_prompts(
     return prompts
 
 
+def _normalize_human_feedback(feedback: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(feedback, Mapping):
+        return {
+            "status": "not_provided",
+            "mode": None,
+            "text": None,
+        }
+    raw_text = str(feedback.get("text", "")).strip()
+    raw_mode = str(feedback.get("mode", "")).strip().lower()
+    mode = raw_mode if raw_mode in {"written", "verbal"} else "written"
+    if not raw_text:
+        return {
+            "status": "not_provided",
+            "mode": None,
+            "text": None,
+        }
+    return {
+        "status": "provided",
+        "mode": mode,
+        "text": raw_text,
+    }
+
+
 def build_composition_artifact(
     *,
     mood: str,
@@ -732,6 +755,7 @@ def build_composition_artifact(
     status: str,
     run_metadata: Mapping[str, Any] | None = None,
     instrument_identity_contract: Mapping[str, Any] | None = None,
+    human_feedback: Mapping[str, Any] | None = None,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
     root = _repo_root(repo_root)
@@ -783,6 +807,7 @@ def build_composition_artifact(
 
     novelty_score = None if similarity is None else round(1.0 - similarity, 4)
     track_totals = _track_totals(note_count_paths)
+    normalized_human_feedback = _normalize_human_feedback(human_feedback)
     instrument_identity = _compute_instrument_identity_metrics(
         arranged_by_track=arranged_by_track,
         contract=instrument_identity_contract,
@@ -808,6 +833,7 @@ def build_composition_artifact(
             "section_bars": int(section_bars),
         },
         "run": dict(run_metadata or {}),
+        "human_feedback": normalized_human_feedback,
         "section_strategy": [
             {
                 "index": int(getattr(section, "index", idx)),
@@ -929,6 +955,7 @@ def log_composition_run(
     status: str,
     run_metadata: Mapping[str, Any] | None = None,
     instrument_identity_contract: Mapping[str, Any] | None = None,
+    human_feedback: Mapping[str, Any] | None = None,
     repo_root: Path | None = None,
     relative_log_dir: Path = DEFAULT_RELATIVE_LOG_DIR,
 ) -> tuple[dict[str, Any], Path]:
@@ -947,6 +974,7 @@ def log_composition_run(
         status=status,
         run_metadata=run_metadata,
         instrument_identity_contract=instrument_identity_contract,
+        human_feedback=human_feedback,
         repo_root=repo_root,
     )
     path = persist_artifact(
