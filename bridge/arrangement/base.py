@@ -226,6 +226,16 @@ def _key_pitch_classes(key_name: str) -> set[int] | None:
     return {(root_pc + interval) % 12 for interval in intervals}
 
 
+def _key_root_pitch_class(key_name: str) -> int | None:
+    if not key_name:
+        return None
+    parts = str(key_name).strip().split()
+    if len(parts) < 1:
+        return None
+    root = _normalize_note_token(parts[0])
+    return NOTE_TO_PITCH_CLASS.get(root)
+
+
 def _nearest_pitch_in_key(
     pitch: int,
     *,
@@ -1014,6 +1024,7 @@ def _shape_piano_layers_section(
     *,
     beats_per_bar: float,
     beat_step: float,
+    key_name: str = "",
     split_pitch: int = 60,
 ) -> List[dict]:
     if not notes:
@@ -1029,6 +1040,12 @@ def _shape_piano_layers_section(
     note_gap = max(0.01, float(beat_step) * 0.02)
     min_duration = max(0.12, float(beat_step) * 0.1)
 
+    def _snap_to_grid(value: float, step: float) -> float:
+        if step <= 0:
+            return float(round(value, 6))
+        snapped = round(float(value) / float(step)) * float(step)
+        return float(round(snapped, 6))
+
     lower_notes = [
         dict(note)
         for note in notes
@@ -1042,20 +1059,117 @@ def _shape_piano_layers_section(
     lower_notes.sort(key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))))
     upper_notes.sort(key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))))
 
+    def _fallback_lower_root_pitch() -> int:
+        if lower_notes:
+            return int(min(lower_notes, key=lambda n: int(n.get("pitch", 60))).get("pitch", 48))
+        root_pitch_class = _key_root_pitch_class(key_name)
+        if root_pitch_class is None:
+            return 48
+        candidates = [pitch for pitch in range(36, int(split_pitch) + 1) if pitch % 12 == root_pitch_class]
+        if candidates:
+            return int(min(candidates, key=lambda pitch: abs(pitch - 48)))
+        return 48
+
+    mode_unit = _stable_hash_to_unit("piano_lower_mode", section.index, section.label)
+    if energy < 0.35:
+        if mode_unit < 0.18:
+            lower_mode = "right_only"
+        elif mode_unit < 0.52:
+            lower_mode = "anchor"
+        else:
+            lower_mode = "ostinato_window"
+    elif energy < 0.7:
+        if mode_unit < 0.1:
+            lower_mode = "right_only"
+        elif mode_unit < 0.46:
+            lower_mode = "anchor"
+        else:
+            lower_mode = "ostinato_window"
+    else:
+        if mode_unit < 0.08:
+            lower_mode = "right_only"
+        elif mode_unit < 0.42:
+            lower_mode = "anchor"
+        else:
+            lower_mode = "ostinato_window"
+
     shaped_lower: list[dict] = []
-    for note in lower_notes:
-        start_time = max(0.0, float(note.get("start_time", 0.0)))
-        if start_time >= section_length - note_gap:
-            continue
-        remaining = max(0.0, float(section_length) - start_time - note_gap)
-        sustain_target = max(1.0, float(beat_step) * 2.0)
-        duration = min(remaining, max(float(note.get("duration", 0.25)), sustain_target))
-        if duration < min_duration:
-            continue
-        copied = dict(note)
-        copied["start_time"] = float(round(start_time, 6))
-        copied["duration"] = float(round(duration, 6))
-        shaped_lower.append(copied)
+    if lower_mode == "anchor":
+        if lower_notes:
+            anchor_seed = sorted(
+                (dict(note) for note in lower_notes),
+                key=lambda n: (float(n.get("start_time", 0.0)), int(n.get("pitch", 0))),
+            )
+        else:
+            anchor_seed = [
+                {
+                    "pitch": int(_fallback_lower_root_pitch()),
+                    "start_time": 0.0,
+                    "duration": max(1.0, float(beat_step) * 2.0),
+                    "velocity": int(min(127, max(1, 68 + int(energy * 18)))),
+                    "mute": 0,
+                }
+            ]
+        anchor_idx = 0
+        bar_cursor = 0.0
+        while bar_cursor < section_length - note_gap:
+            start_time = _snap_to_grid(bar_cursor, 1.0)
+            if start_time >= section_length - note_gap:
+                break
+            sparse_unit = _stable_hash_to_unit("piano_lower_anchor_sparse", section.index, anchor_idx)
+            if energy < 0.35 and sparse_unit < 0.08:
+                anchor_idx += 1
+                bar_cursor = _snap_to_grid(bar_cursor + float(beats_per_bar), 1.0)
+                continue
+            source_unit = _stable_hash_to_unit("piano_lower_anchor_source", section.index, anchor_idx)
+            source_idx = min(len(anchor_seed) - 1, int(source_unit * len(anchor_seed)))
+            source = anchor_seed[source_idx]
+            remaining = max(0.0, float(section_length) - start_time - note_gap)
+            sustain_target = max(
+                1.0,
+                float(beats_per_bar) * (0.48 if energy >= 0.75 else 0.62),
+            )
+            duration = min(remaining, max(min_duration, sustain_target))
+            if duration >= min_duration:
+                velocity_base = int(source.get("velocity", 72))
+                shaped_lower.append(
+                    {
+                        "pitch": int(source.get("pitch", _fallback_lower_root_pitch())),
+                        "start_time": float(round(start_time, 6)),
+                        "duration": float(round(duration, 6)),
+                        "velocity": int(min(127, max(1, velocity_base + int(energy * 10)))),
+                        "mute": int(source.get("mute", 0)),
+                    }
+                )
+            anchor_idx += 1
+            bar_cursor = _snap_to_grid(bar_cursor + float(beats_per_bar), 1.0)
+    elif lower_mode == "ostinato_window":
+        root_pitch = _fallback_lower_root_pitch()
+        window_bars = 2 if energy < 0.65 else 3
+        window_length = min(float(section_length), float(window_bars) * float(beats_per_bar))
+        window_range = max(0.0, float(section_length) - window_length)
+        window_start = _stable_hash_to_unit("piano_lower_window_start", section.index, section.label) * window_range
+        window_start = _snap_to_grid(window_start, 0.5)
+        window_end = min(float(section_length), window_start + window_length)
+        pulse_step = 1.0
+        pulse_duration = 1.2 if energy < 0.7 else 1.0
+        pulse_count = 0
+        cursor = float(window_start)
+        while cursor < window_end - note_gap:
+            remaining = max(0.0, float(section_length) - cursor - note_gap)
+            duration = min(remaining, max(min_duration, pulse_duration))
+            if duration < min_duration:
+                break
+            pulse = {
+                "pitch": int(root_pitch),
+                "start_time": float(round(cursor, 6)),
+                "duration": float(round(duration, 6)),
+                "velocity": int(min(127, max(1, 62 + int(energy * 22) + (8 if pulse_count == 0 else 0)))),
+                "mute": 0,
+            }
+            shaped_lower.append(pulse)
+            pulse_count += 1
+            cursor = _snap_to_grid(cursor + pulse_step, 0.5)
 
     silence_window_len = max(
         float(beat_step) * 0.5,
@@ -1075,12 +1189,6 @@ def _shape_piano_layers_section(
         upper_echo_offsets = (0.25, 0.5)
     elif energy >= 0.6:
         upper_echo_offsets = (0.5,)
-
-    def _snap_to_grid(value: float, step: float) -> float:
-        if step <= 0:
-            return float(round(value, 6))
-        snapped = round(float(value) / float(step)) * float(step)
-        return float(round(snapped, 6))
 
     shaped_upper: list[dict] = []
     for idx, note in enumerate(upper_notes):
@@ -1217,6 +1325,7 @@ def _arrange_piano(
     beats_per_bar: float,
     beat_step: float,
     apply_layer_variation: bool = False,
+    key_name: str = "",
 ) -> List[tuple[Section, List[dict]]]:
     arranged: List[tuple[Section, List[dict]]] = []
     for section in sections:
@@ -1240,6 +1349,7 @@ def _arrange_piano(
                 notes,
                 beats_per_bar=beats_per_bar,
                 beat_step=beat_step,
+                key_name=key_name,
             )
         if notes:
             notes.sort(key=lambda n: (n["start_time"], n["pitch"]))
@@ -1321,6 +1431,7 @@ def _build_source_sections(
         sections,
         beats_per_bar,
         beat_step,
+        key_name=key_name,
     )
     piano_motion = _arrange_piano(
         [],
@@ -1328,6 +1439,7 @@ def _build_source_sections(
         sections,
         beats_per_bar,
         beat_step,
+        key_name=key_name,
     )
     piano_layers = _arrange_piano(
         chord_notes,
@@ -1336,6 +1448,7 @@ def _build_source_sections(
         beats_per_bar,
         beat_step,
         apply_layer_variation=True,
+        key_name=key_name,
     )
     return {
         "kick": kick_sections,

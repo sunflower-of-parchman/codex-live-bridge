@@ -717,14 +717,19 @@ class ArrangementHelpersTests(unittest.TestCase):
         layers = sources["piano_layers"]
 
         lower_durations: list[float] = []
+        lower_starts: list[float] = []
         upper_durations: list[float] = []
         upper_gaps: list[float] = []
         upper_starts: list[float] = []
+        sections_with_lower = 0
 
         for _section, notes in layers:
             lower = [dict(note) for note in notes if int(note["pitch"]) <= 60]
             upper = [dict(note) for note in notes if int(note["pitch"]) > 60]
+            if lower:
+                sections_with_lower += 1
             lower_durations.extend(float(note["duration"]) for note in lower)
+            lower_starts.extend(float(note["start_time"]) for note in lower)
             upper_durations.extend(float(note["duration"]) for note in upper)
             upper_starts.extend(float(note["start_time"]) for note in upper)
             ordered_upper = sorted(upper, key=lambda n: float(n["start_time"]))
@@ -735,17 +740,53 @@ class ArrangementHelpersTests(unittest.TestCase):
 
         self.assertTrue(lower_durations)
         self.assertTrue(upper_durations)
-        self.assertGreater(
-            sum(lower_durations) / len(lower_durations),
-            sum(upper_durations) / len(upper_durations),
+        self.assertTrue(any(duration >= 1.0 - 1e-6 for duration in lower_durations))
+        self.assertTrue(
+            any(abs(start - round(start)) <= 1e-6 for start in lower_starts),
+            "lower register should keep on-beat/downbeat anchors",
         )
         self.assertTrue(any(duration <= 0.5 + 1e-6 for duration in upper_durations))
         self.assertTrue(any(duration >= 3.5 for duration in upper_durations))
         self.assertTrue(any(gap >= 0.5 for gap in upper_gaps))
+        self.assertGreater(sections_with_lower, 0)
         self.assertTrue(
             any(abs(start - round(start)) > 1e-6 for start in upper_starts),
             "upper register should include off-beat starts, not only whole-beat onsets",
         )
+
+    def test_shape_piano_layers_section_supports_right_hand_only_passages(self) -> None:
+        section = arrangement.Section(
+            index=0,
+            start_bar=0,
+            bar_count=4,
+            label="intro",
+            kick_on=True,
+            rim_on=True,
+            hat_on=True,
+            piano_mode="motion",
+            kick_keep_ratio=1.0,
+            rim_keep_ratio=1.0,
+            hat_keep_ratio=1.0,
+            hat_density="eighth",
+        )
+        notes = [
+            {"pitch": 52, "start_time": 0.0, "duration": 2.0, "velocity": 88, "mute": 0},
+            {"pitch": 55, "start_time": 2.0, "duration": 2.0, "velocity": 88, "mute": 0},
+            {"pitch": 67, "start_time": 0.0, "duration": 0.5, "velocity": 96, "mute": 0},
+            {"pitch": 71, "start_time": 1.0, "duration": 0.5, "velocity": 96, "mute": 0},
+            {"pitch": 74, "start_time": 2.0, "duration": 0.5, "velocity": 96, "mute": 0},
+        ]
+
+        shaped = arrangement._shape_piano_layers_section(
+            section,
+            notes,
+            beats_per_bar=4.0,
+            beat_step=1.0,
+            key_name="E major",
+        )
+
+        self.assertTrue(any(int(note["pitch"]) > 60 for note in shaped))
+        self.assertFalse(any(int(note["pitch"]) <= 60 for note in shaped))
 
     def test_fit_pitch_to_register_preserves_pitch_class_when_possible(self) -> None:
         # C6 should fold down by octaves into the target range as C4.
