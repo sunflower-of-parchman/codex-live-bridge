@@ -12,8 +12,8 @@ from typing import Iterable
 import compose_arrangement as arrangement
 import setup_marimba_environment as setup
 
-DEFAULT_MARIMBA_REGISTRY_PATH = (
-    Path(__file__).resolve().parent / "config" / "instrument_registry.marimba.v1.json"
+DEFAULT_MARIMBA_PIANO_REGISTRY_PATH = (
+    Path(__file__).resolve().parent / "config" / "instrument_registry.marimba_piano.v1.json"
 )
 
 
@@ -81,8 +81,8 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--instrument-registry-path",
-        default=str(DEFAULT_MARIMBA_REGISTRY_PATH),
-        help="Instrument registry path for composition (default: marimba-only registry)",
+        default=str(DEFAULT_MARIMBA_PIANO_REGISTRY_PATH),
+        help="Instrument registry path for composition (default: marimba+piano registry)",
     )
     parser.add_argument(
         "--no-write-cache",

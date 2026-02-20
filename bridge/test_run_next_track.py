@@ -61,7 +61,10 @@ class RunNextTrackTests(unittest.TestCase):
         self.assertIn("single_clip", captured_compose_argv or [])
         self.assertIn("--no-write-cache", captured_compose_argv or [])
         self.assertTrue(
-            any(item.endswith("bridge/config/instrument_registry.marimba.v1.json") for item in (captured_compose_argv or []))
+            any(
+                item.endswith("bridge/config/instrument_registry.marimba_piano.v1.json")
+                for item in (captured_compose_argv or [])
+            )
         )
         self.assertIn("--archive-dir", captured_compose_argv or [])
         self.assertIn("output/live_sets", captured_compose_argv or [])
