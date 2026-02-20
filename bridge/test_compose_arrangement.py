@@ -237,6 +237,37 @@ class ArrangementHelpersTests(unittest.TestCase):
             "Keep left hand stable and vary right hand with silence.",
         )
 
+    def test_ensure_live_transport_retries_until_match(self) -> None:
+        with (
+            mock.patch.object(arrangement.kick, "_api_set") as mock_api_set,
+            mock.patch.object(
+                arrangement.kick,
+                "_api_get",
+                side_effect=[
+                    [120.0],
+                    [4],
+                    [4],
+                    [142.0],
+                    [4],
+                    [4],
+                ],
+            ),
+        ):
+            observed_tempo, observed_sig_num, observed_sig_den = arrangement._ensure_live_transport(
+                sock=mock.Mock(),
+                ack_sock=mock.Mock(),
+                bpm=142.0,
+                sig_num=4,
+                sig_den=4,
+                timeout_s=1.75,
+                max_attempts=2,
+            )
+
+        self.assertEqual(observed_tempo, 142.0)
+        self.assertEqual(observed_sig_num, 4)
+        self.assertEqual(observed_sig_den, 4)
+        self.assertEqual(mock_api_set.call_count, 6)
+
     def test_parse_args_rejects_non_positive_memory_brief_results(self) -> None:
         with self.assertRaises(SystemExit):
             arrangement.parse_args(
@@ -609,6 +640,65 @@ class ArrangementHelpersTests(unittest.TestCase):
             for _section, notes in payload:
                 for note in notes:
                     self.assertIn(int(note["pitch"]) % 12, allowed_pitch_classes)
+
+    def test_enforce_piano_key_lock_corrects_out_of_key_notes(self) -> None:
+        section = arrangement.Section(
+            index=0,
+            start_bar=0,
+            bar_count=4,
+            label="intro",
+            kick_on=True,
+            rim_on=True,
+            hat_on=True,
+            piano_mode="layers",
+            kick_keep_ratio=1.0,
+            rim_keep_ratio=1.0,
+            hat_keep_ratio=1.0,
+            hat_density="quarter",
+        )
+        specs = [
+            arrangement.InstrumentSpec(
+                name="Piano",
+                source="piano_layers",
+                role="harmony_anchor",
+                priority=1,
+                required=True,
+                active_min=1,
+                active_max=1,
+                pitch_shift=0,
+                velocity_scale=1.0,
+                keep_ratio_scale=1.0,
+                allow_labels=(),
+                apply_groove=False,
+                midi_min_pitch=36,
+                midi_max_pitch=84,
+            )
+        ]
+        arranged_by_track = {
+            "Piano": [
+                (
+                    section,
+                    [
+                        {"pitch": 67, "start_time": 0.0, "duration": 1.0, "velocity": 90, "mute": 0},  # G (out)
+                        {"pitch": 64, "start_time": 1.0, "duration": 1.0, "velocity": 90, "mute": 0},  # E (in)
+                        {"pitch": 65, "start_time": 2.0, "duration": 1.0, "velocity": 90, "mute": 0},  # F (out)
+                    ],
+                )
+            ]
+        }
+        constrained, summaries = arrangement._enforce_piano_key_lock(
+            arranged_by_track=arranged_by_track,
+            specs=specs,
+            key_name="E major",
+        )
+
+        summary = summaries[0]
+        self.assertEqual(summary["out_of_key_before"], 2)
+        self.assertEqual(summary["out_of_key_after"], 0)
+        constrained_notes = constrained["Piano"][0][1]
+        allowed_pitch_classes = {4, 6, 8, 9, 11, 1, 3}
+        for note in constrained_notes:
+            self.assertIn(int(note["pitch"]) % 12, allowed_pitch_classes)
 
     def test_build_source_sections_shapes_piano_layers_with_register_roles_and_silence(self) -> None:
         sections = arrangement._build_sections(

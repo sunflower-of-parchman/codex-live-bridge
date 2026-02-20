@@ -102,6 +102,91 @@ def _apply_live_key(
     return int(root_note), str(scale_name)
 
 
+def _ensure_live_transport(
+    sock: socket.socket,
+    ack_sock: socket.socket,
+    *,
+    bpm: float,
+    sig_num: int,
+    sig_den: int,
+    timeout_s: float,
+    max_attempts: int = 4,
+) -> tuple[float | None, int | None, int | None]:
+    observed_tempo: float | None = None
+    observed_sig_num: int | None = None
+    observed_sig_den: int | None = None
+    target_bpm = float(bpm)
+    target_sig_num = int(sig_num)
+    target_sig_den = int(sig_den)
+
+    for attempt in range(1, max(1, int(max_attempts)) + 1):
+        kick._api_set(
+            sock,
+            ack_sock,
+            "live_set",
+            "tempo",
+            target_bpm,
+            _req_id("arr-live-tempo", attempt),
+            timeout_s,
+        )
+        kick._api_set(
+            sock,
+            ack_sock,
+            "live_set",
+            "signature_numerator",
+            target_sig_num,
+            _req_id("arr-live-sig-num", attempt),
+            timeout_s,
+        )
+        kick._api_set(
+            sock,
+            ack_sock,
+            "live_set",
+            "signature_denominator",
+            target_sig_den,
+            _req_id("arr-live-sig-den", attempt),
+            timeout_s,
+        )
+
+        observed_tempo = kick._as_float(
+            kick._api_get(
+                sock,
+                ack_sock,
+                "live_set",
+                "tempo",
+                _req_id("arr-live-tempo-observed", attempt),
+                timeout_s,
+            )
+        )
+        observed_sig_num = kick._as_int(
+            kick._api_get(
+                sock,
+                ack_sock,
+                "live_set",
+                "signature_numerator",
+                _req_id("arr-live-sig-num-observed", attempt),
+                timeout_s,
+            )
+        )
+        observed_sig_den = kick._as_int(
+            kick._api_get(
+                sock,
+                ack_sock,
+                "live_set",
+                "signature_denominator",
+                _req_id("arr-live-sig-den-observed", attempt),
+                timeout_s,
+            )
+        )
+
+        tempo_ok = observed_tempo is not None and abs(float(observed_tempo) - target_bpm) <= 1e-6
+        sig_num_ok = observed_sig_num == target_sig_num
+        sig_den_ok = observed_sig_den == target_sig_den
+        if tempo_ok and sig_num_ok and sig_den_ok:
+            return observed_tempo, observed_sig_num, observed_sig_den
+    return observed_tempo, observed_sig_num, observed_sig_den
+
+
 def _resolve_track_path(
     sock: socket.socket,
     ack_sock: socket.socket,
@@ -182,6 +267,68 @@ def _print_multi_pass_reports(reports: Sequence[Mapping[str, Any]]) -> None:
             f"info: multi-pass[{pass_index}] {pass_name} "
             f"notes {before}->{after} changed_tracks={changed_count}"
         )
+
+
+def _enforce_piano_key_lock(
+    *,
+    arranged_by_track: Mapping[str, Sequence[tuple[Section, Sequence[dict[str, Any]]]]],
+    specs: Sequence[InstrumentSpec],
+    key_name: str,
+) -> tuple[dict[str, list[tuple[Section, list[dict[str, Any]]]]], list[dict[str, int | str]]]:
+    allowed_pitch_classes = _key_pitch_classes(key_name)
+    spec_by_name = {str(spec.name): spec for spec in specs}
+    updated: dict[str, list[tuple[Section, list[dict[str, Any]]]]] = {}
+    summaries: list[dict[str, int | str]] = []
+
+    for track_name, payloads in arranged_by_track.items():
+        token = str(track_name).strip().lower()
+        if "piano" not in token:
+            updated[str(track_name)] = [
+                (section, [dict(note) for note in notes])
+                for section, notes in payloads
+            ]
+            continue
+
+        spec = spec_by_name.get(str(track_name))
+        midi_min = 0 if spec is None else int(spec.midi_min_pitch)
+        midi_max = 127 if spec is None else int(spec.midi_max_pitch)
+        before_out = 0
+        after_out = 0
+        total_notes = 0
+        constrained_payloads: list[tuple[Section, list[dict[str, Any]]]] = []
+        for section, notes in payloads:
+            note_list = [dict(note) for note in notes]
+            constrained = _constrain_notes_to_key(
+                note_list,
+                key_name=key_name,
+                midi_min_pitch=midi_min,
+                midi_max_pitch=midi_max,
+            )
+            if allowed_pitch_classes:
+                before_out += sum(
+                    1
+                    for note in note_list
+                    if int(note.get("pitch", 0)) % 12 not in allowed_pitch_classes
+                )
+                after_out += sum(
+                    1
+                    for note in constrained
+                    if int(note.get("pitch", 0)) % 12 not in allowed_pitch_classes
+                )
+            total_notes += len(constrained)
+            constrained_payloads.append((section, constrained))
+
+        updated[str(track_name)] = constrained_payloads
+        summaries.append(
+            {
+                "track_name": str(track_name),
+                "total_notes": int(total_notes),
+                "out_of_key_before": int(before_out),
+                "out_of_key_after": int(after_out),
+            }
+        )
+
+    return updated, summaries
 
 
 def _maybe_print_memory_brief(
@@ -557,6 +704,19 @@ def run(cfg: ArrangementConfig) -> int:
     elif marimba_runtime_meta.get("status") not in {"identity_disabled_or_missing", "not_applied"}:
         print(f"warning: marimba identity not applied ({marimba_runtime_meta.get('status')})")
 
+    arranged_by_track, piano_key_lock_summaries = _enforce_piano_key_lock(
+        arranged_by_track=arranged_by_track,
+        specs=specs,
+        key_name=run_key_name,
+    )
+    for summary in piano_key_lock_summaries:
+        print(
+            "info: piano key lock "
+            f"track={summary['track_name']} "
+            f"out_of_key={summary['out_of_key_before']}->{summary['out_of_key_after']} "
+            f"notes={summary['total_notes']}"
+        )
+
     apply_groove_tracks = {spec.name for spec in specs if spec.apply_groove and spec.name in arranged_by_track}
     composition_print_path: Path | None = None
     if cfg.composition_print:
@@ -760,6 +920,26 @@ def run(cfg: ArrangementConfig) -> int:
         ):
             print(f"sent: {bridge.describe_command(cmd)}")
             _print_acks(_send_and_collect_acks(sock, ack_sock, cmd, cfg.ack_timeout_s))
+
+        tempo_verified, sig_num_verified, sig_den_verified = _ensure_live_transport(
+            sock=sock,
+            ack_sock=ack_sock,
+            bpm=run_bpm,
+            sig_num=run_sig_num,
+            sig_den=run_sig_den,
+            timeout_s=cfg.ack_timeout_s,
+        )
+        if (
+            tempo_verified is None
+            or abs(float(tempo_verified) - float(run_bpm)) > 1e-6
+            or sig_num_verified != int(run_sig_num)
+            or sig_den_verified != int(run_sig_den)
+        ):
+            print(
+                "warning: live_set transport did not fully verify; "
+                f"observed tempo/signature {tempo_verified} {sig_num_verified}/{sig_den_verified}",
+                file=sys.stderr,
+            )
 
         key_applied = _apply_live_key(sock, ack_sock, run_key_name, cfg.ack_timeout_s)
         if key_applied is not None:

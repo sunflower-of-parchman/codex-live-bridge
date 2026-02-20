@@ -364,6 +364,95 @@ def _apply_live_key(
     return int(root_note), str(scale_name)
 
 
+def _ensure_live_transport(
+    sock: socket.socket,
+    ack_sock: socket.socket,
+    *,
+    bpm: float,
+    sig_num: int,
+    sig_den: int,
+    timeout_s: float,
+    max_attempts: int = 4,
+) -> tuple[float | None, int | None, int | None]:
+    observed_tempo: float | None = None
+    observed_sig_num: int | None = None
+    observed_sig_den: int | None = None
+    target_bpm = float(bpm)
+    target_sig_num = int(sig_num)
+    target_sig_den = int(sig_den)
+
+    for attempt in range(1, max(1, int(max_attempts)) + 1):
+        kick._api_set(
+            sock,
+            ack_sock,
+            "live_set",
+            "tempo",
+            target_bpm,
+            f"setup-live-tempo-{attempt}",
+            timeout_s,
+        )
+        kick._api_set(
+            sock,
+            ack_sock,
+            "live_set",
+            "signature_numerator",
+            target_sig_num,
+            f"setup-live-sig-num-{attempt}",
+            timeout_s,
+        )
+        kick._api_set(
+            sock,
+            ack_sock,
+            "live_set",
+            "signature_denominator",
+            target_sig_den,
+            f"setup-live-sig-den-{attempt}",
+            timeout_s,
+        )
+
+        observed_tempo = kick._as_float(
+            kick._api_get(
+                sock,
+                ack_sock,
+                "live_set",
+                "tempo",
+                f"setup-live-tempo-observed-{attempt}",
+                timeout_s,
+            )
+        )
+        observed_sig_num = kick._as_int(
+            kick._api_get(
+                sock,
+                ack_sock,
+                "live_set",
+                "signature_numerator",
+                f"setup-live-sig-num-observed-{attempt}",
+                timeout_s,
+            )
+        )
+        observed_sig_den = kick._as_int(
+            kick._api_get(
+                sock,
+                ack_sock,
+                "live_set",
+                "signature_denominator",
+                f"setup-live-sig-den-observed-{attempt}",
+                timeout_s,
+            )
+        )
+
+        tempo_ok = observed_tempo is not None and abs(float(observed_tempo) - target_bpm) <= 1e-6
+        sig_num_ok = observed_sig_num == target_sig_num
+        sig_den_ok = observed_sig_den == target_sig_den
+        if tempo_ok and sig_num_ok and sig_den_ok:
+            return observed_tempo, observed_sig_num, observed_sig_den
+
+        if attempt < max_attempts:
+            time.sleep(min(0.6, 0.15 * float(attempt)))
+
+    return observed_tempo, observed_sig_num, observed_sig_den
+
+
 def _resolve_track_path(
     sock: socket.socket,
     ack_sock: socket.socket,
@@ -783,6 +872,26 @@ def run(cfg: SetupConfig) -> int:
                 bridge.OscCommand("/sig_den", (int(plan.sig_den),)),
             ):
                 _send_and_collect_acks(sock, ack_sock, cmd, cfg.ack_timeout_s)
+
+            tempo_verified, sig_num_verified, sig_den_verified = _ensure_live_transport(
+                sock=sock,
+                ack_sock=ack_sock,
+                bpm=plan.bpm,
+                sig_num=plan.sig_num,
+                sig_den=plan.sig_den,
+                timeout_s=cfg.ack_timeout_s,
+            )
+            if (
+                tempo_verified is None
+                or abs(float(tempo_verified) - float(plan.bpm)) > 1e-6
+                or sig_num_verified != int(plan.sig_num)
+                or sig_den_verified != int(plan.sig_den)
+            ):
+                print(
+                    "warning: live_set transport did not fully verify; "
+                    f"observed tempo/signature {tempo_verified} {sig_num_verified}/{sig_den_verified}",
+                    file=sys.stderr,
+                )
 
             if cfg.key_name:
                 root_note, scale_name = _apply_live_key(

@@ -164,6 +164,39 @@ class SetupMarimbaEnvironmentTests(unittest.TestCase):
             1.75,
         )
 
+    def test_ensure_live_transport_retries_until_match(self) -> None:
+        with (
+            mock.patch.object(setup.kick, "_api_set") as mock_api_set,
+            mock.patch.object(
+                setup.kick,
+                "_api_get",
+                side_effect=[
+                    [120.0],
+                    [4],
+                    [4],
+                    [142.0],
+                    [4],
+                    [4],
+                ],
+            ),
+            mock.patch.object(setup.time, "sleep") as mock_sleep,
+        ):
+            observed_tempo, observed_sig_num, observed_sig_den = setup._ensure_live_transport(
+                sock=mock.Mock(),
+                ack_sock=mock.Mock(),
+                bpm=142.0,
+                sig_num=4,
+                sig_den=4,
+                timeout_s=1.75,
+                max_attempts=2,
+            )
+
+        self.assertEqual(observed_tempo, 142.0)
+        self.assertEqual(observed_sig_num, 4)
+        self.assertEqual(observed_sig_den, 4)
+        self.assertEqual(mock_api_set.call_count, 6)
+        mock_sleep.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
