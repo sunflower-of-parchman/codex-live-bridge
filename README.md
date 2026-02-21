@@ -7,6 +7,11 @@ More precisely, this repo ships a Max for Live device, a JavaScript command
 router, and Python OSC client/CLI scripts that drive Ableton Live through
 LiveAPI (the Live Object Model) over OSC/UDP.
 
+It also includes a local memory + eval loop that starts from blank user
+templates and is filled by each user's own compositional intent over time.
+This project does not train on, ingest, copy, or emulate other artists'
+music; steering context is user-authored and local.
+
 Started during the OpenAI 2026 Hackathon in San Francisco, built in tandem with GPT-5.3-Codex.
 
 This project is independent and is not affiliated with or endorsed by OpenAI,
