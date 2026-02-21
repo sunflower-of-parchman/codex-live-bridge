@@ -169,9 +169,13 @@ flowchart LR
 
 To run the bridge and workflow scripts:
 
-- Ableton Live with Max for Live support:
+- Fast start (recommended): Ableton Live 12 Suite 30-day trial (includes Max for Live):
+  [Ableton Live trial](https://www.ableton.com/en/trial/)
+- Any full setup with Max for Live support also works:
   [Ableton Live](https://www.ableton.com/en/live/) and
   [Max for Live](https://www.ableton.com/en/live/max-for-live/)
+- Codex app (used by this project workflow):
+  [Codex app download / getting started](https://developers.openai.com/codex/app/#getting-started)
 - Python 3.10+:
   [python.org downloads](https://www.python.org/downloads/)
 - If using Python 3.10, install `tomli` for TOML parsing in memory/eval tools:
