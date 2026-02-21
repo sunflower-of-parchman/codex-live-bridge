@@ -8,7 +8,7 @@ Suggested setup:
 
 ```bash
 mkdir -p memory
-rsync -a templates/user-preferences/memory/ memory/
+rsync -a templates/user-preferences/seed/ memory/
 ```
 
 Then fill the docs with your own preferences.

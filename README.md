@@ -225,7 +225,7 @@ To edit bridge/device internals:
 
 ```bash
 mkdir -p memory
-rsync -a templates/user-preferences/memory/ memory/
+rsync -a templates/user-preferences/seed/ memory/
 ```
 
 ## Memory and Eval Workflow (Clone-Ready)
@@ -258,7 +258,7 @@ python3 -m memory.eval_governance apply --date YYYY-MM-DD
 ```
 
 Template docs for eval artifact layout and expected files are included at:
-- `templates/user-preferences/memory/evals/README.md`
+- `templates/user-preferences/seed/evals/README.md`
 
 If you have no eval artifacts yet, summarize/apply commands will report zero
 signals until artifacts are added under `memory/evals/compositions/`.
