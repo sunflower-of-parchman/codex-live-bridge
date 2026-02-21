@@ -176,6 +176,24 @@ To edit bridge/device internals:
 - For `bridge/m4l/live_udp_bridge.js`, edit JavaScript source and reload the
   device in Live (this repo does not require a Node.js runtime for this file).
 
+## User Preference Templates (Blank)
+
+- `templates/user-preferences/` includes blank markdown templates for:
+  - canon
+  - ensemble
+  - instruments
+  - moods
+  - fundamentals (`rhythm`, `harmony`, `timbre`, `velocity`, `key`, `meter`,
+    `tempo`, `mood`, `arrangement`, `evaluation`, `silence`)
+- These are intentionally empty starter docs and contain no personal project
+  preferences.
+- To initialize your own local preference docs:
+
+```bash
+mkdir -p memory
+rsync -a templates/user-preferences/memory/ memory/
+```
+
 ## Compatibility and Stability
 
 - Primary maintainer environment: macOS + Ableton Live with Max for Live.
