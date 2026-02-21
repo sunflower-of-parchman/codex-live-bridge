@@ -9,6 +9,9 @@ Ableton Live through LiveAPI (the Live Object Model) over OSC/UDP.
 
 Started during the OpenAI 2026 Hackathon in San Francisco, built in tandem with GPT-5.3-Codex.
 
+This project is independent and is not affiliated with or endorsed by OpenAI,
+Ableton, or Cycling '74. All trademarks belong to their respective owners.
+
 ## Included
 
 - `bridge/m4l/LiveUdpBridge.amxd`: packaged drop-in Max for Live MIDI device
@@ -187,6 +190,17 @@ ACK behavior:
 - The Max for Live device routes commands to LiveAPI inside
   `bridge/m4l/live_udp_bridge.js`.
 
+```mermaid
+flowchart LR
+  U["User or Codex"] --> P["Python CLI (bridge/*.py)"]
+  P --> C["OSC/UDP Commands (:9000)"]
+  C --> B["LiveUdpBridge Device"]
+  B --> L["Ableton LiveAPI (LOM)"]
+  L --> A["Ableton Live Set"]
+  A --> R["OSC/UDP ACKs (:9001)"]
+  R --> P
+```
+
 ## Shipped Workflows
 
 - `bridge/ableton_udp_bridge.py`: general OSC command client/CLI with ACK
@@ -231,6 +245,21 @@ To edit bridge/device internals:
   [Cycling '74 Max](https://cycling74.com/products/max).
 - For `bridge/m4l/live_udp_bridge.js`, edit JavaScript source and reload the
   device in Live (this repo does not require a Node.js runtime for this file).
+
+## Compatibility and Stability
+
+- Primary maintainer environment: macOS + Ableton Live with Max for Live.
+- Windows and Linux are welcome but not yet validated as first-class maintainer
+  environments.
+- This project is pre-`1.0.0`; breaking changes may happen between releases.
+- Support is best-effort by a solo maintainer.
+
+## Project Files for Contributors
+
+- `CONTRIBUTING.md`: contribution workflow and pull request expectations
+- `SUPPORT.md`: support scope and issue-reporting checklist
+- `SECURITY.md`: vulnerability reporting guidance
+- `CHANGELOG.md`: human-readable release and change history
 
 ## Quick Start
 
