@@ -12,9 +12,12 @@ Started during the OpenAI 2026 Hackathon in San Francisco, built in tandem with 
 This project is independent and is not affiliated with or endorsed by OpenAI,
 Ableton, or Cycling '74. All trademarks belong to their respective owners.
 
-This repo is actively operated with the Codex app using project skills and
-Codex app automations:
+This repo can be operated from any Codex surface:
 - [Codex app](https://developers.openai.com/codex/app/)
+- [Codex CLI](https://developers.openai.com/codex/cli/)
+- [Codex IDE extension](https://developers.openai.com/codex/ide/)
+
+Optional workflow docs used by this project:
 - [Codex skills](https://developers.openai.com/codex/skills)
 - [Codex app automations](https://developers.openai.com/codex/app/automations/)
 
@@ -179,8 +182,10 @@ To run the bridge and workflow scripts:
 - Any full setup with Max for Live support also works:
   [Ableton Live](https://www.ableton.com/en/live/) and
   [Max for Live](https://www.ableton.com/en/live/max-for-live/)
-- Codex app (used by this project workflow):
-  [Codex app download / getting started](https://developers.openai.com/codex/app/)
+- Codex surface (choose one):
+  [Codex app](https://developers.openai.com/codex/app/),
+  [Codex CLI](https://developers.openai.com/codex/cli/), or
+  [Codex IDE extension](https://developers.openai.com/codex/ide/)
 - Python 3.10+:
   [python.org downloads](https://www.python.org/downloads/)
 - If using Python 3.10, install `tomli` for TOML parsing in memory/eval tools:
@@ -188,6 +193,8 @@ To run the bridge and workflow scripts:
 python3 -m pip install tomli
 ```
 - local UDP access on ports `9000` (commands) and `9001` (ack/query responses)
+- Host runtime requirement: keep the computer on and awake with Ableton Live
+  running, and keep `LiveUdpBridge` loaded on a track while commands are sent.
 
 To edit bridge/device internals:
 
