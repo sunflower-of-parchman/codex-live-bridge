@@ -9,7 +9,7 @@ maintainer content.
 
 ```bash
 mkdir -p memory
-rsync -a templates/user-preferences/ memory/
+rsync -a templates/music-preferences/ memory/
 ```
 
 Then fill the docs with your own preferences.

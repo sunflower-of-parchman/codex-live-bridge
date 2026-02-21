@@ -36,7 +36,7 @@ Optional workflow docs used by this project:
 - `memory/compositional_memory.py`: memory index loader and fundamental brief CLI
 - `memory/retrieval.py`: retrieval index/search/read/brief CLI over memory + eval artifacts
 - `memory/eval_governance.py`: bounded eval-to-memory governance loop CLI
-- `templates/user-preferences/`: blank user memory and eval template pack
+- `templates/music-preferences/`: blank user memory and eval template pack
 
 ## Live Object Model Control (LiveAPI over OSC/UDP)
 
@@ -212,7 +212,7 @@ To edit bridge/device internals:
 
 ## User Preference Templates (Blank)
 
-- `templates/user-preferences/` includes blank markdown templates for:
+- `templates/music-preferences/` includes blank markdown templates for:
   - canon
   - ensemble
   - instruments
@@ -225,7 +225,7 @@ To edit bridge/device internals:
 
 ```bash
 mkdir -p memory
-rsync -a templates/user-preferences/ memory/
+rsync -a templates/music-preferences/ memory/
 ```
 
 ## Memory and Eval Workflow (Clone-Ready)
@@ -258,7 +258,7 @@ python3 -m memory.eval_governance apply --date YYYY-MM-DD
 ```
 
 Template docs for eval artifact layout and expected files are included at:
-- `templates/user-preferences/evals/README.md`
+- `templates/music-preferences/evals/README.md`
 
 If you have no eval artifacts yet, summarize/apply commands will report zero
 signals until artifacts are added under `memory/evals/compositions/`.
