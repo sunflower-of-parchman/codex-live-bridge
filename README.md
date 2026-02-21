@@ -27,7 +27,16 @@ Optional workflow docs used by this project:
 - [Codex skills](https://developers.openai.com/codex/skills)
 - [Codex app automations](https://developers.openai.com/codex/app/automations/)
 
-## First 60 Seconds
+## Get Started Right Now
+
+Quick requirements:
+
+- Download Ableton Live 12 Suite 30-day free trial (includes Max for Live):
+  [Ableton Live trial](https://www.ableton.com/en/trial/)
+- Download the Codex app and sign in with your ChatGPT account:
+  [Codex app](https://developers.openai.com/codex/app/)
+- Install Python 3.10+:
+  [python.org downloads](https://www.python.org/downloads/)
 
 1. In Ableton Live, drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track.
 2. From repo root, run:
@@ -221,7 +230,7 @@ flowchart LR
 - `bridge/full_surface_smoke_test.py`: full-surface bridge smoke script
 - `bridge/benchmark_midi_write.py`: deterministic MIDI write benchmark harness
 
-## Requirements
+## Detailed Requirements
 
 To run the bridge and workflow scripts:
 
