@@ -27,6 +27,19 @@ Optional workflow docs used by this project:
 - [Codex skills](https://developers.openai.com/codex/skills)
 - [Codex app automations](https://developers.openai.com/codex/app/automations/)
 
+## First 60 Seconds
+
+1. In Ableton Live, drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track.
+2. From repo root, run:
+```bash
+python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
+```
+3. Confirm you see ACKs like:
+```text
+ack:  /ack pong
+ack:  /ack status <total_tracks> <midi_tracks> <audio_tracks> <return_tracks> live_set <id>
+```
+
 ## Included
 
 - `bridge/m4l/LiveUdpBridge.amxd`: packaged drop-in Max for Live MIDI device
@@ -131,7 +144,7 @@ Exact bridge command surface available now:
 9. `/delete_audio_tracks <count>`
 10. `/delete_midi_tracks <count>` (track 0 protected)
 11. `/rename_track <track_index> <name>`
-12. `/set_session_clip_notes <track_index> <slot_index> <length_beats> <notes_json> [clip_name]`
+12. `/set_session_clip_notes <track_index> <slot_index> <length_beats> <notes_json> [clip_name]` (destructive: deletes any existing clip in the target slot before write)
 13. `/append_session_clip_notes <track_index> <slot_index> <notes_json>`
 14. `/inspect_session_clip_notes <track_index> <slot_index>`
 15. `/ensure_midi_tracks <target_count>`
@@ -145,12 +158,41 @@ Exact bridge command surface available now:
 23. `/api/children <path> <child_name> [request_id]`
 24. `/api/describe <path> [request_id]`
 
+Indexing conventions:
+
+- Ableton UI track labels are 1-based (`Track 1`, `Track 2`, ...).
+- Bridge `track_index` and `slot_index` are 0-based LiveAPI indexes.
+- UI `Track 1` maps to `track_index=0`.
+- UI `Track 2` maps to `track_index=1`.
+- First clip slot maps to `slot_index=0`.
+
+`notes_json` format (`/set_session_clip_notes`, `/append_session_clip_notes`):
+
+- Accepts either a JSON array of note objects or a JSON object with a `notes`
+  array.
+- Required note fields: `pitch` (0-127), `start_time` (>= 0 beats),
+  `duration` (> 0 beats).
+- Optional note fields: `velocity` (1-127; defaults to 100 if omitted/invalid),
+  `mute` (0 or 1).
+
+```json
+{"notes":[{"pitch":60,"start_time":0.0,"duration":0.5,"velocity":100,"mute":0}]}
+```
+
 ACK behavior:
 
 - The bridge emits OSC acknowledgements using `/ack`.
 - For `/api/*`, an optional trailing `request_id` is echoed in ACK responses
   when provided.
 - The Python client can listen on the ACK port and print summarized ACK output.
+
+Example ACKs:
+
+```text
+ack:  /ack status 8 5 3 2 live_set 97
+ack:  /ack error not_initialized
+ack:  /ack error not_in_live_set 0
+```
 
 ## Topology (Ports and Transport)
 
@@ -290,7 +332,7 @@ cd codex-live-bridge
 
 3. Verify bridge connectivity:
 ```bash
-python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature --create-midi-tracks 0 --create-audio-tracks 0 --add-midi-tracks 0 --add-audio-tracks 0
+python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
 ```
 
 4. Optional bridge smoke check:
