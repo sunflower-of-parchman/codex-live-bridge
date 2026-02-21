@@ -52,20 +52,22 @@ Live Object Model reference:
 A supported usage pattern in this repo is:
 
 1. Keep track 1 in Ableton Live as `codex-bridge` (control/bridge, no instrument).
-2. Put `Marimba` on track 2.
-3. Put `Piano` on track 3.
-4. Choose meter, BPM, mood, and key, then compose with workflow scripts.
+2. Put your first instrument on track 2.
+3. Treat the track-2 instrument as the first instrument in your ensemble (first entry in your instrument registry).
+4. Choose meter, BPM, and optional mood/key, then compose with workflow scripts.
 5. Review eval artifacts, adjust constraints/guidance, and compose again.
 6. Grow the ensemble one instrument at a time by updating registry/config and repeating the same compose+eval loop.
 
 This pattern is implemented by shipped scripts such as
 `bridge/setup_marimba_environment.py`, `bridge/compose_arrangement.py`,
 `bridge/arrangement/marimba.py`, and `bridge/composition_feedback_loop.py`.
+Script names currently reflect this repo's marimba-first starter profile, while
+the arrangement runtime is registry-driven.
 
-Current runtime default registry is marimba-only:
+Current starter registry in this repo is marimba-only:
 `bridge/config/instrument_registry.marimba.v1.json`.
 
-Two-instrument marimba+piano registry:
+Starter two-instrument example registry (marimba+piano):
 `bridge/config/instrument_registry.marimba_piano.v1.json`.
 
 ## Current Composition Architecture
@@ -214,9 +216,21 @@ ACK behavior:
 
 ## Requirements
 
-- Ableton Live + Max for Live
-- Python 3.10+
+To run the bridge and workflow scripts:
+
+- Ableton Live with Max for Live support:
+  [Ableton Live](https://www.ableton.com/en/live/) and
+  [Max for Live](https://www.ableton.com/en/live/max-for-live/)
+- Python 3.10+:
+  [python.org downloads](https://www.python.org/downloads/)
 - local UDP access on ports `9000` (commands) and `9001` (ack/query responses)
+
+To edit bridge/device internals:
+
+- For `bridge/m4l/LiveUdpBridge.maxpat`, use the Max for Live editor in Live or
+  [Cycling '74 Max](https://cycling74.com/products/max).
+- For `bridge/m4l/live_udp_bridge.js`, edit JavaScript source and reload the
+  device in Live (this repo does not require a Node.js runtime for this file).
 
 ## Quick Start
 
