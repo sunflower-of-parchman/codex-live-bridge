@@ -56,6 +56,11 @@ Live Object Model reference:
   genres, or styles. It focuses on user-guided, user-owned co-composition,
   helping the user compose in tandem with the software by working from the
   user's own musical material and intent.
+- Preference and guidance templates in this repo are intentionally blank at
+  clone time; musical direction is user-authored when the user fills those
+  docs with their own context, constraints, and goals.
+- Steering context comes from user-owned local memory/eval artifacts, not from
+  third-party music corpora.
 - Any workflow "learning" in this repo refers to optional local logging of your
   own run artifacts (when enabled), not ML training.
 - If you are using Codex, that model is external to this repo; this repo is
