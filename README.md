@@ -207,7 +207,7 @@ To edit bridge/device internals:
     `tempo`, `mood`, `arrangement`, `evaluation`, `silence`)
 - These are intentionally empty starter docs and contain no personal project
   preferences.
-- To initialize your own local preference docs:
+- First-time setup (required once per clone):
 
 ```bash
 mkdir -p memory
@@ -216,7 +216,7 @@ rsync -a templates/user-preferences/memory/ memory/
 
 ## Memory and Eval Workflow (Clone-Ready)
 
-After copying templates into `memory/`, use this standard flow:
+After first-time template setup, use this standard flow:
 
 1. Build retrieval index:
 ```bash
@@ -245,6 +245,9 @@ python3 -m memory.eval_governance apply --date YYYY-MM-DD
 
 Template docs for eval artifact layout and expected files are included at:
 - `templates/user-preferences/memory/evals/README.md`
+
+If you have no eval artifacts yet, summarize/apply commands will report zero
+signals until artifacts are added under `memory/evals/compositions/`.
 
 ## Compatibility and Stability
 
