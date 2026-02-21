@@ -12,6 +12,12 @@ Started during the OpenAI 2026 Hackathon in San Francisco, built in tandem with 
 This project is independent and is not affiliated with or endorsed by OpenAI,
 Ableton, or Cycling '74. All trademarks belong to their respective owners.
 
+This repo is actively operated with the Codex app using project skills and
+Codex app automations:
+- [Codex app](https://developers.openai.com/codex/app/)
+- [Codex skills](https://developers.openai.com/codex/skills)
+- [Codex app automations](https://developers.openai.com/codex/app/automations/)
+
 ## Included
 
 - `bridge/m4l/LiveUdpBridge.amxd`: packaged drop-in Max for Live MIDI device
