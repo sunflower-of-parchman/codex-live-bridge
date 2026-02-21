@@ -17,7 +17,8 @@ Started during the OpenAI 2026 Hackathon in San Francisco, built in tandem with 
 This project is independent and is not affiliated with or endorsed by OpenAI,
 Ableton, or Cycling '74. All trademarks belong to their respective owners.
 
-This repo can be operated from any Codex surface:
+This repo is local-only and is not operable from Codex cloud/browser surfaces.
+Operate it from one of these local Codex surfaces:
 - [Codex app](https://developers.openai.com/codex/app/)
 - [Codex CLI](https://developers.openai.com/codex/cli/)
 - [Codex IDE extension](https://developers.openai.com/codex/ide/)
@@ -191,6 +192,7 @@ To run the bridge and workflow scripts:
   [Codex app](https://developers.openai.com/codex/app/),
   [Codex CLI](https://developers.openai.com/codex/cli/), or
   [Codex IDE extension](https://developers.openai.com/codex/ide/)
+- Not supported for this local bridge workflow: Codex cloud/browser.
 - Python 3.10+:
   [python.org downloads](https://www.python.org/downloads/)
 - If using Python 3.10, install `tomli` for TOML parsing in memory/eval tools:
