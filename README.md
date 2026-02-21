@@ -24,10 +24,6 @@ Codex app automations:
 - `bridge/m4l/LiveUdpBridge.maxpat`: editable Max patch source
 - `bridge/m4l/live_udp_bridge.js`: JavaScript router logic used by the patch
 - `bridge/ableton_udp_bridge.py`: OSC client/CLI for command + ACK flows
-- `bridge/compose_kick_pattern.py`: deterministic kick pattern writer
-- `bridge/compose_rim_pattern.py`: deterministic rim pattern writer
-- `bridge/compose_hat_pattern.py`: deterministic hat pattern writer
-- `bridge/compose_codex_arpeggio.py`: demo MIDI clip writer
 
 ## Live Object Model Control (LiveAPI over OSC/UDP)
 
@@ -159,10 +155,6 @@ flowchart LR
 
 - `bridge/ableton_udp_bridge.py`: general OSC command client/CLI with ACK
   listening and command batching modes
-- `bridge/compose_kick_pattern.py`: kick arrangement clip writer
-- `bridge/compose_rim_pattern.py`: rim arrangement clip writer
-- `bridge/compose_hat_pattern.py`: hat arrangement clip writer
-- `bridge/compose_codex_arpeggio.py`: demo session-clip arpeggio writer
 - `bridge/full_surface_smoke_test.py`: full-surface bridge smoke script
 - `bridge/benchmark_midi_write.py`: deterministic MIDI write benchmark harness
 
@@ -214,11 +206,9 @@ cd codex-live-bridge
 python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature --create-midi-tracks 0 --create-audio-tracks 0 --add-midi-tracks 0 --add-audio-tracks 0
 ```
 
-4. Optional pattern writing examples:
+4. Optional bridge smoke check:
 ```bash
-python3 bridge/compose_kick_pattern.py --bars 8 --dry-run
-python3 bridge/compose_rim_pattern.py --bars 8 --dry-run
-python3 bridge/compose_hat_pattern.py --bars 8 --dry-run
+python3 bridge/full_surface_smoke_test.py
 ```
 
 ## Source Editing
