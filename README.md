@@ -24,6 +24,10 @@ Codex app automations:
 - `bridge/m4l/LiveUdpBridge.maxpat`: editable Max patch source
 - `bridge/m4l/live_udp_bridge.js`: JavaScript router logic used by the patch
 - `bridge/ableton_udp_bridge.py`: OSC client/CLI for command + ACK flows
+- `memory/compositional_memory.py`: memory index loader and fundamental brief CLI
+- `memory/retrieval.py`: retrieval index/search/read/brief CLI over memory + eval artifacts
+- `memory/eval_governance.py`: bounded eval-to-memory governance loop CLI
+- `templates/user-preferences/`: blank user memory and eval template pack
 
 ## Live Object Model Control (LiveAPI over OSC/UDP)
 
@@ -94,6 +98,9 @@ Artifacts are persisted to:
 
 - `memory/evals/compositions/<date>/<run_id>.json`
 - `memory/evals/composition_index.json`
+
+If no artifacts exist yet, retrieval/governance commands will report no indexed
+context until runs are added.
 
 ## Capabilities
 
@@ -167,6 +174,10 @@ To run the bridge and workflow scripts:
   [Max for Live](https://www.ableton.com/en/live/max-for-live/)
 - Python 3.10+:
   [python.org downloads](https://www.python.org/downloads/)
+- If using Python 3.10, install `tomli` for TOML parsing in memory/eval tools:
+```bash
+python3 -m pip install tomli
+```
 - local UDP access on ports `9000` (commands) and `9001` (ack/query responses)
 
 To edit bridge/device internals:
@@ -193,6 +204,38 @@ To edit bridge/device internals:
 mkdir -p memory
 rsync -a templates/user-preferences/memory/ memory/
 ```
+
+## Memory and Eval Workflow (Clone-Ready)
+
+After copying templates into `memory/`, use this standard flow:
+
+1. Build retrieval index:
+```bash
+python3 -m memory.retrieval index
+```
+
+2. Query context for a run:
+```bash
+python3 -m memory.retrieval brief --meter <NUM/DEN> --bpm <BPM> --mood <MOOD> --key-name "<KEY>" --focus <FUNDAMENTAL>
+```
+
+3. Summarize repeated eval signals:
+```bash
+python3 -m memory.eval_governance summarize --lookback 30
+```
+
+4. Plan safe memory updates (recommended):
+```bash
+python3 -m memory.eval_governance apply --date YYYY-MM-DD --dry-run
+```
+
+5. Apply memory updates (writes files):
+```bash
+python3 -m memory.eval_governance apply --date YYYY-MM-DD
+```
+
+Template docs for eval artifact layout and expected files are included at:
+- `templates/user-preferences/memory/evals/README.md`
 
 ## Compatibility and Stability
 

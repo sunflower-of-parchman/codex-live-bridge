@@ -1,0 +1,55 @@
+version = 1
+
+[defaults]
+lookback = 30
+statuses = ["success", "save_failed"]
+session_capture_min_count = 1
+promotion_repeat_threshold = 3
+stale_days = 21
+max_promotions_per_apply = 8
+max_session_updates_per_apply = 6
+max_active_items_per_file = 5
+
+[thresholds]
+low_novelty_max = 0.2
+high_repetition_risk_min = 0.85
+
+[[rules]]
+id = "overall_structure_highly_similar_to_recent_run"
+kind = "repetition_flag"
+target = "memory/fundamentals/rhythm.md"
+session_text = "Recent runs are repeating the same overall structure."
+promotion_text = "When overall structure repeats across recent runs, change one macro-form decision in the next pass while preserving pulse clarity."
+promote_after = 2
+
+[[rules]]
+id = "density_trajectory_repeated"
+kind = "repetition_flag"
+target = "memory/fundamentals/rhythm.md"
+session_text = "Density trajectory repeated in recent comparable runs."
+promotion_text = "When density trajectories repeat across recent runs, choose an alternate density arc for the next composition."
+promote_after = 2
+
+[[rules]]
+id = "harmonic_trajectory_repeated"
+kind = "repetition_flag"
+target = "memory/fundamentals/harmony.md"
+session_text = "Harmonic trajectory repeated in recent comparable runs."
+promotion_text = "When harmonic trajectories repeat across recent runs, vary harmonic sequencing while keeping form legible."
+promote_after = 2
+
+[[rules]]
+id = "low_novelty_score"
+kind = "derived_metric"
+target = "memory/canon.md"
+session_text = "Novelty score fell below the configured threshold in recent runs."
+promotion_text = "When novelty repeatedly falls below threshold, preserve one anchor and force one intentional macro divergence next run."
+promote_after = 3
+
+[[rules]]
+id = "high_repetition_risk"
+kind = "derived_metric"
+target = "memory/fundamentals/rhythm.md"
+session_text = "Repetition risk exceeded the configured threshold in recent runs."
+promotion_text = "When repetition risk is consistently high, rotate contour strategy before adding more note density."
+promote_after = 3

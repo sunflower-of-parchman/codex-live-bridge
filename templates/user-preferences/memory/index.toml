@@ -1,0 +1,83 @@
+version = 1
+
+[current_focus]
+fundamental = "rhythm"
+updated = "YYYY-MM-DD"
+notes = "Set this to the current musical focus for this project."
+
+[fundamentals.rhythm]
+summary = "Define pulse clarity, grouping, and density strategy."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/rhythm.md"]
+
+[fundamentals.harmony]
+summary = "Define tonal center, voicing behavior, and progression intent."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/harmony.md"]
+
+[fundamentals.timbre]
+summary = "Define spectral roles, contrast, and layering choices."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/timbre.md"]
+
+[fundamentals.velocity]
+summary = "Define dynamic profile and accent behavior."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/velocity.md"]
+
+[fundamentals.key]
+summary = "Define key center and modulation constraints."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/key.md"]
+
+[fundamentals.meter]
+summary = "Define meter grouping, accents, and displacement strategy."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/meter.md"]
+
+[fundamentals.tempo]
+summary = "Define tempo range and tempo arc constraints."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/tempo.md"]
+
+[fundamentals.mood]
+summary = "Define mood intent and how it maps to harmony/rhythm/timbre."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/mood.md", "memory/moods.md"]
+
+[fundamentals.arrangement]
+summary = "Define section roles, transitions, and dynamic arc."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/arrangement.md"]
+
+[fundamentals.evaluation]
+summary = "Define evaluation goals, metrics, and thresholds."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/evaluation.md", "memory/eval_governance_policy.toml"]
+
+[fundamentals.silence]
+summary = "Define intentional use of rests and contrast windows."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/silence.md"]
