@@ -21,7 +21,6 @@ Codex app automations:
 ## Included
 
 - `bridge/m4l/LiveUdpBridge.amxd`: packaged drop-in Max for Live MIDI device
-- `bridge/m4l/LiveUdpBridge.maxpat`: editable Max patch source
 - `bridge/m4l/live_udp_bridge.js`: JavaScript router logic used by the patch
 - `bridge/ableton_udp_bridge.py`: OSC client/CLI for command + ACK flows
 
@@ -171,8 +170,9 @@ To run the bridge and workflow scripts:
 
 To edit bridge/device internals:
 
-- For `bridge/m4l/LiveUdpBridge.maxpat`, use the Max for Live editor in Live or
-  [Cycling '74 Max](https://cycling74.com/products/max).
+- For device patch editing, open `bridge/m4l/LiveUdpBridge.amxd` in Ableton Live
+  and use the Max for Live editor (or
+  [Cycling '74 Max](https://cycling74.com/products/max)).
 - For `bridge/m4l/live_udp_bridge.js`, edit JavaScript source and reload the
   device in Live (this repo does not require a Node.js runtime for this file).
 
@@ -213,8 +213,7 @@ python3 bridge/full_surface_smoke_test.py
 
 ## Source Editing
 
-If you modify `bridge/m4l/live_udp_bridge.js` or
-`bridge/m4l/LiveUdpBridge.maxpat`:
+If you modify `bridge/m4l/live_udp_bridge.js`:
 
 1. Copy updated JS into your Ableton User Library device folder.
 2. Reload the device in Live (remove it from the track, then drag it back in).
