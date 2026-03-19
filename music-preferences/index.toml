@@ -75,6 +75,55 @@ heuristics = []
 checklist = []
 references = ["memory/fundamentals/evaluation.md", "memory/eval_governance_policy.toml"]
 
+[fundamentals.time]
+summary = "Define temporal framework strategy and transition behavior."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/time.md", "memory/canon.md"]
+
+[fundamentals.texture]
+summary = "Define texture classes, timbral bounds, and layer contrast."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/texture.md"]
+
+[fundamentals.form]
+summary = "Define section identity, transitions, returns, and endings."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/form.md"]
+
+[fundamentals.mix]
+summary = "Define room-usable mix clarity constraints."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/mix.md"]
+
+[fundamentals.economics]
+summary = "Define planning constraints and complexity tradeoffs."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/economics.md"]
+
+[fundamentals.release]
+summary = "Define saving, organization, and finishing discipline."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/release.md"]
+
+[fundamentals.job_well_done]
+summary = "Define rubric templates and pass completion criteria."
+principles = []
+heuristics = []
+checklist = []
+references = ["memory/fundamentals/job_well_done.md", "memory/fundamentals/evaluation.md"]
+
 [fundamentals.silence]
 summary = "Define intentional use of rests and contrast windows."
 principles = []

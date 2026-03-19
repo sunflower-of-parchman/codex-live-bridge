@@ -5,6 +5,7 @@ lookback = 30
 statuses = ["success", "save_failed"]
 session_capture_min_count = 1
 promotion_repeat_threshold = 3
+min_considered_runs_for_actions = 5
 stale_days = 21
 max_promotions_per_apply = 8
 max_session_updates_per_apply = 6
@@ -13,6 +14,9 @@ max_active_items_per_file = 5
 [thresholds]
 low_novelty_max = 0.2
 high_repetition_risk_min = 0.85
+temporal_framework_dominance_min = 0.7
+temporal_bias_min_runs = 8
+imitation_risk_score_min = 0.7
 
 [[rules]]
 id = "overall_structure_highly_similar_to_recent_run"
@@ -23,27 +27,43 @@ promotion_text = "When overall structure repeats across recent runs, change one 
 promote_after = 2
 
 [[rules]]
-id = "density_trajectory_repeated"
+id = "hat_density_trajectory_repeated"
 kind = "repetition_flag"
 target = "memory/fundamentals/rhythm.md"
-session_text = "Density trajectory repeated in recent comparable runs."
-promotion_text = "When density trajectories repeat across recent runs, choose an alternate density arc for the next composition."
+session_text = "Hat density trajectory repeated in recent comparable runs."
+promotion_text = "When hat density trajectories repeat across recent runs, choose an alternate density arc for the next composition."
 promote_after = 2
 
 [[rules]]
-id = "harmonic_trajectory_repeated"
+id = "piano_mode_trajectory_repeated"
 kind = "repetition_flag"
 target = "memory/fundamentals/harmony.md"
-session_text = "Harmonic trajectory repeated in recent comparable runs."
-promotion_text = "When harmonic trajectories repeat across recent runs, vary harmonic sequencing while keeping form legible."
+session_text = "Piano mode trajectory repeated in recent comparable runs."
+promotion_text = "When piano mode trajectories repeat across recent runs, vary harmonic mode sequencing while keeping form legible."
 promote_after = 2
 
 [[rules]]
-id = "low_novelty_score"
+id = "low_novelty"
 kind = "derived_metric"
 target = "memory/canon.md"
 session_text = "Novelty score fell below the configured threshold in recent runs."
-promotion_text = "When novelty repeatedly falls below threshold, preserve one anchor and force one intentional macro divergence next run."
+promotion_text = "If novelty is repeatedly low, preserve one anchor and force one macro divergence next run."
+promote_after = 3
+
+[[rules]]
+id = "temporal_bias"
+kind = "derived_metric"
+target = "memory/canon.md"
+session_text = "One temporal framework dominated recent runs."
+promotion_text = "If one temporal framework dominates recent work, force a different framework next run while preserving one anchor."
+promote_after = 3
+
+[[rules]]
+id = "imitation_risk"
+kind = "derived_metric"
+target = "memory/canon.md"
+session_text = "Imitation risk was detected in recent runs."
+promotion_text = "If the piece resembles a recognizable external template, change at least two of: temporal behavior, pitch field, timbre world, form logic, or density/register regime."
 promote_after = 3
 
 [[rules]]

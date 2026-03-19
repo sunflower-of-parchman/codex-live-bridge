@@ -75,11 +75,15 @@ class BridgeConfig:
     api_calls: Tuple[Tuple[str, str, str, str | None], ...]
     api_children: Tuple[Tuple[str, str, str | None], ...]
     api_describes: Tuple[Tuple[str, str | None], ...]
-    ack_mode: str
-    ack_flush_interval: int
-    report_metrics: bool
-    delay_ms: int
-    dry_run: bool
+    api_observes: Tuple[Tuple[str, str, str, str | None], ...] = ()
+    api_unobserves: Tuple[Tuple[str, str | None], ...] = ()
+    api_observers: Tuple[str | None, ...] = ()
+    api_clear_observers: Tuple[str | None, ...] = ()
+    ack_mode: str = "per_command"
+    ack_flush_interval: int = 10
+    report_metrics: bool = False
+    delay_ms: int = 0
+    dry_run: bool = False
 
 
 AckMode = Union[str]
@@ -284,6 +288,38 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         default=[],
         metavar="ARGS",
         help="Send /api/describe <path> [request_id]",
+    )
+    parser.add_argument(
+        "--api-observe",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Send /api_observe <path> <property_or_child> <options_json> [request_id]",
+    )
+    parser.add_argument(
+        "--api-unobserve",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Send /api_unobserve <observer_id> [request_id]",
+    )
+    parser.add_argument(
+        "--api-observers",
+        nargs="?",
+        action="append",
+        default=[],
+        metavar="REQUEST_ID",
+        help="Send /api_observers with an optional request id",
+    )
+    parser.add_argument(
+        "--api-clear-observers",
+        nargs="?",
+        action="append",
+        default=[],
+        metavar="REQUEST_ID",
+        help="Send /api_clear_observers with an optional request id",
     )
 
     parser.add_argument(
@@ -582,6 +618,30 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
             parsed.append((path, request_id))
         return tuple(parsed)
 
+    def _parse_api_observe(
+        entries: Sequence[Sequence[str]],
+    ) -> Tuple[Tuple[str, str, str, str | None], ...]:
+        parsed: List[Tuple[str, str, str, str | None]] = []
+        for parts in entries:
+            if len(parts) not in (3, 4):
+                parser.error(
+                    "--api-observe expects: <path> <property_or_child> <options_json> [request_id]"
+                )
+            path, property_name, options_json = str(parts[0]), str(parts[1]), str(parts[2])
+            request_id = _optional_request_id(parts, 3)
+            parsed.append((path, property_name, options_json, request_id))
+        return tuple(parsed)
+
+    def _parse_api_unobserve(entries: Sequence[Sequence[str]]) -> Tuple[Tuple[str, str | None], ...]:
+        parsed: List[Tuple[str, str | None]] = []
+        for parts in entries:
+            if len(parts) not in (1, 2):
+                parser.error("--api-unobserve expects: <observer_id> [request_id]")
+            observer_id = str(parts[0])
+            request_id = _optional_request_id(parts, 1)
+            parsed.append((observer_id, request_id))
+        return tuple(parsed)
+
     def _parse_midi_cc(entries: Sequence[Sequence[str]]) -> Tuple[Tuple[int, int, int], ...]:
         parsed: List[Tuple[int, int, int]] = []
         for parts in entries:
@@ -611,6 +671,14 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
     api_calls = _parse_api_call(ns.api_call)
     api_children = _parse_api_children(ns.api_children)
     api_describes = _parse_api_describe(ns.api_describe)
+    api_observes = _parse_api_observe(ns.api_observe)
+    api_unobserves = _parse_api_unobserve(ns.api_unobserve)
+    api_observers: Tuple[str | None, ...] = tuple(
+        None if value in (None, "") else str(value) for value in ns.api_observers
+    )
+    api_clear_observers: Tuple[str | None, ...] = tuple(
+        None if value in (None, "") else str(value) for value in ns.api_clear_observers
+    )
     midi_ccs = _parse_midi_cc(ns.midi_cc)
     cc64s = _parse_cc64(ns.cc64)
 
@@ -654,6 +722,10 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         api_calls=api_calls,
         api_children=api_children,
         api_describes=api_describes,
+        api_observes=api_observes,
+        api_unobserves=api_unobserves,
+        api_observers=api_observers,
+        api_clear_observers=api_clear_observers,
         ack_mode=str(ns.ack_mode),
         ack_flush_interval=int(ns.ack_flush_interval),
         report_metrics=not bool(ns.no_metrics),
@@ -847,6 +919,61 @@ def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
             core_text = _short_repr(describe_json)
         return f"api_describe {path} -> {core_text}{_req_suffix(request_id)}"
 
+    if event == "api_observe" and len(args) >= 5:
+        observer_id, path, property_name, observe_json = args[1], args[2], args[3], args[4]
+        request_id = args[5] if len(args) >= 6 else None
+        parsed = _try_parse_json(observe_json)
+        snapshot_text = _short_repr(parsed if parsed is not None else observe_json)
+        return (
+            f"api_observe {observer_id} {path} {property_name} -> {snapshot_text}"
+            f"{_req_suffix(request_id)}"
+        )
+
+    if event == "api_unobserve" and len(args) >= 3:
+        observer_id, result_json = args[1], args[2]
+        request_id = args[3] if len(args) >= 4 else None
+        parsed = _try_parse_json(result_json)
+        result_text = _short_repr(parsed if parsed is not None else result_json)
+        return f"api_unobserve {observer_id} -> {result_text}{_req_suffix(request_id)}"
+
+    if event == "api_observers" and len(args) >= 2:
+        observers_json = args[1]
+        request_id = args[2] if len(args) >= 3 else None
+        parsed = _try_parse_json(observers_json)
+        count = len(parsed) if isinstance(parsed, list) else "?"
+        return f"api_observers count={count}{_req_suffix(request_id)}"
+
+    if event == "api_clear_observers" and len(args) >= 2:
+        result_json = args[1]
+        request_id = args[2] if len(args) >= 3 else None
+        parsed = _try_parse_json(result_json)
+        result_text = _short_repr(parsed if parsed is not None else result_json)
+        return f"api_clear_observers -> {result_text}{_req_suffix(request_id)}"
+
+    if event in {"api_event", "api_observe_event"} and len(args) >= 3:
+        observer_id = args[1]
+        payload_json = args[2] if event == "api_event" else args[4]
+        parsed = _try_parse_json(payload_json)
+        if event == "api_event" and isinstance(parsed, dict):
+            path = parsed.get("current_path") or parsed.get("requested_path") or "?"
+            property_name = parsed.get("property") or "?"
+            event_index = parsed.get("event_count")
+            event_ms = parsed.get("timestamp_ms")
+        else:
+            path = args[2]
+            property_name = args[3]
+            event_index = args[5] if len(args) >= 6 else None
+            event_ms = args[6] if len(args) >= 7 else None
+        parsed = _try_parse_json(payload_json)
+        payload_text = _short_repr(parsed if parsed is not None else payload_json)
+        suffix = ""
+        if event_index is not None:
+            suffix += f" event={event_index}"
+        if event_ms is not None:
+            suffix += f" at={event_ms}"
+        label = "api_event" if event == "api_event" else "api_observe_event"
+        return f"{label} {observer_id} {path} {property_name} -> {payload_text}{suffix}"
+
     if event == "error" and len(args) >= 2 and str(args[1]).startswith("api_"):
         request_id = args[-1] if len(args) >= 3 else None
         detail = " ".join(str(a) for a in args[1:])
@@ -897,6 +1024,21 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
         )
     for path, request_id in cfg.api_describes:
         commands.append(OscCommand("/api/describe", _with_request_id([path], request_id)))
+    for path, property_name, options_json, request_id in cfg.api_observes:
+        commands.append(
+            OscCommand(
+                "/api_observe",
+                _with_request_id([path, property_name, options_json], request_id),
+            )
+        )
+    for observer_id, request_id in cfg.api_unobserves:
+        commands.append(
+            OscCommand("/api_unobserve", _with_request_id([observer_id], request_id))
+        )
+    for request_id in cfg.api_observers:
+        commands.append(OscCommand("/api_observers", _with_request_id([], request_id)))
+    for request_id in cfg.api_clear_observers:
+        commands.append(OscCommand("/api_clear_observers", _with_request_id([], request_id)))
 
     if cfg.status:
         commands.append(OscCommand("/status"))

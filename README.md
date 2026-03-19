@@ -39,11 +39,15 @@ Quick requirements:
   [python.org downloads](https://www.python.org/downloads/)
 
 1. In Ableton Live, drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track.
-2. From repo root, run:
+2. Or, from repo root, bootstrap the runtime bridge onto track 1 (`codex-bridge`):
+```bash
+python3 bridge/bootstrap_live_bridge.py --launch-ableton --doctor --strict
+```
+3. Verify bridge connectivity:
 ```bash
 python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
 ```
-3. Confirm you see ACKs like:
+4. Confirm you see ACKs like:
 ```text
 ack:  /ack pong
 ack:  /ack status <total_tracks> <midi_tracks> <audio_tracks> <return_tracks> live_set <id>
@@ -55,6 +59,7 @@ ack:  /ack status <total_tracks> <midi_tracks> <audio_tracks> <return_tracks> li
 - `bridge/m4l/LiveUdpBridge.maxpat`: editable Max patch source
 - `bridge/m4l/live_udp_bridge.js`: JavaScript router logic used by the patch
 - `bridge/ableton_udp_bridge.py`: OSC client/CLI for command + ACK flows
+- `bridge/bootstrap_live_bridge.py`: runtime bootstrap for a fresh `LiveUdpBridge` on track 1
 - `memory/compositional_memory.py`: memory index loader and fundamental brief CLI
 - `memory/retrieval.py`: retrieval index/search/read/brief CLI over memory + eval artifacts
 - `memory/eval_governance.py`: bounded eval-to-memory governance loop CLI
@@ -99,23 +104,51 @@ Live Object Model reference:
 
 ## Compositional Studio Assistant Workflow
 
-A template usage pattern in this repo is:
+A runtime usage pattern in this repo is:
 
-1. Keep track 1 in Ableton Live as `codex-bridge` (control/bridge, no instrument).
-2. Put your first instrument on track 2.
-3. Treat the track-2 instrument as the first instrument in your ensemble.
+1. Keep your Ableton template thin: instruments, routing, and returns are fine, but do not save `LiveUdpBridge` into the template.
+2. Bootstrap the bridge at runtime. The helper reserves track 1 as `codex-bridge` (control only).
+3. Put your first instrument on track 2, or let the composition workflow create missing named instrument tracks.
 4. If needed, put your second instrument on track 3 and treat it as the second ensemble entry.
 5. Choose meter, BPM, and optional mood/key, then compose with workflow scripts.
 6. Review eval artifacts, adjust constraints/guidance, and compose again.
+
+## Natural-Language Harmonic Intent (Codex app)
+
+You can now describe harmony in plain language while still keeping a stable key.
+
+Examples you can type in the Codex app:
+
+- "Keep this in C natural minor. Use i minor, iv minor, bIII Maj7, bVI Maj7."
+- "Use C minor as home, but cycle F minor, EbMaj7, and AbMaj7."
+
+What this means in runtime behavior:
+
+- `key_name` remains the tonal center preference.
+- `harmonic_intent` is interpreted as progression intent.
+- If `harmonic_intent` is missing or cannot be parsed, the runtime falls back to the default palette.
+
+CLI equivalent:
+
+```bash
+python3 bridge/compose_arrangement.py \
+  --minutes 3 \
+  --bpm 163 \
+  --sig-num 4 --sig-den 4 \
+  --key-name "C minor" \
+  --harmonic-intent "i minor, iv minor, bIII Maj7, bVI Maj7" \
+  --instrument-registry-path bridge/config/instrument_registry.marimba_piano.v1.json
+```
 
 ## Current Composition Architecture
 
 The current public template uses layered decisions:
 
-1. Bridge layer handles OSC transport and Live Object Model command routing.
-2. Setup layer establishes tempo, signature, and track/clip state.
-3. Pattern layer writes deterministic MIDI content by instrument role.
-4. Reflection layer records run metadata for iterative composition.
+1. Bridge bootstrap layer provisions one fresh `LiveUdpBridge` on `codex-bridge`.
+2. Bridge layer handles OSC transport and Live Object Model command routing.
+3. Setup layer establishes tempo, signature, and track/clip state.
+4. Pattern layer writes deterministic MIDI content by instrument role.
+5. Reflection layer records run metadata for iterative composition.
 
 ## Current Eval Coverage
 
@@ -252,7 +285,9 @@ python3 -m pip install tomli
 ```
 - local UDP access on ports `9000` (commands) and `9001` (ack/query responses)
 - Host runtime requirement: keep the computer on and awake with Ableton Live
-  running, and keep `LiveUdpBridge` loaded on a track while commands are sent.
+  running. For automation, use a thin musical template and let the runtime
+  bootstrap load `LiveUdpBridge` fresh on `codex-bridge` before commands are
+  sent.
 
 To edit bridge/device internals:
 
@@ -337,14 +372,20 @@ git clone https://github.com/sunflower-of-parchman/codex-live-bridge.git
 cd codex-live-bridge
 ```
 
-2. In Ableton Live, drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track.
+2. Open Ableton Live with a thin musical template or blank set. Do not rely on
+   a saved template copy of `LiveUdpBridge`.
 
-3. Verify bridge connectivity:
+3. Bootstrap the bridge:
+```bash
+python3 bridge/bootstrap_live_bridge.py --launch-ableton --doctor --strict
+```
+
+4. Verify bridge connectivity:
 ```bash
 python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
 ```
 
-4. Optional bridge smoke check:
+5. Optional bridge smoke check:
 ```bash
 python3 bridge/full_surface_smoke_test.py
 ```
@@ -355,9 +396,10 @@ If you modify `bridge/m4l/live_udp_bridge.js` or
 `bridge/m4l/LiveUdpBridge.maxpat`:
 
 1. Copy updated JS into your Ableton User Library device folder.
-2. Reload the device in Live (remove it from the track, then drag it back in).
-3. Re-save `LiveUdpBridge.amxd` from Live/Max.
-4. Copy updated `LiveUdpBridge.amxd` back into `bridge/m4l/`.
+2. Reload the device in Live (remove it from `codex-bridge`, then drag it back in).
+3. Keep normal sync JS-only. Do not promote a new `.amxd` during routine runtime sync.
+4. Re-save `LiveUdpBridge.amxd` from Live or Max only when you are doing an explicit package rebuild.
+5. Copy updated `LiveUdpBridge.amxd` back into `bridge/m4l/` and the User Library only after that trusted rebuild.
 
 ## Testing
 

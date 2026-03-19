@@ -31,7 +31,7 @@
 					"numinlets" : 1,
 					"numoutlets" : 0,
 					"patching_rect" : [ 30.0, 44.0, 760.0, 21.0 ],
-					"text" : "Place this device in your default template. External script sends OSC messages like /tempo 120."
+					"text" : "Bootstrap this device fresh on the runtime bridge track. External script sends OSC messages like /tempo 120."
 				}
 
 			}
@@ -87,11 +87,11 @@
 				"box" : 				{
 					"id" : "obj-7",
 					"maxclass" : "newobj",
-					"numinlets" : 25,
-					"numoutlets" : 25,
-					"outlettype" : [ "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" ],
-					"patching_rect" : [ 300.0, 122.0, 1887.0, 23.0 ],
-					"text" : "route /tempo /sig_num /sig_den /create_midi_track /add_midi_tracks /create_audio_track /add_audio_tracks /delete_audio_tracks /delete_midi_tracks /rename_track /set_session_clip_notes /append_session_clip_notes /inspect_session_clip_notes /ensure_midi_tracks /status /ping /api/ping /api/get /api/set /api/call /api/children /api/describe /midi_cc /cc64"
+					"numinlets" : 29,
+					"numoutlets" : 29,
+					"outlettype" : [ "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" ],
+					"patching_rect" : [ 300.0, 122.0, 2360.0, 23.0 ],
+					"text" : "route /tempo /sig_num /sig_den /create_midi_track /add_midi_tracks /create_audio_track /add_audio_tracks /delete_audio_tracks /delete_midi_tracks /rename_track /set_session_clip_notes /append_session_clip_notes /inspect_session_clip_notes /ensure_midi_tracks /status /ping /api/ping /api/get /api/set /api/call /api/children /api/describe /api_observe /api_unobserve /api_observers /api_clear_observers /midi_cc /cc64"
 				}
 
 			}
@@ -422,12 +422,60 @@
 			}
 , 			{
 				"box" : 				{
+					"id" : "obj-54",
+					"maxclass" : "newobj",
+					"numinlets" : 1,
+					"numoutlets" : 1,
+					"outlettype" : [ "" ],
+					"patching_rect" : [ 2090.0, 170.0, 166.0, 23.0 ],
+					"text" : "prepend api_observe"
+				}
+
+			}
+, 			{
+				"box" : 				{
+					"id" : "obj-55",
+					"maxclass" : "newobj",
+					"numinlets" : 1,
+					"numoutlets" : 1,
+					"outlettype" : [ "" ],
+					"patching_rect" : [ 2270.0, 170.0, 182.0, 23.0 ],
+					"text" : "prepend api_unobserve"
+				}
+
+			}
+, 			{
+				"box" : 				{
+					"id" : "obj-56",
+					"maxclass" : "newobj",
+					"numinlets" : 1,
+					"numoutlets" : 1,
+					"outlettype" : [ "" ],
+					"patching_rect" : [ 2470.0, 170.0, 174.0, 23.0 ],
+					"text" : "prepend api_observers"
+				}
+
+			}
+, 			{
+				"box" : 				{
+					"id" : "obj-57",
+					"maxclass" : "newobj",
+					"numinlets" : 1,
+					"numoutlets" : 1,
+					"outlettype" : [ "" ],
+					"patching_rect" : [ 2660.0, 170.0, 220.0, 23.0 ],
+					"text" : "prepend api_clear_observers"
+				}
+
+			}
+, 			{
+				"box" : 				{
 					"id" : "obj-51",
 					"maxclass" : "newobj",
 					"numinlets" : 1,
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
-					"patching_rect" : [ 2090.0, 170.0, 132.0, 23.0 ],
+					"patching_rect" : [ 2895.0, 170.0, 132.0, 23.0 ],
 					"text" : "prepend midi_cc"
 				}
 
@@ -439,7 +487,7 @@
 					"numinlets" : 1,
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
-					"patching_rect" : [ 2240.0, 170.0, 104.0, 23.0 ],
+					"patching_rect" : [ 3045.0, 170.0, 104.0, 23.0 ],
 					"text" : "prepend cc64"
 				}
 
@@ -641,6 +689,34 @@
 , 			{
 				"patchline" : 				{
 					"destination" : [ "obj-14", 0 ],
+					"source" : [ "obj-54", 0 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-14", 0 ],
+					"source" : [ "obj-55", 0 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-14", 0 ],
+					"source" : [ "obj-56", 0 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-14", 0 ],
+					"source" : [ "obj-57", 0 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-14", 0 ],
 					"source" : [ "obj-51", 0 ]
 				}
 
@@ -801,15 +877,43 @@
 			}
 , 			{
 				"patchline" : 				{
-					"destination" : [ "obj-51", 0 ],
+					"destination" : [ "obj-54", 0 ],
 					"source" : [ "obj-7", 22 ]
 				}
 
 			}
 , 			{
 				"patchline" : 				{
-					"destination" : [ "obj-52", 0 ],
+					"destination" : [ "obj-55", 0 ],
 					"source" : [ "obj-7", 23 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-56", 0 ],
+					"source" : [ "obj-7", 24 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-57", 0 ],
+					"source" : [ "obj-7", 25 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-51", 0 ],
+					"source" : [ "obj-7", 26 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-52", 0 ],
+					"source" : [ "obj-7", 27 ]
 				}
 
 			}
@@ -844,7 +948,7 @@
  ],
 		"dependency_cache" : [ 			{
 				"name" : "live_udp_bridge.js",
-				"bootpath" : "~/code/projects/codex-compose/bridge/m4l",
+				"bootpath" : ".",
 				"patcherrelativepath" : ".",
 				"type" : "TEXT",
 				"implicit" : 1

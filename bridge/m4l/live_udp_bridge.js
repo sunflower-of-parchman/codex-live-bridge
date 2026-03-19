@@ -7,6 +7,8 @@ outlets = 3; // 0 -> UDP ack/debug, 1 -> console/debug, 2 -> MIDI out
 
 var song = null;
 var initialized = false;
+var apiObservers = {};
+var apiObserverCounter = 0;
 
 function debug(msg) {
   var text = "[live-bridge] " + msg;
@@ -33,6 +35,133 @@ function ackWithRequest(eventName, argsArray, requestId) {
     payload.push(String(requestId));
   }
   ack.apply(this, payload);
+}
+
+function nowMs() {
+  return new Date().getTime();
+}
+
+function newObserverId() {
+  apiObserverCounter += 1;
+  return "obs_" + nowMs() + "_" + apiObserverCounter;
+}
+
+function normalizeObserverMode(value) {
+  var n = Math.floor(Number(value));
+  return n === 1 ? 1 : 0;
+}
+
+function normalizeObserverCallbackArgs(rawArgs) {
+  if (!rawArgs || !rawArgs.length) {
+    return [];
+  }
+  if (rawArgs.length === 1 && Array.isArray(rawArgs[0])) {
+    return rawArgs[0];
+  }
+  return rawArgs;
+}
+
+function callbackArgsValue(args) {
+  if (!args || !args.length) {
+    return null;
+  }
+  if (args.length === 1) {
+    return args[0];
+  }
+  return args;
+}
+
+function clearObserverEntry(observerId) {
+  var key = observerId === undefined || observerId === null ? "" : String(observerId).trim();
+  if (key.length === 0) {
+    return null;
+  }
+  var entry = apiObservers[key];
+  if (!entry) {
+    return null;
+  }
+  try {
+    if (entry.api) {
+      entry.api.property = "";
+    }
+  } catch (err) {}
+  delete apiObservers[key];
+  return entry;
+}
+
+function clearAllObserverEntries() {
+  var keys = Object.keys(apiObservers);
+  for (var i = 0; i < keys.length; i += 1) {
+    clearObserverEntry(keys[i]);
+  }
+  return keys.length;
+}
+
+function listObserverEntries() {
+  var keys = Object.keys(apiObservers).sort();
+  var items = [];
+  for (var i = 0; i < keys.length; i += 1) {
+    var key = keys[i];
+    var entry = apiObservers[key];
+    if (!entry) {
+      continue;
+    }
+    items.push({
+      observer_id: key,
+      requested_path: entry.requested_path,
+      current_path: entry.api ? String(entry.api.path) : String(entry.current_path || entry.requested_path || ""),
+      property: entry.property,
+      mode: Number(entry.mode || 0),
+      live_id: entry.api ? Number(entry.api.id) : Number(entry.live_id || 0),
+      created_ms: Number(entry.created_ms || 0),
+      event_count: Number(entry.event_count || 0),
+    });
+  }
+  return items;
+}
+
+function buildObserverPayload(entry, callbackArgs) {
+  if (!entry || !entry.api) {
+    return null;
+  }
+  var args = normalizeObserverCallbackArgs(callbackArgs || []);
+  entry.event_count = Number(entry.event_count || 0) + 1;
+  var value = callbackArgsValue(args);
+  if (value === null && entry.property) {
+    try {
+      value = entry.api.get(entry.property);
+    } catch (err) {}
+  }
+  return {
+    observer_id: String(entry.observer_id || ""),
+    requested_path: String(entry.requested_path || ""),
+    current_path: String(entry.api.path || entry.current_path || entry.requested_path || ""),
+    property: String(entry.property || ""),
+    mode: Number(entry.mode || 0),
+    live_id: Number(entry.api.id || 0),
+    event_count: Number(entry.event_count || 0),
+    timestamp_ms: nowMs(),
+    raw_args: args,
+    value: value,
+  };
+}
+
+function emitObserverEvent(observerId, callbackArgs) {
+  var entry = apiObservers[String(observerId || "")];
+  if (!entry) {
+    return;
+  }
+  var payload = buildObserverPayload(entry, callbackArgs);
+  if (!payload) {
+    return;
+  }
+  ack("ack", "api_event", String(observerId), safeJsonStringify(payload, "api_event"));
+}
+
+function buildObserverCallback(observerId) {
+  return function () {
+    emitObserverEvent(observerId, Array.prototype.slice.call(arguments));
+  };
 }
 
 function safeJsonStringify(value, contextName) {
@@ -503,6 +632,140 @@ function api_describe(path, requestId) {
 
   var describeJson = safeJsonStringify(describe, contextName + "_describe");
   ackWithRequest("api_describe", [api.path, describeJson], requestId);
+}
+
+function api_observe(path, property, optionsJson, requestId) {
+  if (!ensureInitialized()) return;
+  var contextName = "api_observe";
+  var api = resolveApiOrError(path, contextName, requestId);
+  if (!api) return;
+
+  var propName = property === undefined || property === null ? "" : String(property).trim();
+  if (propName.length === 0) {
+    ackWithRequest("error", ["api_missing_property", String(path || "")], requestId);
+    return;
+  }
+
+  var capabilities = getApiCapabilities(api);
+  var propKnown = !capabilities.hasPropertiesList || !!capabilities.properties[propName];
+  var childKnown = !capabilities.hasChildrenList || !!capabilities.children[propName];
+  if (capabilities.hasPropertiesList || capabilities.hasChildrenList) {
+    if (!propKnown && !childKnown) {
+      ackWithRequest("error", ["api_unknown_property", api.path, propName], requestId);
+      return;
+    }
+  }
+
+  var parsedOptions = parseJsonPayload(optionsJson, contextName + "_options", {}, requestId);
+  if (parsedOptions === null) {
+    return;
+  }
+  if (!parsedOptions || typeof parsedOptions !== "object" || Array.isArray(parsedOptions)) {
+    parsedOptions = {};
+  }
+
+  var observerId = parsedOptions.observer_id === undefined || parsedOptions.observer_id === null
+    ? newObserverId()
+    : String(parsedOptions.observer_id).trim();
+  if (observerId.length === 0) {
+    observerId = newObserverId();
+  }
+  var mode = normalizeObserverMode(parsedOptions.mode);
+  var emitInitial = parsedOptions.emit_initial === false ? false : true;
+
+  clearObserverEntry(observerId);
+
+  var observerApi = null;
+  try {
+    observerApi = new LiveAPI(buildObserverCallback(observerId), api.path);
+    observerApi.mode = mode;
+    observerApi.property = propName;
+  } catch (err) {
+    debug("Failed to install observer for " + api.path + "." + propName + ": " + err);
+    ackWithRequest("error", ["api_observe_failed", api.path, propName], requestId);
+    return;
+  }
+
+  var entry = {
+    observer_id: observerId,
+    requested_path: api.path,
+    property: propName,
+    mode: mode,
+    created_ms: nowMs(),
+    event_count: 0,
+    api: observerApi,
+  };
+  apiObservers[observerId] = entry;
+
+  var initialArgs = [];
+  if (emitInitial) {
+    try {
+      initialArgs = [observerApi.get(propName)];
+    } catch (errInitial) {
+      initialArgs = [];
+    }
+  }
+  var payload = buildObserverPayload(entry, initialArgs);
+  var payloadJson = safeJsonStringify(payload, contextName + "_payload");
+  ackWithRequest("api_observe", [observerId, observerApi.path, propName, payloadJson], requestId);
+}
+
+function api_unobserve(observerId, requestId) {
+  if (!ensureInitialized()) return;
+  var key = observerId === undefined || observerId === null ? "" : String(observerId).trim();
+  if (key.length === 0) {
+    ackWithRequest("error", ["api_missing_observer_id"], requestId);
+    return;
+  }
+  var removed = clearObserverEntry(key);
+  if (!removed) {
+    ackWithRequest("error", ["api_observer_not_found", key], requestId);
+    return;
+  }
+  var resultJson = safeJsonStringify(
+    {
+      observer_id: key,
+      requested_path: String(removed.requested_path || ""),
+      property: String(removed.property || ""),
+      removed: true,
+    },
+    "api_unobserve_result"
+  );
+  ackWithRequest(
+    "api_unobserve",
+    [key, resultJson],
+    requestId
+  );
+}
+
+function api_clear_observers(requestId) {
+  if (!ensureInitialized()) return;
+  var cleared = clearAllObserverEntries();
+  var resultJson = safeJsonStringify({ cleared: Number(cleared || 0) }, "api_clear_observers");
+  ackWithRequest("api_clear_observers", [resultJson], requestId);
+}
+
+function api_observers(requestId) {
+  if (!ensureInitialized()) return;
+  var payloadJson = safeJsonStringify(listObserverEntries(), "api_observers");
+  ackWithRequest("api_observers", [payloadJson], requestId);
+}
+
+function anything() {
+  var rawName = typeof messagename === "undefined" ? "" : String(messagename || "");
+  if (!rawName || rawName.charAt(0) !== "/") {
+    debug("Unhandled message: " + rawName);
+    return;
+  }
+  var targetName = rawName.slice(1).replace(/\//g, "_");
+  var target = this[targetName];
+  if (typeof target !== "function") {
+    debug("Unhandled OSC selector: " + rawName);
+    ack("ack", "error", "unknown_selector", rawName);
+    return;
+  }
+  var args = arrayfromargs(arguments);
+  target.apply(this, args);
 }
 
 function clampMidiByte(value, fallback, contextName, label) {

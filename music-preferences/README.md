@@ -2,6 +2,10 @@
 
 This directory is a blank, user-owned memory scaffold.
 
+It is not the active runtime memory tree. Repo tools read and update `memory/`,
+while `music-preferences/` stays as the public starter template used to seed a
+fresh `memory/` directory.
+
 It is designed to initialize runtime `memory/` without shipping private
 maintainer content.
 

@@ -24,6 +24,10 @@ DEFAULT_INDEX_REL_PATH = Path("memory/evals/composition_index.json")
 DEFAULT_STATE_REL_PATH = Path("memory/governance/state.json")
 DEFAULT_ACTIVE_REL_PATH = Path("memory/governance/active.md")
 DEFAULT_DEMOTION_ARCHIVE_REL_PATH = Path("memory/archive/demoted_guidance.md")
+DEFAULT_RUN_LOG_DIR_REL_PATH = Path("memory/governance/runs")
+SIGNAL_ID_ALIASES = {
+    "low_novelty_score": "low_novelty",
+}
 
 
 def _repo_root(path: Path | None = None) -> Path:
@@ -76,10 +80,28 @@ def _safe_bpm_text(value: float) -> str:
     return f"{float(value):g}"
 
 
-def _meter_bpm_key(meter: str | None, bpm: float | None) -> str | None:
-    if meter in (None, "") or bpm is None:
+def _coerce_bpm_text(value: Any) -> str | None:
+    if isinstance(value, (int, float)):
+        return _safe_bpm_text(float(value))
+    text = str(value).strip()
+    if not text:
         return None
-    return f"{str(meter).strip()}@{_safe_bpm_text(float(bpm))}"
+    try:
+        return _safe_bpm_text(float(text))
+    except ValueError:
+        return None
+
+
+def _split_meter_bpm(value: Any) -> tuple[str | None, str | None]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None, None
+    if "@" not in raw:
+        return raw, None
+    meter_raw, bpm_raw = raw.split("@", 1)
+    meter_token = meter_raw.strip() or None
+    bpm_token = bpm_raw.strip() or None
+    return meter_token, bpm_token
 
 
 def _normalize_marker(text: str) -> str:
@@ -135,6 +157,7 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
         "statuses": [str(v) for v in defaults_raw.get("statuses", ["success", "save_failed"]) if str(v).strip()],
         "session_capture_min_count": max(1, int(defaults_raw.get("session_capture_min_count", 1))),
         "promotion_repeat_threshold": max(1, int(defaults_raw.get("promotion_repeat_threshold", 3))),
+        "min_considered_runs_for_actions": max(1, int(defaults_raw.get("min_considered_runs_for_actions", 5))),
         "stale_days": max(1, int(defaults_raw.get("stale_days", 21))),
         "max_promotions_per_apply": max(1, int(defaults_raw.get("max_promotions_per_apply", 3))),
         "max_session_updates_per_apply": max(1, int(defaults_raw.get("max_session_updates_per_apply", 6))),
@@ -144,6 +167,11 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
     thresholds = {
         "low_novelty_max": float(thresholds_raw.get("low_novelty_max", 0.2)),
         "high_repetition_risk_min": float(thresholds_raw.get("high_repetition_risk_min", 0.85)),
+        "temporal_framework_dominance_min": float(
+            thresholds_raw.get("temporal_framework_dominance_min", 0.7)
+        ),
+        "temporal_bias_min_runs": max(1, int(thresholds_raw.get("temporal_bias_min_runs", 8))),
+        "imitation_risk_score_min": float(thresholds_raw.get("imitation_risk_score_min", 0.7)),
     }
 
     rules_raw = payload.get("rules", [])
@@ -171,6 +199,13 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
         if not promotion_text:
             raise ValueError(f"policy rule '{signal_id}' is missing promotion_text")
         seen.add(signal_id)
+        promote_after = max(1, int(raw.get("promote_after", defaults["promotion_repeat_threshold"])))
+        proposed_after = max(1, int(raw.get("proposed_after", promote_after)))
+        canary_after = max(1, int(raw.get("canary_after", proposed_after + 1)))
+        active_after = max(1, int(raw.get("active_after", canary_after + 1)))
+        canary_demote_below = max(0, int(raw.get("canary_demote_below", proposed_after)))
+        active_demote_below = max(0, int(raw.get("active_demote_below", canary_after)))
+
         rules.append(
             {
                 "id": signal_id,
@@ -178,10 +213,14 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
                 "target": target,
                 "session_text": session_text,
                 "promotion_text": promotion_text,
-                "promote_after": max(
-                    1,
-                    int(raw.get("promote_after", defaults["promotion_repeat_threshold"])),
-                ),
+                "promote_after": promote_after,
+                "proposed_after": proposed_after,
+                "canary_after": canary_after,
+                "active_after": active_after,
+                "canary_demote_below": canary_demote_below,
+                "active_demote_below": active_demote_below,
+                "lh_register_center_delta": int(raw.get("lh_register_center_delta", 0) or 0),
+                "lh_motion_budget_delta": float(raw.get("lh_motion_budget_delta", 0.0) or 0.0),
             }
         )
 
@@ -196,6 +235,7 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
 
 def load_recent_eval_artifacts(repo_root: Path, lookback: int) -> list[dict[str, Any]]:
     root = _repo_root(repo_root)
+    resolved_root = root.resolve()
     index_path = root / DEFAULT_INDEX_REL_PATH
     index_payload = _load_json(index_path, {"version": 1, "entries": []})
     entries = index_payload.get("entries", []) if isinstance(index_payload, dict) else []
@@ -208,12 +248,16 @@ def load_recent_eval_artifacts(repo_root: Path, lookback: int) -> list[dict[str,
             rel_path = entry.get("artifact_path")
             if not isinstance(rel_path, str) or not rel_path.strip():
                 continue
-            artifact_path = root / rel_path
+            artifact_path = (root / rel_path).resolve()
+            try:
+                artifact_path.relative_to(resolved_root)
+            except ValueError:
+                continue
             payload = _load_json(artifact_path, None)
             if not isinstance(payload, dict):
                 continue
             payload = dict(payload)
-            payload["_artifact_path"] = str(rel_path)
+            payload["_artifact_path"] = str(artifact_path.relative_to(resolved_root)).replace("\\", "/")
             if isinstance(entry.get("timestamp_utc"), str):
                 payload.setdefault("timestamp_utc", entry.get("timestamp_utc"))
             artifacts.append(payload)
@@ -249,10 +293,17 @@ def _filter_artifacts(
     meter: str | None = None,
     bpm: float | None = None,
     mood: str | None = None,
+    series_id: str | None = None,
+    series_variant: str | None = None,
+    comparable_context_id: str | None = None,
 ) -> list[dict[str, Any]]:
     normalized_statuses = {str(status).strip().lower() for status in statuses if str(status).strip()}
-    meter_bpm = _meter_bpm_key(meter, bpm)
+    meter_token = str(meter).strip() if meter not in (None, "") else None
+    bpm_token = _safe_bpm_text(float(bpm)) if bpm is not None else None
     mood_token = str(mood).strip().lower() if mood not in (None, "") else None
+    series_token = str(series_id).strip().lower() if series_id not in (None, "") else None
+    variant_token = str(series_variant).strip().lower() if series_variant not in (None, "") else None
+    context_token = str(comparable_context_id).strip().lower() if comparable_context_id not in (None, "") else None
 
     out: list[dict[str, Any]] = []
     for artifact_raw in artifacts:
@@ -261,11 +312,26 @@ def _filter_artifacts(
         if normalized_statuses and status not in normalized_statuses:
             continue
         composition = artifact.get("composition", {}) if isinstance(artifact.get("composition"), dict) else {}
+        run = artifact.get("run", {}) if isinstance(artifact.get("run"), dict) else {}
         fingerprints = artifact.get("fingerprints", {}) if isinstance(artifact.get("fingerprints"), dict) else {}
+        signature_token = str(composition.get("signature", "")).strip() or None
+        tempo_token = _coerce_bpm_text(composition.get("tempo_bpm"))
+        fp_meter_token, fp_bpm_token = _split_meter_bpm(fingerprints.get("meter_bpm"))
+        run_series = str(run.get("series_id", "")).strip().lower() or None
+        run_variant = str(run.get("series_variant", "")).strip().lower() or None
+        run_context = str(run.get("comparable_context_id", "")).strip().lower() or None
 
-        if meter_bpm is not None and str(fingerprints.get("meter_bpm", "")) != meter_bpm:
+        if meter_token is not None and meter_token not in {signature_token, fp_meter_token}:
+            continue
+        if bpm_token is not None and bpm_token not in {tempo_token, fp_bpm_token}:
             continue
         if mood_token is not None and str(composition.get("mood", "")).strip().lower() != mood_token:
+            continue
+        if series_token is not None and run_series != series_token:
+            continue
+        if variant_token is not None and run_variant != variant_token:
+            continue
+        if context_token is not None and run_context != context_token:
             continue
 
         out.append(artifact)
@@ -282,6 +348,8 @@ def _artifact_signal_ids(artifact: Mapping[str, Any], thresholds: Mapping[str, A
             token = str(flag).strip()
             if token:
                 ids.add(token)
+            if token in {"imitation_risk", "recognizable_template_resemblance"}:
+                ids.add("imitation_risk")
 
     identity = reflection.get("instrument_identity", {}) if isinstance(reflection.get("instrument_identity"), dict) else {}
     identity_flags = identity.get("flags", []) if isinstance(identity, Mapping) else []
@@ -291,9 +359,21 @@ def _artifact_signal_ids(artifact: Mapping[str, Any], thresholds: Mapping[str, A
             if token:
                 ids.add(token)
 
+    piano_variation = (
+        reflection.get("piano_variation", {})
+        if isinstance(reflection.get("piano_variation"), dict)
+        else {}
+    )
+    piano_flags = piano_variation.get("flags", []) if isinstance(piano_variation, Mapping) else []
+    if isinstance(piano_flags, Sequence) and not isinstance(piano_flags, (str, bytes)):
+        for flag in piano_flags:
+            token = str(flag).strip()
+            if token:
+                ids.add(token)
+
     novelty_score = reflection.get("novelty_score")
     if isinstance(novelty_score, (int, float)) and float(novelty_score) <= float(thresholds.get("low_novelty_max", 0.2)):
-        ids.add("low_novelty_score")
+        ids.add("low_novelty")
 
     merit = reflection.get("merit_rubric", {}) if isinstance(reflection.get("merit_rubric"), dict) else {}
     repetition_risk = merit.get("repetition_risk")
@@ -302,16 +382,65 @@ def _artifact_signal_ids(artifact: Mapping[str, Any], thresholds: Mapping[str, A
     ):
         ids.add("high_repetition_risk")
 
+    imitation_risk_value = reflection.get("imitation_risk")
+    if isinstance(imitation_risk_value, bool) and imitation_risk_value:
+        ids.add("imitation_risk")
+    elif isinstance(imitation_risk_value, str):
+        if imitation_risk_value.strip().lower() in {"1", "true", "yes", "high"}:
+            ids.add("imitation_risk")
+
+    imitation_score = reflection.get("imitation_risk_score")
+    if isinstance(imitation_score, (int, float)) and float(imitation_score) >= float(
+        thresholds.get("imitation_risk_score_min", 0.7)
+    ):
+        ids.add("imitation_risk")
+
+    resemblance_value = reflection.get("external_template_resemblance")
+    if isinstance(resemblance_value, bool) and resemblance_value:
+        ids.add("imitation_risk")
+
     return ids
 
 
+def _artifact_temporal_framework(artifact: Mapping[str, Any]) -> str:
+    composition = artifact.get("composition", {}) if isinstance(artifact.get("composition"), Mapping) else {}
+    run = artifact.get("run", {}) if isinstance(artifact.get("run"), Mapping) else {}
+
+    explicit_framework = str(run.get("temporal_framework", "")).strip().lower()
+    if explicit_framework in {"metered", "metric", "open", "hybrid"}:
+        return explicit_framework
+    if explicit_framework in {"open_time", "open time"}:
+        return "open"
+    if explicit_framework == "grid":
+        return "metered"
+
+    mode_token = str(composition.get("mode") or run.get("composition_mode") or "").strip().lower()
+    if mode_token in {"open_time", "open"}:
+        return "open"
+    if mode_token in {"metered", "metric", "hybrid"}:
+        return mode_token
+    if mode_token == "grid":
+        return "metered"
+
+    signature = str(composition.get("signature", "")).strip()
+    if signature:
+        return "metered"
+    return "metric"
+
+
 def build_governance_signals(artifacts: Sequence[Mapping[str, Any]], policy: Mapping[str, Any]) -> dict[str, Any]:
+    defaults = policy.get("defaults", {}) if isinstance(policy.get("defaults"), Mapping) else {}
     thresholds = policy.get("thresholds", {}) if isinstance(policy.get("thresholds"), Mapping) else {}
     rules = policy.get("rules", []) if isinstance(policy.get("rules"), Sequence) else []
     rule_ids = {str(rule.get("id", "")).strip() for rule in rules if isinstance(rule, Mapping)}
 
     signals: dict[str, dict[str, Any]] = {}
     considered_runs: list[str] = []
+    framework_counts: dict[str, int] = {}
+    framework_last_seen: dict[str, str] = {}
+    framework_mood_counts: dict[str, dict[str, int]] = {}
+    framework_run_ids: dict[str, list[str]] = {}
+    total_framework_runs = 0
 
     for artifact in artifacts:
         run_id = str(artifact.get("run_id", "")).strip()
@@ -323,6 +452,18 @@ def build_governance_signals(artifacts: Sequence[Mapping[str, Any]], policy: Map
         fingerprints = artifact.get("fingerprints", {}) if isinstance(artifact.get("fingerprints"), dict) else {}
         meter_bpm = str(fingerprints.get("meter_bpm", "")).strip()
         mood = str(composition.get("mood", "")).strip() or "unknown"
+        framework = _artifact_temporal_framework(artifact)
+        if framework:
+            total_framework_runs += 1
+            framework_counts[framework] = int(framework_counts.get(framework, 0)) + 1
+            if timestamp and str(framework_last_seen.get(framework, "")) < timestamp:
+                framework_last_seen[framework] = timestamp
+            mood_counts = framework_mood_counts.setdefault(framework, {})
+            mood_counts[mood] = int(mood_counts.get(mood, 0)) + 1
+            if run_id:
+                run_ids = framework_run_ids.setdefault(framework, [])
+                if run_id not in run_ids:
+                    run_ids.append(run_id)
 
         for signal_id in sorted(_artifact_signal_ids(artifact, thresholds)):
             if rule_ids and signal_id not in rule_ids:
@@ -351,6 +492,32 @@ def build_governance_signals(artifacts: Sequence[Mapping[str, Any]], policy: Map
             if run_id and run_id not in payload["run_ids"]:
                 payload["run_ids"].append(run_id)
 
+    if total_framework_runs > 0:
+        dominant_framework, dominant_count = sorted(
+            framework_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[0]
+        dominance_ratio = float(dominant_count) / float(total_framework_runs)
+        dominance_min = float(thresholds.get("temporal_framework_dominance_min", 0.7))
+        min_runs = max(
+            1,
+            int(thresholds.get("temporal_bias_min_runs", defaults.get("min_considered_runs_for_actions", 8))),
+        )
+        if dominance_ratio >= dominance_min and total_framework_runs >= min_runs:
+            signal_id = "temporal_bias"
+            if not rule_ids or signal_id in rule_ids:
+                signals[signal_id] = {
+                    "id": signal_id,
+                    "count": int(dominant_count),
+                    "last_seen": str(framework_last_seen.get(dominant_framework, "")),
+                    "meter_bpm_counts": {f"framework:{dominant_framework}": int(dominant_count)},
+                    "mood_counts": dict(framework_mood_counts.get(dominant_framework, {})),
+                    "run_ids": list(framework_run_ids.get(dominant_framework, [])),
+                    "dominant_framework": dominant_framework,
+                    "dominance_ratio": round(dominance_ratio, 4),
+                    "considered_framework_runs": int(total_framework_runs),
+                }
+
     return {
         "generated_at_utc": _iso_utc(_utc_now()),
         "artifact_count": len(artifacts),
@@ -368,6 +535,9 @@ def plan_memory_actions(signals: Mapping[str, Any], policy: Mapping[str, Any], d
     promotion_candidates: list[dict[str, Any]] = []
 
     min_session_count = max(1, int(defaults.get("session_capture_min_count", 1)))
+    min_considered_runs = max(1, int(defaults.get("min_considered_runs_for_actions", 5)))
+    considered_runs = len(signals.get("considered_runs", [])) if isinstance(signals.get("considered_runs"), Sequence) else 0
+    actions_enabled = considered_runs >= min_considered_runs
 
     for raw_rule in rules:
         if not isinstance(raw_rule, Mapping):
@@ -418,7 +588,15 @@ def plan_memory_actions(signals: Mapping[str, Any], policy: Mapping[str, Any], d
                     "target": str(rule.get("target", "")).strip(),
                     "text": str(rule.get("promotion_text", "")).strip(),
                     "count": count,
+                    "promote_after": promote_after,
+                    "proposed_after": int(rule.get("proposed_after", promote_after)),
+                    "canary_after": int(rule.get("canary_after", promote_after + 1)),
+                    "active_after": int(rule.get("active_after", promote_after + 2)),
+                    "canary_demote_below": int(rule.get("canary_demote_below", promote_after)),
+                    "active_demote_below": int(rule.get("active_demote_below", promote_after + 1)),
+                    "dominant_context": dominant_context or "mixed",
                     "last_seen": last_seen,
+                    "eligible": actions_enabled,
                 }
             )
 
@@ -429,6 +607,9 @@ def plan_memory_actions(signals: Mapping[str, Any], policy: Mapping[str, Any], d
         "date": date_text,
         "signals": signals,
         "policy": policy,
+        "actions_enabled": actions_enabled,
+        "considered_runs": considered_runs,
+        "min_considered_runs_for_actions": min_considered_runs,
         "session_updates": session_updates,
         "promotion_candidates": promotion_candidates,
         "demotion_candidates": [],
@@ -437,12 +618,73 @@ def plan_memory_actions(signals: Mapping[str, Any], policy: Mapping[str, Any], d
 
 def _load_state(root: Path) -> dict[str, Any]:
     path = root / DEFAULT_STATE_REL_PATH
-    state = _load_json(path, {"version": 1, "signals": {}})
+    state = _load_json(path, {"version": 1, "signals": {}, "runtime_adjustments": {}})
     if not isinstance(state, dict):
-        state = {"version": 1, "signals": {}}
+        state = {"version": 1, "signals": {}, "runtime_adjustments": {}}
     if not isinstance(state.get("signals"), dict):
         state["signals"] = {}
+    if not isinstance(state.get("runtime_adjustments"), dict):
+        state["runtime_adjustments"] = {}
     state.setdefault("version", 1)
+
+    signals = state.get("signals", {})
+    if isinstance(signals, Mapping):
+        mutable_signals = dict(signals)
+
+        def _stage_rank(value: str) -> int:
+            token = str(value or "").strip().lower()
+            if token == "active":
+                return 3
+            if token == "canary":
+                return 2
+            if token == "proposed":
+                return 1
+            return 0
+
+        def _merge_signal_state(existing: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
+            existing_stage = str(existing.get("stage", "")).strip().lower()
+            incoming_stage = str(incoming.get("stage", "")).strip().lower()
+            if _stage_rank(existing_stage) >= _stage_rank(incoming_stage):
+                preferred = dict(existing)
+                other = dict(incoming)
+            else:
+                preferred = dict(incoming)
+                other = dict(existing)
+
+            merged = dict(other)
+            merged.update(preferred)
+            merged["promoted"] = bool(existing.get("promoted", False) or incoming.get("promoted", False))
+
+            existing_last_seen = str(existing.get("last_seen", "")).strip()
+            incoming_last_seen = str(incoming.get("last_seen", "")).strip()
+            merged["last_seen"] = max(existing_last_seen, incoming_last_seen)
+
+            marker = str(merged.get("marker", "")).strip()
+            if not marker:
+                merged["marker"] = f"gov:{_normalize_marker(str(merged.get('id', '')))}"
+            return merged
+
+        for old_id, new_id in SIGNAL_ID_ALIASES.items():
+            old_entry = mutable_signals.pop(old_id, None)
+            if not isinstance(old_entry, Mapping):
+                continue
+
+            migrated = dict(old_entry)
+            migrated["id"] = new_id
+            marker = str(migrated.get("marker", "")).strip()
+            if marker:
+                migrated["marker"] = marker.replace(old_id, new_id)
+            else:
+                migrated["marker"] = f"gov:{_normalize_marker(new_id)}"
+
+            existing_entry = mutable_signals.get(new_id)
+            if isinstance(existing_entry, Mapping):
+                mutable_signals[new_id] = _merge_signal_state(existing_entry, migrated)
+            else:
+                mutable_signals[new_id] = migrated
+
+        state["signals"] = mutable_signals
+
     return state
 
 
@@ -523,34 +765,64 @@ def _render_active_guidance(state: Mapping[str, Any], rules_by_id: Mapping[str, 
     ]
 
     signals = state.get("signals", {}) if isinstance(state.get("signals"), Mapping) else {}
-    promoted: list[tuple[str, Mapping[str, Any], Mapping[str, Any]]] = []
+    by_stage: dict[str, list[tuple[str, Mapping[str, Any], Mapping[str, Any]]]] = {
+        "active": [],
+        "canary": [],
+        "proposed": [],
+    }
     for signal_id, item_raw in signals.items():
         if not isinstance(item_raw, Mapping):
             continue
-        if not bool(item_raw.get("promoted", False)):
+        stage = str(item_raw.get("stage", "")).strip().lower()
+        if stage not in by_stage:
             continue
         rule = rules_by_id.get(str(signal_id), {})
-        promoted.append((str(signal_id), item_raw, rule))
+        by_stage[stage].append((str(signal_id), item_raw, rule))
 
-    promoted.sort(key=lambda item: item[0])
-    if not promoted:
+    for stage in by_stage:
+        by_stage[stage].sort(key=lambda item: item[0])
+
+    if not any(by_stage.values()):
         lines.extend(
             [
-                "No active promoted guidance.",
+                "No active governance stages.",
                 "",
             ]
         )
         return "\n".join(lines)
 
-    lines.append("## Promoted Rules")
-    lines.append("")
-    for signal_id, item, rule in promoted:
-        marker = str(item.get("marker", f"gov:{_normalize_marker(signal_id)}"))
-        text = str(rule.get("promotion_text", "")).strip() or str(item.get("text", "")).strip()
-        target = str(item.get("target", "")).strip() or str(rule.get("target", "")).strip()
-        last_seen = str(item.get("last_seen", "")).strip() or "n/a"
-        lines.append(f"- [{marker}] {text} (target={target}, last_seen={last_seen})")
-    lines.append("")
+    for stage, heading in (
+        ("active", "Active Rules"),
+        ("canary", "Canary Rules"),
+        ("proposed", "Proposed Rules"),
+    ):
+        items = by_stage.get(stage, [])
+        if not items:
+            continue
+        lines.append(f"## {heading}")
+        lines.append("")
+        for signal_id, item, rule in items:
+            marker = str(item.get("marker", f"gov:{_normalize_marker(signal_id)}"))
+            text = str(rule.get("promotion_text", "")).strip() or str(item.get("text", "")).strip()
+            target = str(item.get("target", "")).strip() or str(rule.get("target", "")).strip()
+            last_seen = str(item.get("last_seen", "")).strip() or "n/a"
+            lines.append(
+                f"- [{marker}] {text} (stage={stage}, target={target}, last_seen={last_seen})"
+            )
+        lines.append("")
+
+    runtime_adjustments = (
+        state.get("runtime_adjustments", {})
+        if isinstance(state.get("runtime_adjustments"), Mapping)
+        else {}
+    )
+    if runtime_adjustments:
+        lines.append("## Runtime Adjustments")
+        lines.append("")
+        for key in sorted(runtime_adjustments.keys()):
+            lines.append(f"- {key}: {runtime_adjustments.get(key)}")
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -601,6 +873,10 @@ def apply_memory_actions(actions: Mapping[str, Any], repo_root: Path, dry_run: b
     session_applied = 0
     promotions_applied = 0
     demotions_applied = 0
+    promotion_reason_entries: list[dict[str, Any]] = []
+    demotion_entries: list[dict[str, Any]] = []
+    archive_path = root / DEFAULT_DEMOTION_ARCHIVE_REL_PATH
+    archive_lines: list[str] = []
 
     session_path = root / "memory/sessions" / f"{date_text}.md"
     session_existing = read_text(session_path)
@@ -631,53 +907,208 @@ def apply_memory_actions(actions: Mapping[str, Any], repo_root: Path, dry_run: b
         if not isinstance(raw, Mapping):
             continue
         promotion_candidates.append(dict(raw))
+    signal_map = signals.get("signals", {}) if isinstance(signals.get("signals"), Mapping) else {}
+    actions_enabled = bool(actions.get("actions_enabled", True))
+    considered_runs = int(actions.get("considered_runs", 0) or 0)
+    min_considered_runs = int(actions.get("min_considered_runs_for_actions", 0) or 0)
+    runtime_adjustments = (
+        dict(state.get("runtime_adjustments", {}))
+        if isinstance(state.get("runtime_adjustments"), Mapping)
+        else {}
+    )
 
-    for item in promotion_candidates:
-        if promotions_applied >= max_promotions:
-            break
-        marker = str(item.get("marker", "")).strip()
-        target_rel = str(item.get("target", "")).strip()
-        text = str(item.get("text", "")).strip()
-        signal_id = str(item.get("id", "")).strip()
-        if not marker or not target_rel or not text or not signal_id:
+    candidate_by_id = {
+        str(item.get("id", "")).strip(): item
+        for item in promotion_candidates
+        if str(item.get("id", "")).strip()
+    }
+
+    stage_transition_entries: list[dict[str, Any]] = []
+
+    def _transition_stage(
+        *,
+        current_stage: str,
+        count: int,
+        proposed_after: int,
+        canary_after: int,
+        active_after: int,
+        canary_demote_below: int,
+        active_demote_below: int,
+    ) -> str:
+        stage = current_stage if current_stage in {"retired", "proposed", "canary", "active"} else "retired"
+        if stage == "retired":
+            if count >= proposed_after:
+                return "proposed"
+            return stage
+        if stage == "proposed":
+            if count >= canary_after:
+                return "canary"
+            if count < proposed_after:
+                return "retired"
+            return stage
+        if stage == "canary":
+            if count >= active_after:
+                return "active"
+            if count < canary_demote_below:
+                return "proposed"
+            return stage
+        if stage == "active":
+            if count < active_demote_below:
+                return "canary"
+            return stage
+        return "retired"
+
+    for signal_id, rule in rules_by_id.items():
+        state_item = state_signals.setdefault(str(signal_id), {}) if isinstance(state_signals, dict) else {}
+        if not isinstance(state_item, dict):
+            continue
+        payload = signal_map.get(str(signal_id), {})
+        payload_map = payload if isinstance(payload, Mapping) else {}
+        count = int(payload_map.get("count", 0))
+        marker = str(state_item.get("marker", "")).strip() or f"gov:{_normalize_marker(str(signal_id))}"
+        target_rel = (
+            str(state_item.get("target", "")).strip()
+            or str(rule.get("target", "")).strip()
+        )
+        text = str(rule.get("promotion_text", "")).strip()
+        last_seen = str(payload_map.get("last_seen", "")).strip()
+        dominant_context = "mixed"
+        meter_counts = payload_map.get("meter_bpm_counts", {}) if isinstance(payload_map.get("meter_bpm_counts"), Mapping) else {}
+        if meter_counts:
+            dominant_context = sorted(
+                ((str(key), int(value)) for key, value in meter_counts.items()),
+                key=lambda item: (-item[1], item[0]),
+            )[0][0]
+
+        item = candidate_by_id.get(str(signal_id), {})
+        proposed_after = int(item.get("proposed_after", rule.get("proposed_after", defaults.get("promotion_repeat_threshold", 3))))
+        canary_after = int(item.get("canary_after", rule.get("canary_after", proposed_after + 1)))
+        active_after = int(item.get("active_after", rule.get("active_after", canary_after + 1)))
+        canary_demote_below = int(item.get("canary_demote_below", rule.get("canary_demote_below", proposed_after)))
+        active_demote_below = int(item.get("active_demote_below", rule.get("active_demote_below", canary_after)))
+
+        current_stage = str(state_item.get("stage", "retired")).strip().lower() or "retired"
+        next_stage = current_stage
+        if actions_enabled:
+            next_stage = _transition_stage(
+                current_stage=current_stage,
+                count=count,
+                proposed_after=max(1, proposed_after),
+                canary_after=max(1, canary_after),
+                active_after=max(1, active_after),
+                canary_demote_below=max(0, canary_demote_below),
+                active_demote_below=max(0, active_demote_below),
+            )
+
+        if next_stage != current_stage:
+            stage_transition_entries.append(
+                {
+                    "id": str(signal_id),
+                    "from_stage": current_stage,
+                    "to_stage": next_stage,
+                    "count": count,
+                    "considered_runs": considered_runs,
+                    "min_considered_runs_for_actions": min_considered_runs,
+                    "dominant_context": dominant_context,
+                }
+            )
+            state_item["last_stage_changed_at"] = _iso_utc(_utc_now())
+
+        state_item.update(
+            {
+                "marker": marker,
+                "target": target_rel,
+                "text": text,
+                "stage": next_stage,
+                "promoted": next_stage == "active",
+                "last_seen": last_seen,
+                "last_count": count,
+                "last_dominant_context": dominant_context,
+            }
+        )
+
+        if not marker or not target_rel or not text:
             continue
         target_path = root / target_rel
         target_existing = read_text(target_path)
         if not target_existing.strip():
             target_existing = _default_markdown_header(target_path)
-        if f"[{marker}]" in target_existing:
-            state_item = state_signals.setdefault(signal_id, {}) if isinstance(state_signals, dict) else {}
-            if isinstance(state_item, dict):
-                state_item.update(
-                    {
-                        "marker": marker,
-                        "target": target_rel,
-                        "promoted": True,
-                    }
-                )
-            continue
 
-        active_count = _count_active_markers(target_existing)
-        if active_count >= max_active_items_per_file:
-            continue
-
-        updated_text = _append_marked_block(target_existing, "Governance Rules", [f"[{marker}] {text}"])
-        set_text(target_path, updated_text)
-
-        state_item = state_signals.setdefault(signal_id, {}) if isinstance(state_signals, dict) else {}
-        if isinstance(state_item, dict):
-            state_item.update(
+        if current_stage != "active" and next_stage == "active":
+            if promotions_applied >= max_promotions:
+                state_item["stage"] = "canary"
+                state_item["promoted"] = False
+                continue
+            if f"[{marker}]" not in target_existing:
+                active_count = _count_active_markers(target_existing)
+                if active_count >= max_active_items_per_file:
+                    state_item["stage"] = "canary"
+                    state_item["promoted"] = False
+                    continue
+                updated_text = _append_marked_block(target_existing, "Governance Rules", [f"[{marker}] {text}"])
+                set_text(target_path, updated_text)
+            state_item["last_promoted_at"] = _iso_utc(_utc_now())
+            promotion_reason_entries.append(
                 {
+                    "id": str(signal_id),
                     "marker": marker,
                     "target": target_rel,
-                    "promoted": True,
-                    "last_promoted_at": _iso_utc(_utc_now()),
+                    "text": text,
+                    "count": count,
+                    "promote_after": max(1, proposed_after),
+                    "dominant_context": dominant_context,
+                    "last_seen": last_seen,
+                    "reason": f"stage transition {current_stage or 'retired'}->active at count={count}",
                 }
             )
-        promotions_applied += 1
+            promotions_applied += 1
+        elif current_stage == "active" and next_stage != "active":
+            if f"[{marker}]" in target_existing:
+                filtered_lines = [line for line in target_existing.splitlines() if f"[{marker}]" not in line]
+                updated_text = "\n".join(filtered_lines).rstrip() + "\n"
+                set_text(target_path, updated_text)
+            demotion_marker = f"gov-demote:{date_text}:{_normalize_marker(str(signal_id))}"
+            archive_lines.append(
+                f"[{demotion_marker}] removed [{marker}] from `{target_rel}` (stage transition active->{next_stage})"
+            )
+            state_item["last_demoted_at"] = _iso_utc(_utc_now())
+            demotion_entries.append(
+                {
+                    "id": str(signal_id),
+                    "marker": marker,
+                    "target": target_rel,
+                    "reason": f"stage transition active->{next_stage}",
+                }
+            )
+            demotions_applied += 1
 
-    archive_path = root / DEFAULT_DEMOTION_ARCHIVE_REL_PATH
-    archive_lines: list[str] = []
+    # Promote bounded runtime parameter adjustments for the LH anchor signal.
+    lh_signal_id = "piano_left_hand_anchor_low"
+    lh_rule = rules_by_id.get(lh_signal_id, {})
+    lh_state = state_signals.get(lh_signal_id, {}) if isinstance(state_signals, Mapping) else {}
+    if isinstance(lh_state, Mapping):
+        lh_stage = str(lh_state.get("stage", "retired")).strip().lower()
+        lh_count = int(lh_state.get("last_count", 0) or 0)
+        if actions_enabled and lh_stage in {"canary", "active"} and lh_count > 0:
+            applied_for_count = int(runtime_adjustments.get("applied_for_count", 0) or 0)
+            if lh_count > applied_for_count:
+                current_center = int(runtime_adjustments.get("lh_register_center", 40) or 40)
+                current_budget = float(runtime_adjustments.get("lh_motion_budget", 0.55) or 0.55)
+                center_delta = int(lh_rule.get("lh_register_center_delta", 0) or 0)
+                budget_delta = float(lh_rule.get("lh_motion_budget_delta", 0.0) or 0.0)
+                runtime_adjustments["lh_register_center"] = max(36, min(60, current_center + center_delta))
+                runtime_adjustments["lh_motion_budget"] = round(
+                    max(0.0, min(1.0, current_budget + budget_delta)),
+                    4,
+                )
+                runtime_adjustments["source_signal"] = lh_signal_id
+                runtime_adjustments["stage"] = lh_stage
+                runtime_adjustments["context_meter_bpm"] = str(lh_state.get("last_dominant_context", "mixed"))
+                runtime_adjustments["applied_for_count"] = lh_count
+                runtime_adjustments["updated_at_utc"] = _iso_utc(_utc_now())
+        elif runtime_adjustments.get("source_signal") == lh_signal_id:
+            runtime_adjustments = {}
+
     demotion_candidates: list[dict[str, Any]] = []
     for raw in demotion_candidates_raw:
         if isinstance(raw, Mapping):
@@ -709,9 +1140,18 @@ def apply_memory_actions(actions: Mapping[str, Any], repo_root: Path, dry_run: b
             state_item.update(
                 {
                     "promoted": False,
+                    "stage": "retired",
                     "last_demoted_at": _iso_utc(_utc_now()),
                 }
             )
+        demotion_entries.append(
+            {
+                "id": signal_id,
+                "marker": marker,
+                "target": target_rel,
+                "reason": reason,
+            }
+        )
         demotions_applied += 1
 
     if archive_lines:
@@ -747,6 +1187,7 @@ def apply_memory_actions(actions: Mapping[str, Any], repo_root: Path, dry_run: b
         "version": 1,
         "updated_at_utc": prior_updated_at,
         "signals": state_signals,
+        "runtime_adjustments": runtime_adjustments,
     }
     state_text = json.dumps(state_payload, indent=2, sort_keys=True) + "\n"
 
@@ -768,6 +1209,38 @@ def apply_memory_actions(actions: Mapping[str, Any], repo_root: Path, dry_run: b
     if state_changed and state_rel not in files_to_change:
         files_to_change.append(state_rel)
 
+    governance_log_rel: str | None = None
+    if not dry_run and (
+        promotions_applied > 0
+        or demotions_applied > 0
+        or bool(stage_transition_entries)
+    ):
+        log_timestamp = _iso_utc(_utc_now())
+        log_name = log_timestamp.replace(":", "-")
+        log_path = root / DEFAULT_RUN_LOG_DIR_REL_PATH / f"{log_name}.json"
+        log_payload = {
+            "version": 1,
+            "timestamp_utc": log_timestamp,
+            "date": date_text,
+            "summary": {
+                "session_updates": session_applied,
+                "promotions": promotions_applied,
+                "demotions": demotions_applied,
+                "stage_transitions": len(stage_transition_entries),
+                "actions_enabled": bool(actions_enabled),
+                "considered_runs": int(considered_runs),
+                "min_considered_runs_for_actions": int(min_considered_runs),
+            },
+            "promotions_applied": promotion_reason_entries,
+            "demotions_applied": demotion_entries,
+            "stage_transitions": stage_transition_entries,
+            "runtime_adjustments": runtime_adjustments,
+        }
+        _atomic_write_text(log_path, json.dumps(log_payload, indent=2, sort_keys=True) + "\n")
+        governance_log_rel = str(log_path.relative_to(root)).replace("\\", "/")
+        if governance_log_rel not in files_to_change:
+            files_to_change.append(governance_log_rel)
+
     if not dry_run:
         for path in sorted(mutated_texts.keys()):
             _atomic_write_text(path, mutated_texts[path])
@@ -777,9 +1250,13 @@ def apply_memory_actions(actions: Mapping[str, Any], repo_root: Path, dry_run: b
     return {
         "date": date_text,
         "dry_run": bool(dry_run),
+        "actions_enabled": bool(actions_enabled),
+        "considered_runs": int(considered_runs),
+        "min_considered_runs_for_actions": int(min_considered_runs),
         "session_updates": session_applied,
         "promotions": promotions_applied,
         "demotions": demotions_applied,
+        "governance_log": governance_log_rel,
         "files_to_change": sorted(files_to_change),
     }
 
@@ -795,6 +1272,13 @@ def _build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--meter", default=None, help="Filter by meter (for example 5/4)")
     summarize.add_argument("--bpm", type=float, default=None, help="Filter by BPM")
     summarize.add_argument("--mood", default=None, help="Filter by mood")
+    summarize.add_argument("--series-id", default=None, help="Optional series identifier filter")
+    summarize.add_argument("--series-variant", default=None, help="Optional series variant filter")
+    summarize.add_argument(
+        "--comparable-context-id",
+        default=None,
+        help="Optional comparable context identifier filter",
+    )
 
     apply = sub.add_parser("apply", help="Apply bounded memory updates from governance signals")
     apply.add_argument("--repo-root", default=None, help="Optional repository root")
@@ -803,6 +1287,13 @@ def _build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--meter", default=None, help="Optional meter filter")
     apply.add_argument("--bpm", type=float, default=None, help="Optional BPM filter")
     apply.add_argument("--mood", default=None, help="Optional mood filter")
+    apply.add_argument("--series-id", default=None, help="Optional series identifier filter")
+    apply.add_argument("--series-variant", default=None, help="Optional series variant filter")
+    apply.add_argument(
+        "--comparable-context-id",
+        default=None,
+        help="Optional comparable context identifier filter",
+    )
     apply.add_argument("--date", default=None, help="Session date in YYYY-MM-DD (defaults to UTC today)")
     apply.add_argument("--dry-run", action="store_true", help="Plan updates without writing files")
 
@@ -835,6 +1326,9 @@ def _prepare_signal_bundle(
     meter: str | None,
     bpm: float | None,
     mood: str | None,
+    series_id: str | None,
+    series_variant: str | None,
+    comparable_context_id: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     defaults = policy.get("defaults", {}) if isinstance(policy.get("defaults"), Mapping) else {}
     statuses = defaults.get("statuses", []) if isinstance(defaults.get("statuses"), Sequence) else []
@@ -847,6 +1341,9 @@ def _prepare_signal_bundle(
         meter=meter,
         bpm=bpm,
         mood=mood,
+        series_id=series_id,
+        series_variant=series_variant,
+        comparable_context_id=comparable_context_id,
     )
     signals = build_governance_signals(filtered, policy)
     state = _load_state(root)
@@ -869,12 +1366,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         meter=args.meter,
         bpm=args.bpm,
         mood=args.mood,
+        series_id=args.series_id,
+        series_variant=args.series_variant,
+        comparable_context_id=args.comparable_context_id,
     )
 
     if args.command == "summarize":
         actions = plan_memory_actions(signals, policy, _utc_now().strftime("%Y-%m-%d"))
         print(f"lookback_runs={max(1, int(args.lookback if args.lookback is not None else policy['defaults']['lookback']))}")
         print(f"considered_runs={len(filtered)}")
+        print(f"actions_enabled={bool(actions.get('actions_enabled', True))}")
+        print(
+            "min_considered_runs_for_actions="
+            f"{int(actions.get('min_considered_runs_for_actions', 0) or 0)}"
+        )
         print(f"governance_signals={len(signals.get('signals', {}))}")
         print(f"promotion_candidates={len(actions.get('promotion_candidates', []))}")
         print(f"demotion_candidates={len(demotions)}")

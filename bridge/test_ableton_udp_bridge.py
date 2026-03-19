@@ -36,6 +36,24 @@ class BridgeCliTests(unittest.TestCase):
         cfg = bridge.parse_args([])
         self.assertEqual(cfg.create_midi_tracks, 0)
 
+    def test_bridge_config_accepts_legacy_kwargs_without_observer_fields(self) -> None:
+        cfg = bridge.parse_args(_base_args())
+        legacy_kwargs = dict(vars(cfg))
+        for field_name in (
+            "api_observes",
+            "api_unobserves",
+            "api_observers",
+            "api_clear_observers",
+        ):
+            legacy_kwargs.pop(field_name, None)
+
+        legacy_cfg = bridge.BridgeConfig(**legacy_kwargs)
+
+        self.assertEqual(legacy_cfg.api_observes, ())
+        self.assertEqual(legacy_cfg.api_unobserves, ())
+        self.assertEqual(legacy_cfg.api_observers, ())
+        self.assertEqual(legacy_cfg.api_clear_observers, ())
+
     def test_parse_and_build_api_commands(self) -> None:
         cfg = bridge.parse_args(
             _base_args()
@@ -67,6 +85,41 @@ class BridgeCliTests(unittest.TestCase):
         if legacy_indices:
             self.assertLess(max(api_indices), min(legacy_indices))
 
+    def test_parse_and_build_observer_commands(self) -> None:
+        options_json = '{"observer_id":"obs-tempo","mode":1,"emit_initial":false}'
+        cfg = bridge.parse_args(
+            _base_args()
+            + [
+                "--api-observe",
+                "live_set",
+                "tempo",
+                options_json,
+                "req-observe",
+                "--api-observers",
+                "req-list",
+                "--api-unobserve",
+                "obs-tempo",
+                "req-unobserve",
+                "--api-clear-observers",
+                "req-clear",
+            ]
+        )
+
+        self.assertEqual(
+            cfg.api_observes,
+            (("live_set", "tempo", options_json, "req-observe"),),
+        )
+        self.assertEqual(cfg.api_observers, ("req-list",))
+        self.assertEqual(cfg.api_unobserves, (("obs-tempo", "req-unobserve"),))
+        self.assertEqual(cfg.api_clear_observers, ("req-clear",))
+
+        commands = bridge.build_commands(cfg)
+        addresses = [cmd.address for cmd in commands]
+        self.assertIn("/api_observe", addresses)
+        self.assertIn("/api_observers", addresses)
+        self.assertIn("/api_unobserve", addresses)
+        self.assertIn("/api_clear_observers", addresses)
+
     def test_rpc_ack_summary_children(self) -> None:
         children = [
             {"index": 0, "id": 1, "path": "live_set tracks 0", "name": "Track 1"},
@@ -83,6 +136,21 @@ class BridgeCliTests(unittest.TestCase):
         self.assertGreaterEqual(len(lines), 2)
         self.assertIn("api_children live_set tracks count=2", lines[1])
         self.assertIn("req=req-2", lines[1])
+
+    def test_rpc_ack_summary_observer_event(self) -> None:
+        payload = {
+            "observer_id": "obs-tempo",
+            "requested_path": "live_set",
+            "current_path": "live_set",
+            "property": "tempo",
+            "event_count": 2,
+            "timestamp_ms": 123456,
+            "value": 121.5,
+        }
+        lines = bridge.summarize_ack("/ack", ["api_event", "obs-tempo", json.dumps(payload)])
+        self.assertGreaterEqual(len(lines), 2)
+        self.assertIn("api_event obs-tempo live_set tempo", lines[1])
+        self.assertIn("event=2", lines[1])
 
     def test_parse_and_build_midi_cc_commands(self) -> None:
         cfg = bridge.parse_args(

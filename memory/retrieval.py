@@ -10,10 +10,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -22,6 +24,22 @@ DEFAULT_INDEX_REL_PATH = Path("memory/evals/retrieval_index.sqlite")
 DEFAULT_SESSION_LIMIT = 10
 CHUNK_LINES = 22
 CHUNK_OVERLAP = 6
+SOURCE_SCORE_WEIGHTS = {
+    "canon": 1.35,
+    "governance": 1.25,
+    "fundamental": 1.15,
+    "instrument": 1.1,
+    "mood": 1.1,
+    "session": 1.0,
+    "eval": 0.95,
+    "journal": 0.9,
+}
+FRESHNESS_HALF_LIFE_DAYS = {
+    "session": 14.0,
+    "journal": 21.0,
+    "eval": 30.0,
+}
+FRESHNESS_FLOOR = 0.65
 
 
 @dataclass(frozen=True)
@@ -66,6 +84,34 @@ def _hash_text(text: str) -> str:
 
 def _normalize_whitespace(text: str) -> str:
     return " ".join(str(text).split())
+
+
+def _source_weight(source: str) -> float:
+    return float(SOURCE_SCORE_WEIGHTS.get(str(source).strip().lower(), 1.0))
+
+
+def _extract_date_from_path(path: str) -> date | None:
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", str(path))
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _freshness_multiplier(source: str, path: str, *, today: date | None = None) -> float:
+    source_key = str(source).strip().lower()
+    half_life_days = FRESHNESS_HALF_LIFE_DAYS.get(source_key)
+    if half_life_days is None:
+        return 1.0
+    dated = _extract_date_from_path(path)
+    if dated is None:
+        return 1.0
+    now_day = today if today is not None else datetime.now(UTC).date()
+    age_days = max(0, (now_day - dated).days)
+    decay = math.exp(-float(age_days) / float(half_life_days))
+    return round(float(FRESHNESS_FLOOR) + (1.0 - float(FRESHNESS_FLOOR)) * decay, 6)
 
 
 def _chunk_markdown(path: str, source: str, body: str) -> list[ChunkRecord]:
@@ -448,9 +494,9 @@ class RetrievalIndex:
 
     def _search_fts(self, conn: sqlite3.Connection, query: str, max_results: int) -> list[SearchHit]:
         tokens = re.findall(r"[A-Za-z0-9_]+", query)
-        fts_query = " OR ".join(f'\"{token}\"' for token in tokens) if tokens else query.strip()
-        if not fts_query:
+        if not tokens:
             return []
+        fts_query = " OR ".join(f'\"{token}\"' for token in tokens)
         rows = conn.execute(
             """
             SELECT c.path, c.source, c.start_line, c.end_line, c.text,
@@ -519,6 +565,28 @@ class RetrievalIndex:
         scored.sort(key=lambda hit: hit.score, reverse=True)
         return scored[:max_results]
 
+    def _rerank_hits(self, hits: Sequence[SearchHit], *, today: date | None = None) -> list[SearchHit]:
+        now_day = today if today is not None else datetime.now(UTC).date()
+        reranked: list[SearchHit] = []
+        for hit in hits:
+            weighted_score = float(hit.score) * _source_weight(hit.source) * _freshness_multiplier(
+                hit.source,
+                hit.path,
+                today=now_day,
+            )
+            reranked.append(
+                SearchHit(
+                    path=hit.path,
+                    source=hit.source,
+                    start_line=hit.start_line,
+                    end_line=hit.end_line,
+                    score=round(weighted_score, 6),
+                    snippet=hit.snippet,
+                )
+            )
+        reranked.sort(key=lambda hit: hit.score, reverse=True)
+        return reranked
+
     def search(self, *, query: str, max_results: int = 6, min_score: float = 0.0) -> list[SearchHit]:
         cleaned = query.strip()
         if not cleaned:
@@ -535,11 +603,15 @@ class RetrievalIndex:
                 fts_enabled = self._ensure_schema(conn)
 
             if fts_enabled:
-                hits = self._search_fts(conn, cleaned, max_results)
+                try:
+                    hits = self._search_fts(conn, cleaned, max_results)
+                except sqlite3.OperationalError:
+                    hits = self._search_fallback(conn, cleaned, max_results)
             else:
                 hits = self._search_fallback(conn, cleaned, max_results)
 
-            return [hit for hit in hits if float(hit.score) >= float(min_score)]
+            reranked = self._rerank_hits(hits)
+            return [hit for hit in reranked if float(hit.score) >= float(min_score)]
         finally:
             conn.close()
 
