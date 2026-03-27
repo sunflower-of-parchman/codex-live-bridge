@@ -684,8 +684,21 @@ class RetrievalIndex:
         query = " ".join(term for term in terms if term)
         hits = self.search(query=query, max_results=max(1, int(max_results)))
         governance_lines = _governance_active_guidance(self.repo_root, max_items=3)
+        drift_warnings: list[str] = []
+        try:
+            try:
+                from .factual_drift import top_drift_warnings
+            except ImportError:
+                try:
+                    from factual_drift import top_drift_warnings
+                except ImportError:
+                    from memory.factual_drift import top_drift_warnings
 
-        if not hits and not governance_lines:
+            drift_warnings = top_drift_warnings(self.repo_root, max_items=3)
+        except Exception:
+            drift_warnings = []
+
+        if not hits and not governance_lines and not drift_warnings:
             return "Memory brief: no indexed context found for this request."
 
         lines: list[str] = [
@@ -694,6 +707,8 @@ class RetrievalIndex:
         ]
         for item in governance_lines:
             lines.append(f"- governance :: {item}")
+        for warning in drift_warnings:
+            lines.append(f"- drift_warning :: {warning}")
         for idx, hit in enumerate(hits, start=1):
             one_liner = _normalize_whitespace(hit.snippet).strip()
             lines.append(
