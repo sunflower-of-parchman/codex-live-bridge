@@ -3,6 +3,7 @@ __pycache__/
 .DS_Store
 .env
 .venv/
+.venv-musicnn/
 *.egg-info/
 *.wav
 *.WAV
