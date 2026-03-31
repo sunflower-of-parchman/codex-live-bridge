@@ -38,16 +38,20 @@ Quick requirements:
 - Install Python 3.10+:
   [python.org downloads](https://www.python.org/downloads/)
 
-1. In Ableton Live, drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track.
-2. Or, from repo root, bootstrap the runtime bridge onto track 1 (`codex-bridge`):
+1. From repo root, create the repo-local Python environment:
 ```bash
-python3 bridge/bootstrap_live_bridge.py --launch-ableton --doctor --strict
+python3 scripts/bootstrap_env.py
 ```
-3. Verify bridge connectivity:
+2. In Ableton Live, drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track.
+3. Or, from repo root, bootstrap the runtime bridge onto track 1 (`codex-bridge`):
 ```bash
-python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
+./.venv/bin/python bridge/bootstrap_live_bridge.py --launch-ableton --doctor --strict
 ```
-4. Confirm you see ACKs like:
+4. Verify bridge connectivity:
+```bash
+./.venv/bin/python bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
+```
+5. Confirm you see ACKs like:
 ```text
 ack:  /ack pong
 ack:  /ack status <total_tracks> <midi_tracks> <audio_tracks> <return_tracks> live_set <id>
@@ -131,7 +135,7 @@ What this means in runtime behavior:
 CLI equivalent:
 
 ```bash
-python3 bridge/compose_arrangement.py \
+./.venv/bin/python bridge/compose_arrangement.py \
   --minutes 3 \
   --bpm 163 \
   --sig-num 4 --sig-den 4 \
@@ -279,10 +283,11 @@ To run the bridge and workflow scripts:
 - Not supported for this local bridge workflow: Codex cloud/browser.
 - Python 3.10+:
   [python.org downloads](https://www.python.org/downloads/)
-- If using Python 3.10, install `tomli` for TOML parsing in memory/eval tools:
+- Create the repo-local Python environment once per clone:
 ```bash
-python3 -m pip install tomli
+python3 scripts/bootstrap_env.py
 ```
+- Run repo commands with `./.venv/bin/python` unless you have already activated `.venv`.
 - local UDP access on ports `9000` (commands) and `9001` (ack/query responses)
 - Host runtime requirement: keep the computer on and awake with Ableton Live
   running. For automation, use a thin musical template and let the runtime
@@ -320,27 +325,27 @@ After first-time template setup, use this standard flow:
 
 1. Build retrieval index:
 ```bash
-python3 -m memory.retrieval index
+./.venv/bin/python -m memory.retrieval index
 ```
 
 2. Query context for a run:
 ```bash
-python3 -m memory.retrieval brief --meter <NUM/DEN> --bpm <BPM> --mood <MOOD> --key-name "<KEY>" --focus <FUNDAMENTAL>
+./.venv/bin/python -m memory.retrieval brief --meter <NUM/DEN> --bpm <BPM> --mood <MOOD> --key-name "<KEY>" --focus <FUNDAMENTAL>
 ```
 
 3. Summarize repeated eval signals:
 ```bash
-python3 -m memory.eval_governance summarize --lookback 30
+./.venv/bin/python -m memory.eval_governance summarize --lookback 30
 ```
 
 4. Plan safe memory updates (recommended):
 ```bash
-python3 -m memory.eval_governance apply --date YYYY-MM-DD --dry-run
+./.venv/bin/python -m memory.eval_governance apply --date YYYY-MM-DD --dry-run
 ```
 
 5. Apply memory updates (writes files):
 ```bash
-python3 -m memory.eval_governance apply --date YYYY-MM-DD
+./.venv/bin/python -m memory.eval_governance apply --date YYYY-MM-DD
 ```
 
 Template docs for eval artifact layout and expected files are included at:
@@ -377,17 +382,17 @@ cd codex-live-bridge
 
 3. Bootstrap the bridge:
 ```bash
-python3 bridge/bootstrap_live_bridge.py --launch-ableton --doctor --strict
+./.venv/bin/python bridge/bootstrap_live_bridge.py --launch-ableton --doctor --strict
 ```
 
 4. Verify bridge connectivity:
 ```bash
-python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
+./.venv/bin/python bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
 ```
 
 5. Optional bridge smoke check:
 ```bash
-python3 bridge/full_surface_smoke_test.py
+./.venv/bin/python bridge/full_surface_smoke_test.py
 ```
 
 ## Source Editing
@@ -404,7 +409,7 @@ If you modify `bridge/m4l/live_udp_bridge.js` or
 ## Testing
 
 ```bash
-python3 -m unittest discover -s bridge -p "test_*.py"
+./.venv/bin/python -m unittest discover -s bridge -p "test_*.py"
 ```
 
 ## License

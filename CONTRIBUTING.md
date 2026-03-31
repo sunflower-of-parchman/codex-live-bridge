@@ -13,8 +13,9 @@ Thanks for your interest in improving `codex-live-bridge`.
 Run from repo root:
 
 ```bash
-python3 -m unittest discover -s bridge -p "test_*.py"
-python3 -m unittest discover -s memory -p "test_*.py"
+python3 scripts/bootstrap_env.py
+./.venv/bin/python -m unittest discover -s bridge -p "test_*.py"
+./.venv/bin/python -m unittest discover -s memory -p "test_*.py"
 ```
 
 If your change touches only one area, include at least the most relevant test
