@@ -1130,11 +1130,30 @@ function parseNotesJson(notesJson, contextName) {
   }
 }
 
+function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue, index, contextName, integerValue) {
+  var raw = note[fieldName];
+  if (raw === undefined || raw === null || String(raw).length === 0) {
+    return true;
+  }
+
+  var value = Number(raw);
+  if (!(isFinite(value) && value >= minValue && value <= maxValue)) {
+    ack("ack", "error", contextName + "_invalid_" + fieldName, index, raw);
+    return false;
+  }
+
+  normalized[fieldName] = integerValue ? Math.floor(value) : value;
+  return true;
+}
+
 function normalizeNote(note, index, contextName) {
   var pitch = Math.floor(Number(note.pitch));
   var startTime = Number(note.start_time);
   var duration = Number(note.duration);
-  var velocity = Math.floor(Number(note.velocity));
+  var velocity = 100;
+  if (note.velocity !== undefined && note.velocity !== null && String(note.velocity).length > 0) {
+    velocity = Math.floor(Number(note.velocity));
+  }
   var mute = Number(note.mute) ? 1 : 0;
 
   if (!(pitch >= 0 && pitch <= 127)) {
@@ -1149,17 +1168,29 @@ function normalizeNote(note, index, contextName) {
     ack("ack", "error", contextName + "_invalid_duration", index, note.duration);
     return null;
   }
-  if (!(velocity > 0 && velocity <= 127)) {
+  if (!(velocity >= 0 && velocity <= 127)) {
     velocity = 100;
   }
 
-  return {
+  var normalized = {
     pitch: pitch,
     start_time: startTime,
     duration: duration,
     velocity: velocity,
     mute: mute,
   };
+
+  if (!copyOptionalNoteNumber(note, normalized, "probability", 0, 1, index, contextName, false)) {
+    return null;
+  }
+  if (!copyOptionalNoteNumber(note, normalized, "velocity_deviation", 0, 127, index, contextName, false)) {
+    return null;
+  }
+  if (!copyOptionalNoteNumber(note, normalized, "release_velocity", 0, 127, index, contextName, true)) {
+    return null;
+  }
+
+  return normalized;
 }
 
 function buildNotesDict(notes, contextName) {

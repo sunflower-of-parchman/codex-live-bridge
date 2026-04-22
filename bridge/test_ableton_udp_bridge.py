@@ -152,6 +152,52 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn("api_event obs-tempo live_set tempo", lines[1])
         self.assertIn("event=2", lines[1])
 
+    def test_parse_ack_event_rpc_payload_and_request_id(self) -> None:
+        event = bridge.parse_ack_event(
+            "/ack",
+            ["api_get", "live_set", "tempo", "142", "req-tempo"],
+        )
+
+        self.assertEqual(event.address, "/ack")
+        self.assertEqual(event.event, "api_get")
+        self.assertEqual(event.request_id, "req-tempo")
+        self.assertFalse(event.is_error)
+        self.assertEqual(event.payload["path"], "live_set")
+        self.assertEqual(event.payload["property"], "tempo")
+        self.assertEqual(event.payload["value"], 142)
+
+    def test_parse_ack_event_observer_payload(self) -> None:
+        payload = {
+            "observer_id": "obs-tempo",
+            "requested_path": "live_set",
+            "current_path": "live_set",
+            "property": "tempo",
+            "event_count": 2,
+            "timestamp_ms": 123456,
+            "value": 121.5,
+        }
+
+        event = bridge.parse_ack_event(
+            "/ack",
+            ["api_event", "obs-tempo", json.dumps(payload)],
+        )
+
+        self.assertEqual(event.event, "api_event")
+        self.assertIsNone(event.request_id)
+        self.assertEqual(event.payload["observer_id"], "obs-tempo")
+        self.assertEqual(event.payload["path"], "live_set")
+        self.assertEqual(event.payload["property"], "tempo")
+        self.assertEqual(event.payload["value"], 121.5)
+        self.assertEqual(event.payload["event_count"], 2)
+
+    def test_js_note_normalizer_supports_live_12_note_fields(self) -> None:
+        source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
+
+        self.assertIn("velocity >= 0 && velocity <= 127", source)
+        self.assertIn('"probability"', source)
+        self.assertIn('"velocity_deviation"', source)
+        self.assertIn('"release_velocity"', source)
+
     def test_parse_and_build_midi_cc_commands(self) -> None:
         cfg = bridge.parse_args(
             _base_args()

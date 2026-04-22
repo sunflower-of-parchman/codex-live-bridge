@@ -14,7 +14,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Run bridge unit tests
         run: python3 -m unittest discover -s bridge -p "test_*.py"
+      - name: Check Max JS syntax
+        run: node --check bridge/m4l/live_udp_bridge.js
       - name: Run public hygiene audit
         run: bash .github/scripts/audit_public_hygiene.sh

@@ -114,6 +114,9 @@ Note on MIDI note insertion:
   accepts JSON for this method via `/api/call` and will convert it internally.
   You can send either a raw notes array or a wrapper object shaped like
   `{"notes":[...]}` as the first argument.
+- Note dictionaries support `pitch`, `start_time`, `duration`, `velocity`,
+  `mute`, `probability`, `velocity_deviation`, and `release_velocity`.
+  Velocity `0` is valid.
 
 RPC commands:
 
@@ -123,6 +126,13 @@ RPC commands:
 - `/api/call <path> <method> <args_json> [request_id]`
 - `/api/children <path> <child_name> [request_id]`
 - `/api/describe <path> [request_id]`
+
+Observer commands:
+
+- `/api_observe <path> <property> [options_json] [request_id]`
+- `/api_unobserve <observer_id> [request_id]`
+- `/api_observers [request_id]`
+- `/api_clear_observers [request_id]`
 
 Acknowledgement shapes:
 
@@ -165,6 +175,16 @@ RPC error acknowledgements use:
 
       /ack error <api_error_code> ... [request_id]
 
+Observer acknowledgements use:
+
+      /ack api_observe <observer_id> <path> <property> <snapshot_json> [request_id]
+      /ack api_unobserve <observer_id> <result_json> [request_id]
+      /ack api_observers <observers_json> [request_id]
+      /ack api_clear_observers <result_json> [request_id]
+      /ack api_event <observer_id> <payload_json>
+
+Full protocol details live in [`../PROTOCOL.md`](../PROTOCOL.md).
+
 ## Acknowledgements
 
 The bridge emits OSC acknowledgement messages to `127.0.0.1:9001` using the
@@ -194,6 +214,7 @@ Examples:
     /ack api_children live_set tracks [{"index":0,"id":1,"path":"live_set tracks 0"}] req-1
     /ack api_call live_set create_midi_track null req-2
     /ack api_describe live_set {"path":"live_set","id":1}
+    /ack api_event obs-tempo {"observer_id":"obs-tempo","current_path":"live_set","property":"tempo","value":121.5}
 
 For `/ack ensure_midi_tracks`, the arguments are:
 
@@ -279,6 +300,26 @@ For `/ack api_describe`, the arguments are:
 
     /ack api_describe <path> <describe_json> [request_id]
 
+For `/ack api_observe`, the arguments are:
+
+    /ack api_observe <observer_id> <path> <property> <snapshot_json> [request_id]
+
+For `/ack api_unobserve`, the arguments are:
+
+    /ack api_unobserve <observer_id> <result_json> [request_id]
+
+For `/ack api_observers`, the arguments are:
+
+    /ack api_observers <observers_json> [request_id]
+
+For `/ack api_clear_observers`, the arguments are:
+
+    /ack api_clear_observers <result_json> [request_id]
+
+For `/ack api_event`, the arguments are:
+
+    /ack api_event <observer_id> <payload_json>
+
 For `/ack error` produced by the RPC layer, the arguments begin with an
 `api_*` error code and may end with `[request_id]`.
 
@@ -287,4 +328,4 @@ For `/ack error` produced by the RPC layer, the arguments begin with an
 The first bridge device should use this routing shape:
 
     [udpreceive 9000]
-    [route /tempo /sig_num /sig_den /create_midi_track /add_midi_tracks /create_audio_track /add_audio_tracks /delete_audio_tracks /delete_midi_tracks /rename_track /set_session_clip_notes /append_session_clip_notes /inspect_session_clip_notes /ensure_midi_tracks /status /ping /api/ping /api/get /api/set /api/call /api/children /api/describe]
+    [route /tempo /sig_num /sig_den /create_midi_track /add_midi_tracks /create_audio_track /add_audio_tracks /delete_audio_tracks /delete_midi_tracks /rename_track /set_session_clip_notes /append_session_clip_notes /inspect_session_clip_notes /ensure_midi_tracks /midi_cc /cc64 /status /ping /api/ping /api/get /api/set /api/call /api/children /api/describe /api_observe /api_unobserve /api_observers /api_clear_observers]

@@ -98,6 +98,15 @@ class SendMetrics:
     elapsed_ms: float
 
 
+@dataclass(frozen=True)
+class AckEvent:
+    address: str
+    event: str | None
+    request_id: str | None
+    payload: dict[str, object]
+    is_error: bool = False
+
+
 def _percentile(values: Sequence[float], pct: float) -> float:
     if not values:
         return 0.0
@@ -847,6 +856,111 @@ def _short_repr(value: object, max_len: int = 120) -> str:
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
 
+def _optional_request_id(args: Sequence[OscArg], index: int) -> str | None:
+    if len(args) <= index or args[index] in (None, ""):
+        return None
+    return str(args[index])
+
+
+def parse_ack_event(address: str, args: Sequence[OscArg]) -> AckEvent:
+    event = str(args[0]) if args else None
+    request_id: str | None = None
+    payload: dict[str, object] = {"args": list(args)}
+    is_error = event == "error"
+
+    if event == "midi_cc" and len(args) >= 4:
+        request_id = _optional_request_id(args, 4)
+        payload = {"controller": args[1], "value": args[2], "channel": args[3]}
+    elif event == "cc64" and len(args) >= 3:
+        request_id = _optional_request_id(args, 3)
+        payload = {"value": args[1], "channel": args[2]}
+    elif event == "api_get" and len(args) >= 4:
+        request_id = _optional_request_id(args, 4)
+        payload = {
+            "path": args[1],
+            "property": args[2],
+            "value": _try_parse_json(args[3]),
+        }
+    elif event == "api_set" and len(args) >= 4:
+        request_id = _optional_request_id(args, 4)
+        payload = {
+            "path": args[1],
+            "property": args[2],
+            "result": _try_parse_json(args[3]),
+        }
+    elif event == "api_call" and len(args) >= 4:
+        request_id = _optional_request_id(args, 4)
+        payload = {
+            "path": args[1],
+            "method": args[2],
+            "result": _try_parse_json(args[3]),
+        }
+    elif event == "api_children" and len(args) >= 4:
+        request_id = _optional_request_id(args, 4)
+        payload = {
+            "path": args[1],
+            "child_name": args[2],
+            "children": _try_parse_json(args[3]),
+        }
+    elif event == "api_describe" and len(args) >= 3:
+        request_id = _optional_request_id(args, 3)
+        payload = {"path": args[1], "description": _try_parse_json(args[2])}
+    elif event == "api_observe" and len(args) >= 5:
+        request_id = _optional_request_id(args, 5)
+        payload = {
+            "observer_id": args[1],
+            "path": args[2],
+            "property": args[3],
+            "snapshot": _try_parse_json(args[4]),
+        }
+    elif event == "api_unobserve" and len(args) >= 3:
+        request_id = _optional_request_id(args, 3)
+        payload = {"observer_id": args[1], "result": _try_parse_json(args[2])}
+    elif event == "api_observers" and len(args) >= 2:
+        request_id = _optional_request_id(args, 2)
+        payload = {"observers": _try_parse_json(args[1])}
+    elif event == "api_clear_observers" and len(args) >= 2:
+        request_id = _optional_request_id(args, 2)
+        payload = {"result": _try_parse_json(args[1])}
+    elif event == "api_event" and len(args) >= 3:
+        event_payload = _try_parse_json(args[2])
+        payload = {"observer_id": args[1], "event_payload": event_payload}
+        if isinstance(event_payload, dict):
+            payload.update(
+                {
+                    "path": event_payload.get("current_path")
+                    or event_payload.get("requested_path"),
+                    "property": event_payload.get("property"),
+                    "value": event_payload.get("value"),
+                    "event_count": event_payload.get("event_count"),
+                    "timestamp_ms": event_payload.get("timestamp_ms"),
+                }
+            )
+    elif event == "api_observe_event" and len(args) >= 5:
+        event_payload = _try_parse_json(args[4])
+        payload = {
+            "observer_id": args[1],
+            "path": args[2],
+            "property": args[3],
+            "event_payload": event_payload,
+        }
+        if len(args) >= 6:
+            payload["event_count"] = args[5]
+        if len(args) >= 7:
+            payload["timestamp_ms"] = args[6]
+    elif event == "error" and len(args) >= 2:
+        request_id = _optional_request_id(args, len(args) - 1) if len(args) >= 3 else None
+        payload = {"code": args[1], "details": list(args[2:])}
+
+    return AckEvent(
+        address=address,
+        event=event,
+        request_id=request_id,
+        payload=payload,
+        is_error=is_error,
+    )
+
+
 def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
     if not args:
         return None
@@ -950,20 +1064,15 @@ def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
         result_text = _short_repr(parsed if parsed is not None else result_json)
         return f"api_clear_observers -> {result_text}{_req_suffix(request_id)}"
 
-    if event in {"api_event", "api_observe_event"} and len(args) >= 3:
+    if event == "api_event" and len(args) >= 3:
         observer_id = args[1]
-        payload_json = args[2] if event == "api_event" else args[4]
+        payload_json = args[2]
         parsed = _try_parse_json(payload_json)
-        if event == "api_event" and isinstance(parsed, dict):
+        if isinstance(parsed, dict):
             path = parsed.get("current_path") or parsed.get("requested_path") or "?"
             property_name = parsed.get("property") or "?"
             event_index = parsed.get("event_count")
             event_ms = parsed.get("timestamp_ms")
-        else:
-            path = args[2]
-            property_name = args[3]
-            event_index = args[5] if len(args) >= 6 else None
-            event_ms = args[6] if len(args) >= 7 else None
         parsed = _try_parse_json(payload_json)
         payload_text = _short_repr(parsed if parsed is not None else payload_json)
         suffix = ""
@@ -971,8 +1080,23 @@ def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
             suffix += f" event={event_index}"
         if event_ms is not None:
             suffix += f" at={event_ms}"
-        label = "api_event" if event == "api_event" else "api_observe_event"
-        return f"{label} {observer_id} {path} {property_name} -> {payload_text}{suffix}"
+        return f"api_event {observer_id} {path} {property_name} -> {payload_text}{suffix}"
+
+    if event == "api_observe_event" and len(args) >= 5:
+        observer_id = args[1]
+        path = args[2]
+        property_name = args[3]
+        payload_json = args[4]
+        parsed = _try_parse_json(payload_json)
+        event_index = args[5] if len(args) >= 6 else None
+        event_ms = args[6] if len(args) >= 7 else None
+        payload_text = _short_repr(parsed if parsed is not None else payload_json)
+        suffix = ""
+        if event_index is not None:
+            suffix += f" event={event_index}"
+        if event_ms is not None:
+            suffix += f" at={event_ms}"
+        return f"api_observe_event {observer_id} {path} {property_name} -> {payload_text}{suffix}"
 
     if event == "error" and len(args) >= 2 and str(args[1]).startswith("api_"):
         request_id = args[-1] if len(args) >= 3 else None

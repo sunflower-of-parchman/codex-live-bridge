@@ -101,8 +101,14 @@ Current `/api/*` endpoints:
 - `/api/children <path> <child_name> [request_id]`
 - `/api/describe <path> [request_id]`
 
+Observer endpoints are also available for long-running LiveAPI property
+monitoring: `/api_observe`, `/api_unobserve`, `/api_observers`, and
+`/api_clear_observers`.
+
+Protocol details: [`PROTOCOL.md`](PROTOCOL.md)
+
 Live Object Model reference:
-[Cycling '74 Live Object Model docs](https://docs.cycling74.com/max8/vignettes/live_object_model)
+[Cycling '74 Live Object Model docs](https://docs.cycling74.com/apiref/lom/)
 
 ## Data & Training
 
