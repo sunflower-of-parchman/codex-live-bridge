@@ -4,7 +4,7 @@ Thanks for your interest in improving `codex-live-bridge`.
 
 ## Before You Start
 
-- Read `README.public.md` for project scope and runtime requirements.
+- Read `README.md` for project scope and runtime requirements.
 - Keep changes small and focused.
 - Do not include secrets, API keys, or local absolute paths in commits.
 
@@ -13,9 +13,8 @@ Thanks for your interest in improving `codex-live-bridge`.
 Run from repo root:
 
 ```bash
-python3 scripts/bootstrap_env.py
-./.venv/bin/python -m unittest discover -s bridge -p "test_*.py"
-./.venv/bin/python -m unittest discover -s memory -p "test_*.py"
+python3 -m unittest discover -s bridge -p "test_*.py"
+bash .github/scripts/audit_public_hygiene.sh
 ```
 
 If your change touches only one area, include at least the most relevant test

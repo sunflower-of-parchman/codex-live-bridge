@@ -4,6 +4,15 @@
 
 Security fixes are applied on a best-effort basis to the latest code on `main`.
 
+## Local Runtime Boundary
+
+The bridge controls a local Ableton Live set through OSC/UDP. Keep bridge
+traffic on loopback addresses such as `127.0.0.1`; do not expose ports `9000`
+or `9001` to an untrusted network.
+
+Do not commit local runtime memory, logs, environment files, credentials,
+rendered audio, or machine-specific paths.
+
 ## Reporting a Vulnerability
 
 Please do not open a public issue with exploitable details.

@@ -8,19 +8,21 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Direct public hygiene audit script:
+  - `.github/scripts/audit_public_hygiene.sh`
+- GitHub Actions unit-test workflow for the public bridge test suite.
+- GitHub issue and pull request templates.
 - Public maintainer docs for contributors and users:
   - `CONTRIBUTING.md`
   - `SUPPORT.md`
   - `SECURITY.md`
-- First release preparation checklist:
-  - `docs/release-checklist-v0.1.0.md`
-- README updates in `README.public.md`:
-  - non-affiliation/trademark notice
-  - simple architecture Mermaid diagram
-  - compatibility and stability guidance
-  - links to maintainer/project governance files
 
 ### Changed
 
-- `README.public.md` now presents clearer open-source onboarding boundaries for
-  support and release expectations.
+- `README.md` now reflects the files tracked on current `main`, removes
+  mirror-era/bootstrap references, and documents the public privacy boundary.
+- `CONTRIBUTING.md` now points at the direct public validation commands.
+- `bridge/benchmark_midi_write.py` now reports missing composition-runtime
+  modules clearly instead of failing during import.
+- `.gitignore` now excludes runtime logs, local conversation memory, environment
+  variants, and generated media artifacts.

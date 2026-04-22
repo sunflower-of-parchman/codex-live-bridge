@@ -21,7 +21,7 @@ patterns.
 
 When guidance conflicts, apply this order:
 
-1. Michael Wall author principles (below)
+1. User-authored principles (below)
 2. Canon (this document)
 3. `memory/fundamentals/*.md`
 4. `memory/instruments/*.md`
@@ -53,7 +53,7 @@ Overrides MUST be written in the session note.
 - Macro divergence: a change that creates a new section identity (temporal framework, density regime, pitch field, instrumentation, register, spatial world, form logic).
 - Session note: record of what happened and why in this run.
 
-## Michael Wall Author Principles
+## User-Authored Principles
 
 - The job is fit to context and use.
 - The track should change the space when it starts.

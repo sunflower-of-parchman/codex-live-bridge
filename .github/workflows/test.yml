@@ -1,0 +1,20 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run bridge unit tests
+        run: python3 -m unittest discover -s bridge -p "test_*.py"
+      - name: Run public hygiene audit
+        run: bash .github/scripts/audit_public_hygiene.sh
