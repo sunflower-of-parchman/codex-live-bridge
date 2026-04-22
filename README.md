@@ -1,168 +1,425 @@
 # codex-live-bridge
 
-`codex-live-bridge` is an open-source, local-first bridge for controlling
-Ableton Live from Codex or another local automation client.
+`codex-live-bridge` is an open-source, local-first Codex-to-Ableton Live
+control bridge.
 
-The repo currently ships:
+More precisely, this repo ships a Max for Live patch source, a JavaScript
+command router, and Python OSC client/CLI scripts that drive Ableton Live
+through LiveAPI (the Live Object Model) over OSC/UDP.
 
-- a Python OSC/UDP client and CLI
-- an editable Max for Live patch source
-- a JavaScript LiveAPI router for the patch
-- local memory and eval template tooling
-- unit tests for the public Python bridge surface
+It also includes a local memory + eval loop that starts from blank user
+templates and is filled by each user's own compositional intent over time.
+This project does not train on, ingest, copy, or emulate other artists'
+music; steering context is user-authored and local.
+
+Started during the OpenAI 2026 Hackathon in San Francisco, built in tandem with GPT-5.3-Codex.
 
 This project is independent and is not affiliated with or endorsed by OpenAI,
 Ableton, or Cycling '74. All trademarks belong to their respective owners.
 
-## Current Status
+This repo is local-only and is not operable from Codex cloud/browser surfaces.
+Operate it from one of these local Codex surfaces:
+- [Codex app](https://developers.openai.com/codex/app/)
+- [Codex CLI](https://developers.openai.com/codex/cli/)
+- [Codex IDE extension](https://developers.openai.com/codex/ide/)
 
-| Area | Status |
-| --- | --- |
-| Python OSC client | Implemented in `bridge/ableton_udp_bridge.py` |
-| Max for Live patch source | Implemented in `bridge/m4l/LiveUdpBridge.maxpat` |
-| Max JavaScript router | Implemented in `bridge/m4l/live_udp_bridge.js` |
-| Packaged `.amxd` device | Release artifact workflow; not tracked on current `main` |
-| Automated bootstrap/doctor | Planned |
-| Composition arrangement generator | Planned / not tracked on current `main` |
-| CI | GitHub Actions unit-test workflow |
+Optional workflow docs used by this project:
+- [Codex skills](https://developers.openai.com/codex/skills)
+- [Codex app automations](https://developers.openai.com/codex/app/automations/)
 
-The implemented target today is Ableton Live with Max for Live. Other DAWs are
-architecture targets, not current user-facing implementations.
+## Get Started Right Now
 
-## Requirements
+Quick requirements:
 
-- Ableton Live with Max for Live support for runtime use
-- Python 3.10+ for CLI tools and tests
-- Node.js only if you want to syntax-check the Max JavaScript router locally
+- Ableton Live with Max for Live support:
+  [Ableton Live](https://www.ableton.com/en/live/) and
+  [Max for Live](https://www.ableton.com/en/live/max-for-live/)
+- A local Codex surface:
+  [Codex app](https://developers.openai.com/codex/app/),
+  [Codex CLI](https://developers.openai.com/codex/cli/), or
+  [Codex IDE extension](https://developers.openai.com/codex/ide/)
+- Python 3.10+:
+  [python.org downloads](https://www.python.org/downloads/)
 
-The Python code uses the standard library.
-
-## Quick Start
-
-Clone and run the local test surface:
-
+1. Clone and run the public unit suite:
 ```bash
 git clone https://github.com/sunflower-of-parchman/codex-live-bridge.git
 cd codex-live-bridge
 python3 -m unittest discover -s bridge -p "test_*.py"
 ```
 
-Run a dry-run command build without contacting Ableton:
-
-```bash
-python3 bridge/ableton_udp_bridge.py --dry-run --status --no-tempo --no-signature
+2. In Ableton Live, open or recreate the patch from:
+```text
+bridge/m4l/LiveUdpBridge.maxpat
 ```
 
-To use the bridge with Ableton Live:
+3. Keep the JavaScript router next to the patch so `[js live_udp_bridge.js]`
+   resolves:
+```text
+bridge/m4l/live_udp_bridge.js
+```
 
-1. Open Ableton Live with Max for Live available.
-2. Load or recreate the Max patch from `bridge/m4l/LiveUdpBridge.maxpat`.
-3. Keep `bridge/m4l/live_udp_bridge.js` next to the patch so `[js live_udp_bridge.js]` resolves.
-4. Run a status check:
-
+4. Verify bridge connectivity:
 ```bash
 python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
 ```
 
-Expected ACK shape:
-
+5. Confirm you see ACKs like:
 ```text
 ack:  /ack pong
 ack:  /ack status <total_tracks> <midi_tracks> <audio_tracks> <return_tracks> live_set <id>
 ```
 
-## Bridge Commands
+Packaged `.amxd` device artifacts may be attached to tagged releases when
+available. Current `main` keeps the editable patch source as the canonical
+tracked device surface.
 
-Commands are sent to `127.0.0.1:9000` as OSC/UDP packets. ACK and query
-responses are emitted on `127.0.0.1:9001`.
+## Included
 
-Primary command docs:
+- `bridge/m4l/LiveUdpBridge.maxpat`: editable Max patch source
+- `bridge/m4l/live_udp_bridge.js`: JavaScript router logic used by the patch
+- `bridge/ableton_udp_bridge.py`: OSC client/CLI for command + ACK flows
+- `bridge/full_surface_smoke_test.py`: full-surface bridge smoke script
+- `bridge/benchmark_midi_write.py`: optional benchmark harness for composition-runtime branches
+- `memory/compositional_memory.py`: memory index loader and fundamental brief CLI
+- `memory/retrieval.py`: retrieval index/search/read/brief CLI over memory + eval artifacts
+- `memory/eval_governance.py`: bounded eval-to-memory governance loop CLI
+- `music-preferences/`: blank user memory and eval template pack
 
-- `bridge/commands.md`
-- `bridge/ableton_udp_bridge.py --help`
+## Live Object Model Control (LiveAPI over OSC/UDP)
 
-Current command families include:
+The Max for Live device uses LiveAPI (Ableton Live Object Model) and exposes a
+generic RPC surface over OSC/UDP. This lets Codex (or any OSC client) query,
+set, call, inspect, and enumerate Live Object Model paths and properties.
 
-- transport and status checks: `/ping`, `/status`
-- Live set basics: `/tempo`, `/sig_num`, `/sig_den`
-- track management: create, add, delete, rename, ensure MIDI tracks
-- clip-note workflows: create/replace/append/inspect session clip notes
-- MIDI CC workflows: `/midi_cc`, `/cc64`
-- generic LiveAPI RPC: `/api/get`, `/api/set`, `/api/call`, `/api/children`, `/api/describe`
+Current `/api/*` endpoints:
 
-## Privacy and Data
+- `/api/ping [request_id]`
+- `/api/get <path> <property> [request_id]`
+- `/api/set <path> <property> <value_json> [request_id]`
+- `/api/call <path> <method> <args_json> [request_id]`
+- `/api/children <path> <child_name> [request_id]`
+- `/api/describe <path> [request_id]`
 
-This repository should not contain private user data, credentials, local
-conversation logs, rendered audio, or machine-specific maintainer paths.
+Live Object Model reference:
+[Cycling '74 Live Object Model docs](https://docs.cycling74.com/max8/vignettes/live_object_model)
 
-Tracked files are intended to be source code, public documentation, tests, and
-blank starter templates. Runtime memory, eval artifacts, logs, local
-environment files, and generated media are ignored by default.
+## Data & Training
 
-This repo does not train on, ingest, copy, or emulate other artists' music.
-Any workflow "learning" in this repo means optional local logging of a user's
-own run artifacts when enabled.
+- This repo ships no trained model weights.
+- This repo does not implement model training or fine-tuning pipelines.
+- This repo does not include or ingest anyone else's music.
+- This project does not train on, copy, or emulate other artists' catalogs,
+  genres, or styles. It focuses on user-guided, user-owned co-composition,
+  helping the user compose in tandem with the software by working from the
+  user's own musical material and intent.
+- Preference and guidance templates in this repo are intentionally blank at
+  clone time; musical direction is user-authored when the user fills those
+  docs with their own context, constraints, and goals.
+- Steering context comes from user-owned local memory/eval artifacts, not from
+  third-party music corpora.
+- Any workflow "learning" in this repo refers to optional local logging of your
+  own run artifacts when enabled, not ML training.
+- If you are using Codex, that model is external to this repo; this repo is
+  the local control and workflow layer around Ableton Live.
 
-## Local Security Model
+## Compositional Studio Assistant Workflow
 
-The bridge is a local control surface for a running Ableton Live set. Keep it
-bound to loopback addresses such as `127.0.0.1`. Do not expose the command or
-ACK ports to a network you do not control.
+A runtime usage pattern in this repo is:
 
-Default ports:
+1. Keep your Ableton template thin: instruments, routing, and returns are fine, but do not save stale bridge state into the template.
+2. Load the bridge patch for the session.
+3. Put the first instrument on track 2, or let a future composition workflow create missing named instrument tracks.
+4. If needed, put the second instrument on track 3 and treat it as the second ensemble entry.
+5. Choose meter, BPM, and optional mood/key, then compose with workflow scripts.
+6. Review eval artifacts, adjust constraints/guidance, and compose again.
 
-- command channel: UDP `9000`
+## Natural-Language Harmonic Intent (Codex app)
+
+You can describe harmony in plain language while still keeping a stable key.
+
+Examples you can type in the Codex app:
+
+- "Keep this in C natural minor. Use i minor, iv minor, bIII Maj7, bVI Maj7."
+- "Use C minor as home, but cycle F minor, EbMaj7, and AbMaj7."
+
+What this means in runtime behavior:
+
+- `key_name` remains the tonal center preference.
+- `harmonic_intent` is interpreted as progression intent.
+- If `harmonic_intent` is missing or cannot be parsed, the runtime falls back to the default palette.
+
+The current public `main` branch does not track the full arrangement generator.
+Treat natural-language harmonic intent as part of the composition workflow
+roadmap until that runtime is restored on the public branch.
+
+## Current Composition Architecture
+
+The public template uses layered decisions:
+
+1. Bridge layer handles OSC transport and Live Object Model command routing.
+2. Setup layer establishes tempo, signature, and track/clip state.
+3. Pattern layer writes deterministic MIDI content by instrument role.
+4. Reflection layer records run metadata for iterative composition.
+
+## Current Eval Coverage
+
+When enabled, eval artifacts focus on symbolic composition structure, not
+rendered audio quality.
+
+Current artifact fields include:
+
+- run metadata (`mood`, `key`, `tempo`, `meter`, minutes, bars, section size, status)
+- per-track note-count paths and created-clip counts
+- structural fingerprints and a fingerprint hash
+- similarity/novelty values against recent reference runs
+- repetition flags for repeated trajectories
+
+Artifacts are persisted locally under:
+
+- `memory/evals/compositions/<date>/<run_id>.json`
+- `memory/evals/composition_index.json`
+
+If no artifacts exist yet, retrieval/governance commands will report no indexed
+context until runs are added. Runtime memory and eval artifacts are local files
+and should not be committed.
+
+## Capabilities
+
+Exact bridge command surface available now:
+
+1. `/ping`
+2. `/tempo <bpm>`
+3. `/sig_num <numerator>`
+4. `/sig_den <denominator>`
+5. `/create_midi_track`
+6. `/add_midi_tracks <count> [name]`
+7. `/create_audio_track`
+8. `/add_audio_tracks <count> [prefix]`
+9. `/delete_audio_tracks <count>`
+10. `/delete_midi_tracks <count>` (track 0 protected)
+11. `/rename_track <track_index> <name>`
+12. `/set_session_clip_notes <track_index> <slot_index> <length_beats> <notes_json> [clip_name]` (destructive: deletes any existing clip in the target slot before write)
+13. `/append_session_clip_notes <track_index> <slot_index> <notes_json>`
+14. `/inspect_session_clip_notes <track_index> <slot_index>`
+15. `/ensure_midi_tracks <target_count>`
+16. `/midi_cc <controller> <value> [channel]`
+17. `/cc64 <value> [channel]`
+18. `/status`
+19. `/api/ping [request_id]`
+20. `/api/get <path> <property> [request_id]`
+21. `/api/set <path> <property> <value_json> [request_id]`
+22. `/api/call <path> <method> <args_json> [request_id]`
+23. `/api/children <path> <child_name> [request_id]`
+24. `/api/describe <path> [request_id]`
+
+Indexing conventions:
+
+- Ableton UI track labels are 1-based (`Track 1`, `Track 2`, ...).
+- Bridge `track_index` and `slot_index` are 0-based LiveAPI indexes.
+- UI `Track 1` maps to `track_index=0`.
+- UI `Track 2` maps to `track_index=1`.
+- First clip slot maps to `slot_index=0`.
+
+`notes_json` format (`/set_session_clip_notes`, `/append_session_clip_notes`):
+
+- Accepts either a JSON array of note objects or a JSON object with a `notes`
+  array.
+- Required note fields: `pitch` (0-127), `start_time` (>= 0 beats),
+  `duration` (> 0 beats).
+- Optional note fields: `velocity` (1-127; defaults to 100 if omitted/invalid),
+  `mute` (0 or 1).
+
+```json
+{"notes":[{"pitch":60,"start_time":0.0,"duration":0.5,"velocity":100,"mute":0}]}
+```
+
+ACK behavior:
+
+- The bridge emits OSC acknowledgements using `/ack`.
+- For `/api/*`, an optional trailing `request_id` is echoed in ACK responses
+  when provided.
+- The Python client can listen on the ACK port and print summarized ACK output.
+
+Example ACKs:
+
+```text
+ack:  /ack status 8 5 3 2 live_set 97
+ack:  /ack error not_initialized
+ack:  /ack error not_in_live_set 0
+```
+
+## Topology (Ports and Transport)
+
+- Default host: `127.0.0.1`
+- Command channel: UDP `9000`
 - ACK/query response channel: UDP `9001`
+- The Python client encodes OSC packets using the Python standard library.
+- The Max for Live device routes commands to LiveAPI inside
+  `bridge/m4l/live_udp_bridge.js`.
 
-## Memory and Eval Templates
+```mermaid
+flowchart LR
+  U["User or Codex"] --> P["Python CLI (bridge/*.py)"]
+  P --> C["OSC/UDP Commands (:9000)"]
+  C --> B["LiveUdpBridge Patch"]
+  B --> L["Ableton LiveAPI (LOM)"]
+  L --> A["Ableton Live Set"]
+  A --> R["OSC/UDP ACKs (:9001)"]
+  R --> P
+```
 
-`music-preferences/` is the public starter template for user-owned local memory.
-It is safe to copy into a private runtime `memory/` tree:
+## Shipped Workflows
+
+- `bridge/ableton_udp_bridge.py`: general OSC command client/CLI with ACK
+  listening and command batching modes
+- `bridge/full_surface_smoke_test.py`: full-surface bridge smoke script
+- `bridge/benchmark_midi_write.py`: deterministic MIDI write benchmark harness for branches that include composition-runtime modules
+
+## Detailed Requirements
+
+To run the bridge and workflow scripts:
+
+- Fast start (recommended): Ableton Live 12 Suite trial or any Ableton Live
+  setup with Max for Live support:
+  [Ableton Live trial](https://www.ableton.com/en/trial/)
+- Any full setup with Max for Live support also works:
+  [Ableton Live](https://www.ableton.com/en/live/) and
+  [Max for Live](https://www.ableton.com/en/live/max-for-live/)
+- Codex surface (choose one):
+  [Codex app](https://developers.openai.com/codex/app/),
+  [Codex CLI](https://developers.openai.com/codex/cli/), or
+  [Codex IDE extension](https://developers.openai.com/codex/ide/)
+- Not supported for this local bridge workflow: Codex cloud/browser.
+- Python 3.10+:
+  [python.org downloads](https://www.python.org/downloads/)
+- Local UDP access on ports `9000` (commands) and `9001` (ack/query responses).
+- Host runtime requirement: keep the computer on and awake with Ableton Live
+  running.
+
+To edit bridge/device internals:
+
+- For `bridge/m4l/LiveUdpBridge.maxpat`, use the Max for Live editor in Live or
+  [Cycling '74 Max](https://cycling74.com/products/max).
+- For `bridge/m4l/live_udp_bridge.js`, edit JavaScript source and reload the
+  device in Live (this repo does not require a Node.js runtime for this file).
+
+## User Preference Templates (Blank)
+
+- `music-preferences/` includes blank markdown templates for:
+  - canon
+  - ensemble
+  - instruments
+  - moods
+  - fundamentals (`rhythm`, `harmony`, `timbre`, `velocity`, `key`, `meter`,
+    `tempo`, `mood`, `arrangement`, `evaluation`, `silence`)
+- These are intentionally empty starter docs and contain no personal project
+  preferences.
+- First-time setup (required once per clone):
 
 ```bash
 mkdir -p memory
 rsync -a music-preferences/ memory/
 ```
 
-Runtime memory and eval outputs under `memory/` are local artifacts and should
-not be committed.
+## Memory and Eval Workflow (Clone-Ready)
 
-Useful commands:
+After first-time template setup, use this standard flow:
 
+1. Build retrieval index:
 ```bash
 python3 -m memory.retrieval index
-python3 -m memory.retrieval status
-python3 -m memory.retrieval brief --focus rhythm
+```
+
+2. Query context for a run:
+```bash
+python3 -m memory.retrieval brief --meter <NUM/DEN> --bpm <BPM> --mood <MOOD> --key-name "<KEY>" --focus <FUNDAMENTAL>
+```
+
+3. Summarize repeated eval signals:
+```bash
 python3 -m memory.eval_governance summarize --lookback 30
+```
+
+4. Plan safe memory updates (recommended):
+```bash
 python3 -m memory.eval_governance apply --date YYYY-MM-DD --dry-run
 ```
 
-## Testing
-
-Run the public unit suite:
-
+5. Apply memory updates (writes files):
 ```bash
-python3 -m unittest discover -s bridge -p "test_*.py"
+python3 -m memory.eval_governance apply --date YYYY-MM-DD
 ```
 
-Optional JavaScript syntax check:
+Template docs for eval artifact layout and expected files are included at:
+- `music-preferences/evals/README.md`
 
-```bash
-node --check bridge/m4l/live_udp_bridge.js
-```
+If you have no eval artifacts yet, summarize/apply commands will report zero
+signals until artifacts are added under `memory/evals/compositions/`.
 
-Run the direct public hygiene scan:
+## Compatibility and Stability
 
-```bash
-bash .github/scripts/audit_public_hygiene.sh
-```
+- Primary maintainer environment: macOS + Ableton Live with Max for Live.
+- Windows and Linux are welcome but not yet validated as first-class maintainer
+  environments.
+- Breaking changes may happen between releases while the bridge surface settles.
+- Support is best-effort by a solo maintainer.
 
-## Maintainer Files
+## Project Files for Contributors
 
 - `CONTRIBUTING.md`: contribution workflow and pull request expectations
 - `SUPPORT.md`: support scope and issue-reporting checklist
 - `SECURITY.md`: vulnerability reporting guidance
 - `CHANGELOG.md`: human-readable release and change history
+
+## Quick Start
+
+1. Clone:
+```bash
+git clone https://github.com/sunflower-of-parchman/codex-live-bridge.git
+cd codex-live-bridge
+```
+
+2. Run tests:
+```bash
+python3 -m unittest discover -s bridge -p "test_*.py"
+```
+
+3. Open Ableton Live with a thin musical template or blank set.
+
+4. Load or recreate the bridge patch from:
+```text
+bridge/m4l/LiveUdpBridge.maxpat
+```
+
+5. Verify bridge connectivity:
+```bash
+python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
+```
+
+6. Optional bridge smoke check:
+```bash
+python3 bridge/full_surface_smoke_test.py
+```
+
+## Source Editing
+
+If you modify `bridge/m4l/live_udp_bridge.js` or
+`bridge/m4l/LiveUdpBridge.maxpat`:
+
+1. Keep the JS file next to the patch, or update the Max `[js ...]` object to
+   point at the correct local file.
+2. Reload the device in Live.
+3. Re-save a packaged `.amxd` only when doing an explicit package rebuild or
+   release-artifact pass.
+
+## Testing
+
+```bash
+python3 -m unittest discover -s bridge -p "test_*.py"
+node --check bridge/m4l/live_udp_bridge.js
+bash .github/scripts/audit_public_hygiene.sh
+```
 
 ## License
 
