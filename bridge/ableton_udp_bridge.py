@@ -79,8 +79,21 @@ class BridgeConfig:
     api_unobserves: Tuple[Tuple[str, str | None], ...] = ()
     api_observers: Tuple[str | None, ...] = ()
     api_clear_observers: Tuple[str | None, ...] = ()
+    api_session_contexts: Tuple[str | None, ...] = ()
+    api_theory_statuses: Tuple[str | None, ...] = ()
+    api_tuning_statuses: Tuple[str | None, ...] = ()
+    api_device_lists: Tuple[Tuple[str, str | None], ...] = ()
+    api_device_parameters: Tuple[Tuple[str, str | None], ...] = ()
+    api_parameter_sets: Tuple[Tuple[str, str, str | None], ...] = ()
+    api_mixer_statuses: Tuple[Tuple[str, str | None], ...] = ()
+    api_insert_devices: Tuple[Tuple[str, str, str, str | None], ...] = ()
+    api_insert_chains: Tuple[Tuple[str, str, str | None], ...] = ()
+    api_drum_chain_in_notes: Tuple[Tuple[str, int, str | None], ...] = ()
     ack_mode: str = "per_command"
     ack_flush_interval: int = 10
+    listen: bool = False
+    listen_timeout_s: float = 0.0
+    listen_max_events: int = 0
     report_metrics: bool = False
     delay_ms: int = 0
     dry_run: bool = False
@@ -330,6 +343,86 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         metavar="REQUEST_ID",
         help="Send /api_clear_observers with an optional request id",
     )
+    parser.add_argument(
+        "--api-session-context",
+        nargs="?",
+        action="append",
+        default=[],
+        metavar="REQUEST_ID",
+        help="Send /api/session_context with an optional request id",
+    )
+    parser.add_argument(
+        "--api-theory-status",
+        nargs="?",
+        action="append",
+        default=[],
+        metavar="REQUEST_ID",
+        help="Send /api/theory_status with an optional request id",
+    )
+    parser.add_argument(
+        "--api-tuning-status",
+        nargs="?",
+        action="append",
+        default=[],
+        metavar="REQUEST_ID",
+        help="Send /api/tuning_status with an optional request id",
+    )
+    parser.add_argument(
+        "--api-device-list",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Send /api/device_list <track_ref|all> [request_id]",
+    )
+    parser.add_argument(
+        "--api-device-parameters",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Send /api/device_parameters <device_path> [request_id]",
+    )
+    parser.add_argument(
+        "--api-parameter-set",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Send /api/parameter_set <parameter_path> <value_json> [request_id]",
+    )
+    parser.add_argument(
+        "--api-mixer-status",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Send /api/mixer_status <track_ref|master|return:N> [request_id]",
+    )
+    parser.add_argument(
+        "--api-insert-device",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Send /api/insert_device <track_or_chain_path> <native_device_name> <target_index_or_empty> [request_id]",
+    )
+    parser.add_argument(
+        "--api-insert-chain",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Send /api/insert_chain <rack_device_path> <target_index_or_empty> [request_id]",
+    )
+    parser.add_argument(
+        "--api-drum-chain-in-note",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar="ARGS",
+        help="Send /api/drum_chain_in_note <drum_chain_path> <note|-1> [request_id]",
+    )
 
     parser.add_argument(
         "--tempo",
@@ -507,6 +600,23 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         help="Print messages without sending them",
     )
     parser.add_argument(
+        "--listen",
+        action="store_true",
+        help="Listen for ACK and observer events after sending commands; allows no send commands",
+    )
+    parser.add_argument(
+        "--listen-timeout",
+        type=non_negative_float,
+        default=0.0,
+        help="Listen timeout in seconds; 0 listens until interrupted or --listen-max-events",
+    )
+    parser.add_argument(
+        "--listen-max-events",
+        type=non_negative_int,
+        default=0,
+        help="Maximum events to print in --listen mode; 0 means unlimited",
+    )
+    parser.add_argument(
         "--no-metrics",
         action="store_true",
         help="Disable command timing summaries",
@@ -651,6 +761,64 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
             parsed.append((observer_id, request_id))
         return tuple(parsed)
 
+    def _parse_single_arg_optional_req(
+        entries: Sequence[Sequence[str]],
+        flag_name: str,
+        arg_name: str,
+    ) -> Tuple[Tuple[str, str | None], ...]:
+        parsed: List[Tuple[str, str | None]] = []
+        for parts in entries:
+            if len(parts) not in (1, 2):
+                parser.error(f"{flag_name} expects: <{arg_name}> [request_id]")
+            parsed.append((str(parts[0]), _optional_request_id(parts, 1)))
+        return tuple(parsed)
+
+    def _parse_api_parameter_set(
+        entries: Sequence[Sequence[str]],
+    ) -> Tuple[Tuple[str, str, str | None], ...]:
+        parsed: List[Tuple[str, str, str | None]] = []
+        for parts in entries:
+            if len(parts) not in (2, 3):
+                parser.error("--api-parameter-set expects: <parameter_path> <value_json> [request_id]")
+            parsed.append((str(parts[0]), str(parts[1]), _optional_request_id(parts, 2)))
+        return tuple(parsed)
+
+    def _parse_api_insert_device(
+        entries: Sequence[Sequence[str]],
+    ) -> Tuple[Tuple[str, str, str, str | None], ...]:
+        parsed: List[Tuple[str, str, str, str | None]] = []
+        for parts in entries:
+            if len(parts) not in (3, 4):
+                parser.error(
+                    "--api-insert-device expects: <track_or_chain_path> <native_device_name> "
+                    "<target_index_or_empty> [request_id]"
+                )
+            parsed.append((str(parts[0]), str(parts[1]), str(parts[2]), _optional_request_id(parts, 3)))
+        return tuple(parsed)
+
+    def _parse_api_insert_chain(
+        entries: Sequence[Sequence[str]],
+    ) -> Tuple[Tuple[str, str, str | None], ...]:
+        parsed: List[Tuple[str, str, str | None]] = []
+        for parts in entries:
+            if len(parts) not in (2, 3):
+                parser.error("--api-insert-chain expects: <rack_device_path> <target_index_or_empty> [request_id]")
+            parsed.append((str(parts[0]), str(parts[1]), _optional_request_id(parts, 2)))
+        return tuple(parsed)
+
+    def _parse_api_drum_chain_in_note(
+        entries: Sequence[Sequence[str]],
+    ) -> Tuple[Tuple[str, int, str | None], ...]:
+        parsed: List[Tuple[str, int, str | None]] = []
+        for parts in entries:
+            if len(parts) not in (2, 3):
+                parser.error("--api-drum-chain-in-note expects: <drum_chain_path> <note|-1> [request_id]")
+            note = int(parts[1])
+            if not -1 <= note <= 127:
+                parser.error("--api-drum-chain-in-note note must be between -1 and 127")
+            parsed.append((str(parts[0]), note, _optional_request_id(parts, 2)))
+        return tuple(parsed)
+
     def _parse_midi_cc(entries: Sequence[Sequence[str]]) -> Tuple[Tuple[int, int, int], ...]:
         parsed: List[Tuple[int, int, int]] = []
         for parts in entries:
@@ -688,16 +856,35 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
     api_clear_observers: Tuple[str | None, ...] = tuple(
         None if value in (None, "") else str(value) for value in ns.api_clear_observers
     )
+    api_session_contexts: Tuple[str | None, ...] = tuple(
+        None if value in (None, "") else str(value) for value in ns.api_session_context
+    )
+    api_theory_statuses: Tuple[str | None, ...] = tuple(
+        None if value in (None, "") else str(value) for value in ns.api_theory_status
+    )
+    api_tuning_statuses: Tuple[str | None, ...] = tuple(
+        None if value in (None, "") else str(value) for value in ns.api_tuning_status
+    )
+    api_device_lists = _parse_single_arg_optional_req(ns.api_device_list, "--api-device-list", "track_ref")
+    api_device_parameters = _parse_single_arg_optional_req(
+        ns.api_device_parameters, "--api-device-parameters", "device_path"
+    )
+    api_parameter_sets = _parse_api_parameter_set(ns.api_parameter_set)
+    api_mixer_statuses = _parse_single_arg_optional_req(ns.api_mixer_status, "--api-mixer-status", "track_ref")
+    api_insert_devices = _parse_api_insert_device(ns.api_insert_device)
+    api_insert_chains = _parse_api_insert_chain(ns.api_insert_chain)
+    api_drum_chain_in_notes = _parse_api_drum_chain_in_note(ns.api_drum_chain_in_note)
     midi_ccs = _parse_midi_cc(ns.midi_cc)
     cc64s = _parse_cc64(ns.cc64)
+    expect_ack = bool(ns.ack or ns.listen)
 
     return BridgeConfig(
         host=ns.host,
         port=ns.port,
         ack_port=ns.ack_port,
         ack_timeout_s=ns.ack_timeout,
-        expect_ack=ns.ack,
-        ping_first=ns.ack and not ns.no_ping_first,
+        expect_ack=expect_ack,
+        ping_first=expect_ack and not ns.no_ping_first and not ns.listen,
         status=bool(ns.status),
         tempo=tempo,
         sig_num=sig_num,
@@ -735,8 +922,21 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         api_unobserves=api_unobserves,
         api_observers=api_observers,
         api_clear_observers=api_clear_observers,
+        api_session_contexts=api_session_contexts,
+        api_theory_statuses=api_theory_statuses,
+        api_tuning_statuses=api_tuning_statuses,
+        api_device_lists=api_device_lists,
+        api_device_parameters=api_device_parameters,
+        api_parameter_sets=api_parameter_sets,
+        api_mixer_statuses=api_mixer_statuses,
+        api_insert_devices=api_insert_devices,
+        api_insert_chains=api_insert_chains,
+        api_drum_chain_in_notes=api_drum_chain_in_notes,
         ack_mode=str(ns.ack_mode),
         ack_flush_interval=int(ns.ack_flush_interval),
+        listen=bool(ns.listen),
+        listen_timeout_s=float(ns.listen_timeout),
+        listen_max_events=int(ns.listen_max_events),
         report_metrics=not bool(ns.no_metrics),
         delay_ms=ns.delay_ms,
         dry_run=ns.dry_run,
@@ -922,6 +1122,40 @@ def parse_ack_event(address: str, args: Sequence[OscArg]) -> AckEvent:
     elif event == "api_clear_observers" and len(args) >= 2:
         request_id = _optional_request_id(args, 2)
         payload = {"result": _try_parse_json(args[1])}
+    elif event == "api_session_context" and len(args) >= 2:
+        request_id = _optional_request_id(args, 2)
+        payload = {"context": _try_parse_json(args[1])}
+    elif event == "api_theory_status" and len(args) >= 2:
+        request_id = _optional_request_id(args, 2)
+        payload = {"status": _try_parse_json(args[1])}
+    elif event == "api_tuning_status" and len(args) >= 2:
+        request_id = _optional_request_id(args, 2)
+        payload = {"status": _try_parse_json(args[1])}
+    elif event == "api_device_list" and len(args) >= 3:
+        request_id = _optional_request_id(args, 3)
+        payload = {"target": args[1], "devices": _try_parse_json(args[2])}
+    elif event == "api_device_parameters" and len(args) >= 3:
+        request_id = _optional_request_id(args, 3)
+        payload = {"device_path": args[1], "parameters": _try_parse_json(args[2])}
+    elif event == "api_parameter_set" and len(args) >= 3:
+        request_id = _optional_request_id(args, 3)
+        payload = {"parameter_path": args[1], "parameter": _try_parse_json(args[2])}
+    elif event == "api_mixer_status" and len(args) >= 3:
+        request_id = _optional_request_id(args, 3)
+        payload = {"track_path": args[1], "mixer": _try_parse_json(args[2])}
+    elif event == "api_insert_device" and len(args) >= 4:
+        request_id = _optional_request_id(args, 4)
+        payload = {
+            "target_path": args[1],
+            "device_name": args[2],
+            "result": _try_parse_json(args[3]),
+        }
+    elif event == "api_insert_chain" and len(args) >= 3:
+        request_id = _optional_request_id(args, 3)
+        payload = {"rack_path": args[1], "result": _try_parse_json(args[2])}
+    elif event == "api_drum_chain_in_note" and len(args) >= 3:
+        request_id = _optional_request_id(args, 3)
+        payload = {"chain_path": args[1], "chain": _try_parse_json(args[2])}
     elif event == "api_event" and len(args) >= 3:
         event_payload = _try_parse_json(args[2])
         payload = {"observer_id": args[1], "event_payload": event_payload}
@@ -1064,10 +1298,53 @@ def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
         result_text = _short_repr(parsed if parsed is not None else result_json)
         return f"api_clear_observers -> {result_text}{_req_suffix(request_id)}"
 
+    if event == "api_session_context" and len(args) >= 2:
+        request_id = args[2] if len(args) >= 3 else None
+        parsed = _try_parse_json(args[1])
+        counts = parsed.get("counts") if isinstance(parsed, dict) else None
+        return f"api_session_context -> {_short_repr(counts if counts else parsed)}{_req_suffix(request_id)}"
+
+    if event == "api_theory_status" and len(args) >= 2:
+        request_id = args[2] if len(args) >= 3 else None
+        parsed = _try_parse_json(args[1])
+        theory = parsed.get("theory") if isinstance(parsed, dict) else None
+        return f"api_theory_status -> {_short_repr(theory if theory else parsed)}{_req_suffix(request_id)}"
+
+    if event == "api_tuning_status" and len(args) >= 2:
+        request_id = args[2] if len(args) >= 3 else None
+        parsed = _try_parse_json(args[1])
+        tuning = parsed.get("tuning") if isinstance(parsed, dict) else None
+        return f"api_tuning_status -> {_short_repr(tuning if tuning else parsed)}{_req_suffix(request_id)}"
+
+    if event in {
+        "api_device_list",
+        "api_device_parameters",
+        "api_parameter_set",
+        "api_mixer_status",
+        "api_insert_device",
+        "api_insert_chain",
+        "api_drum_chain_in_note",
+    }:
+        request_id = None
+        detail_args = list(args[1:])
+        if event == "api_insert_device":
+            if len(args) >= 5:
+                request_id = args[4]
+                detail_args = list(args[1:4])
+        elif len(args) >= 4:
+            request_id = args[3]
+            detail_args = list(args[1:3])
+        details = " ".join(str(a) for a in detail_args)
+        return f"{event} {details}{_req_suffix(request_id)}"
+
     if event == "api_event" and len(args) >= 3:
         observer_id = args[1]
         payload_json = args[2]
         parsed = _try_parse_json(payload_json)
+        path = "?"
+        property_name = "?"
+        event_index = None
+        event_ms = None
         if isinstance(parsed, dict):
             path = parsed.get("current_path") or parsed.get("requested_path") or "?"
             property_name = parsed.get("property") or "?"
@@ -1163,6 +1440,46 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
         commands.append(OscCommand("/api_observers", _with_request_id([], request_id)))
     for request_id in cfg.api_clear_observers:
         commands.append(OscCommand("/api_clear_observers", _with_request_id([], request_id)))
+    for request_id in cfg.api_session_contexts:
+        commands.append(OscCommand("/api/session_context", _with_request_id([], request_id)))
+    for request_id in cfg.api_theory_statuses:
+        commands.append(OscCommand("/api/theory_status", _with_request_id([], request_id)))
+    for request_id in cfg.api_tuning_statuses:
+        commands.append(OscCommand("/api/tuning_status", _with_request_id([], request_id)))
+    for track_ref, request_id in cfg.api_device_lists:
+        commands.append(OscCommand("/api/device_list", _with_request_id([track_ref], request_id)))
+    for device_path, request_id in cfg.api_device_parameters:
+        commands.append(OscCommand("/api/device_parameters", _with_request_id([device_path], request_id)))
+    for parameter_path, value_json, request_id in cfg.api_parameter_sets:
+        commands.append(
+            OscCommand(
+                "/api/parameter_set",
+                _with_request_id([parameter_path, value_json], request_id),
+            )
+        )
+    for track_ref, request_id in cfg.api_mixer_statuses:
+        commands.append(OscCommand("/api/mixer_status", _with_request_id([track_ref], request_id)))
+    for target_path, device_name, target_index, request_id in cfg.api_insert_devices:
+        commands.append(
+            OscCommand(
+                "/api/insert_device",
+                _with_request_id([target_path, device_name, target_index], request_id),
+            )
+        )
+    for rack_path, target_index, request_id in cfg.api_insert_chains:
+        commands.append(
+            OscCommand(
+                "/api/insert_chain",
+                _with_request_id([rack_path, target_index], request_id),
+            )
+        )
+    for chain_path, note, request_id in cfg.api_drum_chain_in_notes:
+        commands.append(
+            OscCommand(
+                "/api/drum_chain_in_note",
+                _with_request_id([chain_path, note], request_id),
+            )
+        )
 
     if cfg.status:
         commands.append(OscCommand("/status"))
@@ -1452,16 +1769,80 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
     return metrics
 
 
+def listen_for_events(cfg: BridgeConfig) -> int:
+    if cfg.dry_run:
+        print("listen: skipped in dry-run")
+        return 0
+
+    ack_sock = open_ack_socket(cfg)
+    if ack_sock is None:
+        print(
+            f"error: could not listen on {cfg.host}:{cfg.ack_port}",
+            file=sys.stderr,
+        )
+        return 0
+
+    max_events = max(0, int(cfg.listen_max_events))
+    deadline = (
+        None
+        if cfg.listen_timeout_s <= 0
+        else time.monotonic() + float(cfg.listen_timeout_s)
+    )
+    event_count = 0
+    print(f"Listening: udp://{cfg.host}:{cfg.ack_port}")
+
+    try:
+        while True:
+            if max_events > 0 and event_count >= max_events:
+                break
+
+            wait_timeout = 0.25
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                wait_timeout = min(wait_timeout, remaining)
+
+            readable, _, _ = select.select([ack_sock], [], [], wait_timeout)
+            if not readable:
+                continue
+
+            while True:
+                try:
+                    packet, _addr = ack_sock.recvfrom(65535)
+                except BlockingIOError:
+                    break
+                except OSError:
+                    return event_count
+
+                try:
+                    address, args = decode_osc_message(packet)
+                except Exception as exc:  # noqa: BLE001
+                    address, args = "<unparsed>", [f"{exc}: {packet!r}"]
+                for line in summarize_ack(address, args):
+                    print(line)
+                event_count += 1
+                if max_events > 0 and event_count >= max_events:
+                    break
+    finally:
+        ack_sock.close()
+
+    return event_count
+
+
 def main(argv: Iterable[str]) -> int:
     cfg = parse_args(argv)
     commands = build_commands(cfg)
 
-    if not commands:
+    if not commands and not cfg.listen:
         print("No commands to send. Use --help for options.", file=sys.stderr)
         return 2
 
     try:
-        send_commands(cfg, commands)
+        if commands:
+            send_commands(cfg, commands)
+        if cfg.listen:
+            listen_for_events(cfg)
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)
         return 130

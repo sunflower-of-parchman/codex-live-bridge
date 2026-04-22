@@ -10,6 +10,15 @@ This plan upgrades the public Live Object Model bridge while keeping Ableton Pus
 - Treat Live runtime validation as a separate gate from static/unit validation.
 - Preserve current local-only defaults: command port `9000`, ACK/event port `9001`, host `127.0.0.1`.
 
+## Implementation Status
+
+Milestones 1-7 are implemented in the public protocol, Max JS router, Python CLI,
+tests, and docs. The completed validation gate is static/unit validation:
+Python unit tests, Max JS syntax check, and public hygiene audit.
+
+Milestone 8 remains the release gate: Live-runtime smoke validation in Ableton
+Live should be run in a disposable set before tagging a release.
+
 ## Milestones
 
 ### 1. Public Protocol Baseline

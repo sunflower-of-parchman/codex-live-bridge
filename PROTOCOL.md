@@ -77,7 +77,8 @@ Error ACKs:
 {
   "observer_id": "obs-tempo",
   "emit_initial": true,
-  "mode": 1
+  "mode": 1,
+  "min_interval_ms": 100
 }
 ```
 
@@ -96,7 +97,7 @@ Asynchronous observer events:
 /ack api_event <observer_id> <payload_json>
 ```
 
-Observer payloads include the observer ID, requested path, current path, property, event count, timestamp, and value when available:
+Observer payloads include the observer ID, requested path, current path, property, event count, dropped-event count, timestamp, and value when available:
 
 ```json
 {
@@ -105,12 +106,90 @@ Observer payloads include the observer ID, requested path, current path, propert
   "current_path": "live_set",
   "property": "tempo",
   "event_count": 2,
+  "dropped_events": 0,
   "timestamp_ms": 123456,
   "value": 121.5
 }
 ```
 
-Clients should unobserve or clear observers before shutdown. Mutations triggered by observer events should be queued back through the normal command path; do not mutate Live directly from an observer callback.
+Clients should unobserve or clear observers before shutdown. The device enforces an observer quota and supports `min_interval_ms` / `throttle_ms` to reduce high-rate event streams. Mutations triggered by observer events should be queued back through the normal command path; do not mutate Live directly from an observer callback.
+
+The Python CLI can stay open for observer events:
+
+```bash
+python3 bridge/ableton_udp_bridge.py --listen --listen-timeout 30 --listen-max-events 20 --no-tempo --no-signature
+```
+
+## Named Status Wrappers
+
+These wrappers return JSON ACK payloads and accept an optional trailing request ID.
+
+```text
+/api/session_context [request_id]
+/api/theory_status [request_id]
+/api/tuning_status [request_id]
+```
+
+Successful ACKs:
+
+```text
+/ack api_session_context <context_json> [request_id]
+/ack api_theory_status <status_json> [request_id]
+/ack api_tuning_status <status_json> [request_id]
+```
+
+Safety class: read.
+
+`/api/session_context` reports transport/session fields, track/scene counts, and selected track/scene/device when Live exposes them. `/api/theory_status` reports `root_note`, `scale_name`, `scale_intervals`, and `scale_mode`. `/api/tuning_status` reports `live_set tuning_system` data when the target Live version exposes that path.
+
+## Device, Parameter, And Mixer Wrappers
+
+```text
+/api/device_list <track_ref|all> [request_id]
+/api/device_parameters <device_path> [request_id]
+/api/mixer_status <track_ref|master|return:N> [request_id]
+/api/parameter_set <parameter_path> <value_json> [request_id]
+```
+
+Successful ACKs:
+
+```text
+/ack api_device_list <target> <devices_json> [request_id]
+/ack api_device_parameters <device_path> <parameters_json> [request_id]
+/ack api_mixer_status <track_path> <mixer_json> [request_id]
+/ack api_parameter_set <parameter_path> <parameter_json> [request_id]
+```
+
+Safety classes:
+
+- `device_list`, `device_parameters`, and `mixer_status`: read.
+- `parameter_set`: bounded write.
+
+`parameter_set` accepts only numeric values, checks `is_enabled`, and rejects values outside the parameter's `min`/`max` range when Live exposes that metadata.
+
+## Live 12.3 Native Insertion Wrappers
+
+```text
+/api/insert_device <track_or_chain_path> <native_device_name> <target_index_or_empty> [request_id]
+/api/insert_chain <rack_device_path> <target_index_or_empty> [request_id]
+/api/drum_chain_in_note <drum_chain_path> <note|-1> [request_id]
+```
+
+Successful ACKs:
+
+```text
+/ack api_insert_device <target_path> <native_device_name> <result_json> [request_id]
+/ack api_insert_chain <rack_path> <result_json> [request_id]
+/ack api_drum_chain_in_note <drum_chain_path> <chain_json> [request_id]
+```
+
+Safety classes:
+
+- `insert_device`: additive mutation.
+- `insert_chain`: additive mutation.
+- `drum_chain_in_note`: bounded write.
+
+These APIs are gated by LiveAPI capability checks when metadata is available. Native device insertion requires Ableton Live 12.3+ and supports native Live devices only; Max for Live devices and plug-ins are not supported by these insertion calls.
 
 ## Note Dictionary Schema
 
