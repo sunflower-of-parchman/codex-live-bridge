@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,30 +13,13 @@ from pathlib import Path
 from statistics import mean
 from typing import Callable, Sequence
 
-try:
-    import compose_kick_pattern as kick
-    import compose_arrangement as arrangement
-except ModuleNotFoundError as exc:
-    kick = None
-    arrangement = None
-    MISSING_COMPOSITION_RUNTIME = exc.name
-else:
-    MISSING_COMPOSITION_RUNTIME = ""
+import compose_kick_pattern as kick
+import compose_arrangement as arrangement
 
 
 DEFAULT_ITERATIONS = 7
 DEFAULT_ACK_TIMEOUT = 2.0
 DEFAULT_OUT_PATH = Path("bridge/benchmarks/latest_midi_write.json")
-
-
-def _require_composition_runtime() -> None:
-    if kick is not None and arrangement is not None:
-        return
-    raise RuntimeError(
-        "benchmark_midi_write.py depends on composition runtime modules that "
-        "are not tracked on current public main. Missing module: "
-        f"{MISSING_COMPOSITION_RUNTIME or 'unknown'}."
-    )
 
 
 @dataclass(frozen=True)
@@ -244,7 +226,6 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str]) -> int:
     ns = parse_args(argv)
-    _require_composition_runtime()
 
     notes_200 = _build_notes(200)
     notes_2000 = _build_notes(2000)
@@ -327,8 +308,4 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main(sys.argv[1:]))
-    except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(2)
+    raise SystemExit(main(__import__("sys").argv[1:]))

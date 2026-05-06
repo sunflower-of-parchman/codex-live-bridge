@@ -16,10 +16,10 @@ service with guaranteed response times.
 
 - Operating system and version
 - Ableton Live version and whether Max for Live is available
-- Python version (`python3 --version`)
+- Python version (`./.venv/bin/python --version`)
 - Exact command run
 - Full error output
-- Whether `bridge/m4l/LiveUdpBridge.maxpat` and `bridge/m4l/live_udp_bridge.js` are loaded in Live/Max
+- Whether `LiveUdpBridge.amxd` is loaded and reloaded in Live
 - Anything already tried
 
 Reports missing this information may be closed until repro details are added.

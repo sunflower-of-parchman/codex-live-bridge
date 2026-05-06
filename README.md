@@ -3,9 +3,9 @@
 `codex-live-bridge` is an open-source, local-first Codex-to-Ableton Live
 control bridge.
 
-More precisely, this repo ships a Max for Live patch source, a JavaScript
-command router, and Python OSC client/CLI scripts that drive Ableton Live
-through LiveAPI (the Live Object Model) over OSC/UDP.
+More precisely, this repo ships a Max for Live device, a JavaScript command
+router, and Python OSC client/CLI scripts that drive Ableton Live through
+LiveAPI (the Live Object Model) over OSC/UDP.
 
 It also includes a local memory + eval loop that starts from blank user
 templates and is filled by each user's own compositional intent over time.
@@ -31,56 +31,39 @@ Optional workflow docs used by this project:
 
 Quick requirements:
 
-- Ableton Live with Max for Live support:
-  [Ableton Live](https://www.ableton.com/en/live/) and
-  [Max for Live](https://www.ableton.com/en/live/max-for-live/)
-- A local Codex surface:
-  [Codex app](https://developers.openai.com/codex/app/),
-  [Codex CLI](https://developers.openai.com/codex/cli/), or
-  [Codex IDE extension](https://developers.openai.com/codex/ide/)
-- Python 3.10+:
+- Download Ableton Live 12 Suite 30-day free trial (includes Max for Live):
+  [Ableton Live trial](https://www.ableton.com/en/trial/)
+- Download the Codex app and sign in with your ChatGPT account:
+  [Codex app](https://developers.openai.com/codex/app/)
+- Install Python 3.10+:
   [python.org downloads](https://www.python.org/downloads/)
 
-1. Clone and run the public unit suite:
+1. From repo root, create the repo-local Python environment:
 ```bash
-git clone https://github.com/sunflower-of-parchman/codex-live-bridge.git
-cd codex-live-bridge
-python3 -m unittest discover -s bridge -p "test_*.py"
+python3 scripts/bootstrap_env.py
 ```
-
-2. In Ableton Live, open or recreate the patch from:
-```text
-bridge/m4l/LiveUdpBridge.maxpat
+2. In Ableton Live, drag `bridge/m4l/LiveUdpBridge.amxd` onto a MIDI track.
+3. Or, from repo root, bootstrap the runtime bridge onto track 1 (`codex-bridge`):
+```bash
+./.venv/bin/python bridge/bootstrap_live_bridge.py --launch-ableton --doctor --strict
 ```
-
-3. Keep the JavaScript router next to the patch so `[js live_udp_bridge.js]`
-   resolves:
-```text
-bridge/m4l/live_udp_bridge.js
-```
-
 4. Verify bridge connectivity:
 ```bash
-python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
+./.venv/bin/python bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
 ```
-
 5. Confirm you see ACKs like:
 ```text
 ack:  /ack pong
 ack:  /ack status <total_tracks> <midi_tracks> <audio_tracks> <return_tracks> live_set <id>
 ```
 
-Packaged `.amxd` device artifacts may be attached to tagged releases when
-available. Current `main` keeps the editable patch source as the canonical
-tracked device surface.
-
 ## Included
 
+- `bridge/m4l/LiveUdpBridge.amxd`: packaged drop-in Max for Live MIDI device
 - `bridge/m4l/LiveUdpBridge.maxpat`: editable Max patch source
 - `bridge/m4l/live_udp_bridge.js`: JavaScript router logic used by the patch
 - `bridge/ableton_udp_bridge.py`: OSC client/CLI for command + ACK flows
-- `bridge/full_surface_smoke_test.py`: full-surface bridge smoke script
-- `bridge/benchmark_midi_write.py`: optional benchmark harness for composition-runtime branches
+- `bridge/bootstrap_live_bridge.py`: runtime bootstrap for a fresh `LiveUdpBridge` on track 1
 - `memory/compositional_memory.py`: memory index loader and fundamental brief CLI
 - `memory/retrieval.py`: retrieval index/search/read/brief CLI over memory + eval artifacts
 - `memory/eval_governance.py`: bounded eval-to-memory governance loop CLI
@@ -119,7 +102,7 @@ Live Object Model reference:
 - Steering context comes from user-owned local memory/eval artifacts, not from
   third-party music corpora.
 - Any workflow "learning" in this repo refers to optional local logging of your
-  own run artifacts when enabled, not ML training.
+  own run artifacts (when enabled), not ML training.
 - If you are using Codex, that model is external to this repo; this repo is
   the local control and workflow layer around Ableton Live.
 
@@ -127,16 +110,16 @@ Live Object Model reference:
 
 A runtime usage pattern in this repo is:
 
-1. Keep your Ableton template thin: instruments, routing, and returns are fine, but do not save stale bridge state into the template.
-2. Load the bridge patch for the session.
-3. Put the first instrument on track 2, or let a future composition workflow create missing named instrument tracks.
-4. If needed, put the second instrument on track 3 and treat it as the second ensemble entry.
+1. Keep your Ableton template thin: instruments, routing, and returns are fine, but do not save `LiveUdpBridge` into the template.
+2. Bootstrap the bridge at runtime. The helper reserves track 1 as `codex-bridge` (control only).
+3. Put your first instrument on track 2, or let the composition workflow create missing named instrument tracks.
+4. If needed, put your second instrument on track 3 and treat it as the second ensemble entry.
 5. Choose meter, BPM, and optional mood/key, then compose with workflow scripts.
 6. Review eval artifacts, adjust constraints/guidance, and compose again.
 
 ## Natural-Language Harmonic Intent (Codex app)
 
-You can describe harmony in plain language while still keeping a stable key.
+You can now describe harmony in plain language while still keeping a stable key.
 
 Examples you can type in the Codex app:
 
@@ -149,18 +132,27 @@ What this means in runtime behavior:
 - `harmonic_intent` is interpreted as progression intent.
 - If `harmonic_intent` is missing or cannot be parsed, the runtime falls back to the default palette.
 
-The current public `main` branch does not track the full arrangement generator.
-Treat natural-language harmonic intent as part of the composition workflow
-roadmap until that runtime is restored on the public branch.
+CLI equivalent:
+
+```bash
+./.venv/bin/python bridge/compose_arrangement.py \
+  --minutes 3 \
+  --bpm 163 \
+  --sig-num 4 --sig-den 4 \
+  --key-name "C minor" \
+  --harmonic-intent "i minor, iv minor, bIII Maj7, bVI Maj7" \
+  --instrument-registry-path bridge/config/instrument_registry.marimba_piano.v1.json
+```
 
 ## Current Composition Architecture
 
-The public template uses layered decisions:
+The current public template uses layered decisions:
 
-1. Bridge layer handles OSC transport and Live Object Model command routing.
-2. Setup layer establishes tempo, signature, and track/clip state.
-3. Pattern layer writes deterministic MIDI content by instrument role.
-4. Reflection layer records run metadata for iterative composition.
+1. Bridge bootstrap layer provisions one fresh `LiveUdpBridge` on `codex-bridge`.
+2. Bridge layer handles OSC transport and Live Object Model command routing.
+3. Setup layer establishes tempo, signature, and track/clip state.
+4. Pattern layer writes deterministic MIDI content by instrument role.
+5. Reflection layer records run metadata for iterative composition.
 
 ## Current Eval Coverage
 
@@ -175,14 +167,13 @@ Current artifact fields include:
 - similarity/novelty values against recent reference runs
 - repetition flags for repeated trajectories
 
-Artifacts are persisted locally under:
+Artifacts are persisted to:
 
 - `memory/evals/compositions/<date>/<run_id>.json`
 - `memory/evals/composition_index.json`
 
 If no artifacts exist yet, retrieval/governance commands will report no indexed
-context until runs are added. Runtime memory and eval artifacts are local files
-and should not be committed.
+context until runs are added.
 
 ## Capabilities
 
@@ -262,7 +253,7 @@ ack:  /ack error not_in_live_set 0
 flowchart LR
   U["User or Codex"] --> P["Python CLI (bridge/*.py)"]
   P --> C["OSC/UDP Commands (:9000)"]
-  C --> B["LiveUdpBridge Patch"]
+  C --> B["LiveUdpBridge Device"]
   B --> L["Ableton LiveAPI (LOM)"]
   L --> A["Ableton Live Set"]
   A --> R["OSC/UDP ACKs (:9001)"]
@@ -274,14 +265,13 @@ flowchart LR
 - `bridge/ableton_udp_bridge.py`: general OSC command client/CLI with ACK
   listening and command batching modes
 - `bridge/full_surface_smoke_test.py`: full-surface bridge smoke script
-- `bridge/benchmark_midi_write.py`: deterministic MIDI write benchmark harness for branches that include composition-runtime modules
+- `bridge/benchmark_midi_write.py`: deterministic MIDI write benchmark harness
 
 ## Detailed Requirements
 
 To run the bridge and workflow scripts:
 
-- Fast start (recommended): Ableton Live 12 Suite trial or any Ableton Live
-  setup with Max for Live support:
+- Fast start (recommended): Ableton Live 12 Suite 30-day trial (includes Max for Live):
   [Ableton Live trial](https://www.ableton.com/en/trial/)
 - Any full setup with Max for Live support also works:
   [Ableton Live](https://www.ableton.com/en/live/) and
@@ -293,9 +283,16 @@ To run the bridge and workflow scripts:
 - Not supported for this local bridge workflow: Codex cloud/browser.
 - Python 3.10+:
   [python.org downloads](https://www.python.org/downloads/)
-- Local UDP access on ports `9000` (commands) and `9001` (ack/query responses).
+- Create the repo-local Python environment once per clone:
+```bash
+python3 scripts/bootstrap_env.py
+```
+- Run repo commands with `./.venv/bin/python` unless you have already activated `.venv`.
+- local UDP access on ports `9000` (commands) and `9001` (ack/query responses)
 - Host runtime requirement: keep the computer on and awake with Ableton Live
-  running.
+  running. For automation, use a thin musical template and let the runtime
+  bootstrap load `LiveUdpBridge` fresh on `codex-bridge` before commands are
+  sent.
 
 To edit bridge/device internals:
 
@@ -328,27 +325,27 @@ After first-time template setup, use this standard flow:
 
 1. Build retrieval index:
 ```bash
-python3 -m memory.retrieval index
+./.venv/bin/python -m memory.retrieval index
 ```
 
 2. Query context for a run:
 ```bash
-python3 -m memory.retrieval brief --meter <NUM/DEN> --bpm <BPM> --mood <MOOD> --key-name "<KEY>" --focus <FUNDAMENTAL>
+./.venv/bin/python -m memory.retrieval brief --meter <NUM/DEN> --bpm <BPM> --mood <MOOD> --key-name "<KEY>" --focus <FUNDAMENTAL>
 ```
 
 3. Summarize repeated eval signals:
 ```bash
-python3 -m memory.eval_governance summarize --lookback 30
+./.venv/bin/python -m memory.eval_governance summarize --lookback 30
 ```
 
 4. Plan safe memory updates (recommended):
 ```bash
-python3 -m memory.eval_governance apply --date YYYY-MM-DD --dry-run
+./.venv/bin/python -m memory.eval_governance apply --date YYYY-MM-DD --dry-run
 ```
 
 5. Apply memory updates (writes files):
 ```bash
-python3 -m memory.eval_governance apply --date YYYY-MM-DD
+./.venv/bin/python -m memory.eval_governance apply --date YYYY-MM-DD
 ```
 
 Template docs for eval artifact layout and expected files are included at:
@@ -362,7 +359,7 @@ signals until artifacts are added under `memory/evals/compositions/`.
 - Primary maintainer environment: macOS + Ableton Live with Max for Live.
 - Windows and Linux are welcome but not yet validated as first-class maintainer
   environments.
-- Breaking changes may happen between releases while the bridge surface settles.
+- This project is pre-`1.0.0`; breaking changes may happen between releases.
 - Support is best-effort by a solo maintainer.
 
 ## Project Files for Contributors
@@ -380,26 +377,22 @@ git clone https://github.com/sunflower-of-parchman/codex-live-bridge.git
 cd codex-live-bridge
 ```
 
-2. Run tests:
+2. Open Ableton Live with a thin musical template or blank set. Do not rely on
+   a saved template copy of `LiveUdpBridge`.
+
+3. Bootstrap the bridge:
 ```bash
-python3 -m unittest discover -s bridge -p "test_*.py"
+./.venv/bin/python bridge/bootstrap_live_bridge.py --launch-ableton --doctor --strict
 ```
 
-3. Open Ableton Live with a thin musical template or blank set.
-
-4. Load or recreate the bridge patch from:
-```text
-bridge/m4l/LiveUdpBridge.maxpat
+4. Verify bridge connectivity:
+```bash
+./.venv/bin/python bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
 ```
 
-5. Verify bridge connectivity:
+5. Optional bridge smoke check:
 ```bash
-python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
-```
-
-6. Optional bridge smoke check:
-```bash
-python3 bridge/full_surface_smoke_test.py
+./.venv/bin/python bridge/full_surface_smoke_test.py
 ```
 
 ## Source Editing
@@ -407,18 +400,16 @@ python3 bridge/full_surface_smoke_test.py
 If you modify `bridge/m4l/live_udp_bridge.js` or
 `bridge/m4l/LiveUdpBridge.maxpat`:
 
-1. Keep the JS file next to the patch, or update the Max `[js ...]` object to
-   point at the correct local file.
-2. Reload the device in Live.
-3. Re-save a packaged `.amxd` only when doing an explicit package rebuild or
-   release-artifact pass.
+1. Copy updated JS into your Ableton User Library device folder.
+2. Reload the device in Live (remove it from `codex-bridge`, then drag it back in).
+3. Keep normal sync JS-only. Do not promote a new `.amxd` during routine runtime sync.
+4. Re-save `LiveUdpBridge.amxd` from Live or Max only when you are doing an explicit package rebuild.
+5. Copy updated `LiveUdpBridge.amxd` back into `bridge/m4l/` and the User Library only after that trusted rebuild.
 
 ## Testing
 
 ```bash
-python3 -m unittest discover -s bridge -p "test_*.py"
-node --check bridge/m4l/live_udp_bridge.js
-bash .github/scripts/audit_public_hygiene.sh
+./.venv/bin/python -m unittest discover -s bridge -p "test_*.py"
 ```
 
 ## License
