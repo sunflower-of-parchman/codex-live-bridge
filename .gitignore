@@ -14,3 +14,4 @@ memory/composition_prints/
 memory/evals/
 output/
 .playwright-mcp/
+engine/build/
