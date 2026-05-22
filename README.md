@@ -101,8 +101,14 @@ Current `/api/*` endpoints:
 - `/api/children <path> <child_name> [request_id]`
 - `/api/describe <path> [request_id]`
 
+Observer endpoints are also available for long-running LiveAPI property
+monitoring: `/api_observe`, `/api_unobserve`, `/api_observers`, and
+`/api_clear_observers`.
+
+Protocol details: [`PROTOCOL.md`](PROTOCOL.md)
+
 Live Object Model reference:
-[Cycling '74 Live Object Model docs](https://docs.cycling74.com/max8/vignettes/live_object_model)
+[Cycling '74 Live Object Model docs](https://docs.cycling74.com/apiref/lom/)
 
 ## Data & Training
 
@@ -212,6 +218,20 @@ Exact bridge command surface available now:
 22. `/api/call <path> <method> <args_json> [request_id]`
 23. `/api/children <path> <child_name> [request_id]`
 24. `/api/describe <path> [request_id]`
+25. `/api_observe <path> <property> [options_json] [request_id]`
+26. `/api_unobserve <observer_id> [request_id]`
+27. `/api_observers [request_id]`
+28. `/api_clear_observers [request_id]`
+29. `/api/session_context [request_id]` (read)
+30. `/api/theory_status [request_id]` (read)
+31. `/api/tuning_status [request_id]` (read)
+32. `/api/device_list <track_ref|all> [request_id]` (read)
+33. `/api/device_parameters <device_path> [request_id]` (read)
+34. `/api/mixer_status <track_ref|master|return:N> [request_id]` (read)
+35. `/api/parameter_set <parameter_path> <value_json> [request_id]` (bounded write)
+36. `/api/insert_device <track_or_chain_path> <native_device_name> <target_index_or_empty> [request_id]` (additive, Live 12.3+)
+37. `/api/insert_chain <rack_device_path> <target_index_or_empty> [request_id]` (additive, Live 12.3+)
+38. `/api/drum_chain_in_note <drum_chain_path> <note|-1> [request_id]` (bounded write, Live 12.3+)
 
 Indexing conventions:
 
@@ -419,7 +439,14 @@ If you modify `bridge/m4l/live_udp_bridge.js` or
 python3 -m unittest discover -s bridge -p "test_*.py"
 node --check bridge/m4l/live_udp_bridge.js
 bash .github/scripts/audit_public_hygiene.sh
+rg -n "PROTOCOL.md" README.md
 ```
+
+Live-runtime validation is still separate from static validation. Before a
+release, load `bridge/m4l/LiveUdpBridge.maxpat` in Ableton Live, confirm the
+device binds UDP `9000`/`9001`, then smoke-test read wrappers, observer cleanup,
+bounded parameter writes, and Live 12.3 native insertion commands in a throwaway
+set.
 
 ## License
 

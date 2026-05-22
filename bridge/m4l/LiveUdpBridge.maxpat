@@ -917,17 +917,24 @@
 				}
 
 			}
-, 			{
-				"patchline" : 				{
-					"destination" : [ "obj-8", 0 ],
-					"source" : [ "obj-7", 0 ]
-				}
+	, 			{
+					"patchline" : 				{
+						"destination" : [ "obj-8", 0 ],
+						"source" : [ "obj-7", 0 ]
+					}
 
-			}
-, 			{
-				"patchline" : 				{
-					"destination" : [ "obj-9", 0 ],
-					"source" : [ "obj-7", 1 ]
+				}
+	, 			{
+					"patchline" : 				{
+						"destination" : [ "obj-14", 0 ],
+						"source" : [ "obj-7", 28 ]
+					}
+
+				}
+	, 			{
+					"patchline" : 				{
+						"destination" : [ "obj-9", 0 ],
+						"source" : [ "obj-7", 1 ]
 				}
 
 			}
