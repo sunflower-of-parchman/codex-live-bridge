@@ -8,21 +8,46 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Direct public hygiene audit script:
-  - `.github/scripts/audit_public_hygiene.sh`
-- GitHub Actions unit-test workflow for the public bridge test suite.
-- GitHub issue and pull request templates.
-- Public maintainer docs for contributors and users:
-  - `CONTRIBUTING.md`
-  - `SUPPORT.md`
-  - `SECURITY.md`
+- v3 Live Object Model protocol documentation in `PROTOCOL.md`.
+- Observer lifecycle commands with CLI listen mode:
+  `/api_observe`, `/api_unobserve`, `/api_observers`, `/api_clear_observers`,
+  and asynchronous `/ack api_event` summaries.
+- Named LiveAPI wrappers for session context, theory status, tuning status,
+  device inventory, device parameters, mixer status, bounded parameter writes,
+  Live 12.3 native device insertion, rack chain insertion, and drum-chain note
+  assignment.
+- Modern note dictionary support for `probability`, `velocity_deviation`, and
+  `release_velocity`.
+- Repository docs tests and Max patch JSON validation in CI.
 
 ### Changed
 
-- `README.md` now reflects the files tracked on current `main`, removes
-  mirror-era/bootstrap references, and documents the public privacy boundary.
-- `CONTRIBUTING.md` now points at the direct public validation commands.
-- `bridge/benchmark_midi_write.py` now reports missing composition-runtime
-  modules clearly instead of failing during import.
-- `.gitignore` now excludes runtime logs, local conversation memory, environment
-  variants, and generated media artifacts.
+- Recentered the public repo on the bridge: Max patch source, JavaScript
+  router, Python OSC client, protocol docs, and validation tests.
+- Rewrote `README.md` and `bridge/commands.md` around the current v3 bridge
+  surface.
+- Restored explicit public language that this repo ships no trained model
+  weights, training pipeline, audio corpus, or generative music model.
+- Hardened mutating smoke validation behind an explicit confirmation flag.
+- Hardened write wrappers so missing/null parameter values, ambiguous
+  parameter value types, and invalid insertion indexes fail before reaching
+  LiveAPI.
+- Restricted unmatched OSC fallback dispatch to the documented named wrappers.
+- Made the mutating smoke test abort before writes unless track creation adds
+  exactly one appended MIDI track.
+- Documented the Max export path from tracked `.maxpat` source to loadable
+  `.amxd` release artifact.
+- Made CLI listen-mode socket bind failures return a nonzero process status.
+
+### Removed
+
+- Removed the old local memory package, preference/eval templates, composition
+  benchmark, and implementation-plan notes from the public v3 surface. Those
+  materials belonged to an earlier higher-level direction and made this repo
+  less clear as a standalone Ableton Live bridge.
+
+### Follow-up
+
+- A later release should express this product split more cleanly: this repo as
+  the reliable local Ableton Live/LiveAPI bridge, with any higher-level memory
+  or composition system described and shipped separately if it returns.

@@ -20,7 +20,4 @@ __pycache__/
 # Generated run artifacts
 logs/
 bridge/.cache/
-memory/conversation.jsonl
-memory/composition_prints/
-memory/evals/
 output/

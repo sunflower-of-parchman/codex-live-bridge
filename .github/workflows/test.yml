@@ -19,7 +19,11 @@ jobs:
           node-version: "22"
       - name: Run bridge unit tests
         run: python3 -m unittest discover -s bridge -p "test_*.py"
+      - name: Run repository docs tests
+        run: python3 -m unittest discover -s tests -p "test_*.py"
       - name: Check Max JS syntax
         run: node --check bridge/m4l/live_udp_bridge.js
+      - name: Check Max patch JSON
+        run: python3 -m json.tool bridge/m4l/LiveUdpBridge.maxpat >/dev/null
       - name: Run public hygiene audit
         run: bash .github/scripts/audit_public_hygiene.sh

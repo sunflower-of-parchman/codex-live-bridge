@@ -173,6 +173,7 @@ class BridgeCliTests(unittest.TestCase):
             "current_path": "live_set",
             "property": "tempo",
             "event_count": 2,
+            "dropped_events": 1,
             "timestamp_ms": 123456,
             "value": 121.5,
         }
@@ -189,6 +190,7 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual(event.payload["property"], "tempo")
         self.assertEqual(event.payload["value"], 121.5)
         self.assertEqual(event.payload["event_count"], 2)
+        self.assertEqual(event.payload["dropped_events"], 1)
 
     def test_js_note_normalizer_supports_live_12_note_fields(self) -> None:
         source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
@@ -341,14 +343,76 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertTrue(fake_sock.closed)
 
+    def test_main_returns_error_when_listen_socket_cannot_bind(self) -> None:
+        with mock.patch("ableton_udp_bridge.open_ack_socket", return_value=None):
+            exit_code = bridge.main(
+                [
+                    "--listen",
+                    "--listen-timeout",
+                    "0.01",
+                    "--no-tempo",
+                    "--no-signature",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+
     def test_js_and_patch_support_api_wrapper_fallback_route(self) -> None:
         m4l_dir = pathlib.Path(__file__).with_name("m4l")
         js_source = m4l_dir.joinpath("live_udp_bridge.js").read_text()
-        patch_source = m4l_dir.joinpath("LiveUdpBridge.maxpat").read_text()
+        patch_source = json.loads(m4l_dir.joinpath("LiveUdpBridge.maxpat").read_text())
+        boxes = [item["box"] for item in patch_source["patcher"]["boxes"]]
+        route_box = next(box for box in boxes if str(box.get("text", "")).startswith("route "))
+        js_box = next(box for box in boxes if box.get("text") == "js live_udp_bridge.js")
+        route_tokens = str(route_box["text"]).split()[1:]
+        fallback_outlet = len(route_tokens)
+        patchlines = [item["patchline"] for item in patch_source["patcher"]["lines"]]
 
         self.assertIn("function api_session_context", js_source)
         self.assertIn("function api_insert_device", js_source)
-        self.assertIn('"source" : [ "obj-7", 28 ]', patch_source)
+        self.assertIn("function anything", js_source)
+        self.assertNotIn("/api/session_context", route_tokens)
+        self.assertNotIn("/api/insert_device", route_tokens)
+        self.assertTrue(
+            any(
+                line.get("source") == [route_box["id"], fallback_outlet]
+                and line.get("destination", [None])[0] == js_box["id"]
+                for line in patchlines
+            )
+        )
+
+    def test_js_wrappers_reject_ambiguous_write_values(self) -> None:
+        js_source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
+
+        self.assertIn("function parseOptionalInsertionIndex", js_source)
+        self.assertIn("function isNumericScalar", js_source)
+        self.assertIn("api_parameter_set_missing_value", js_source)
+        self.assertIn("api_parameter_set_invalid_value_type", js_source)
+        self.assertIn("api_insert_device_invalid_index", js_source)
+        self.assertIn("api_insert_chain_invalid_index", js_source)
+
+    def test_js_fallback_route_uses_explicit_wrapper_allowlist(self) -> None:
+        js_source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
+
+        self.assertIn("var API_FALLBACK_HANDLERS = {", js_source)
+        self.assertIn('"api_session_context": api_session_context', js_source)
+        self.assertIn('"api_insert_device": api_insert_device', js_source)
+        self.assertNotIn("var target = this[targetName];", js_source)
+
+    def test_js_drum_chain_note_rejects_fractional_values(self) -> None:
+        js_source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
+        function_source = js_source.split("function api_drum_chain_in_note", 1)[1].split(
+            "function api_observe", 1
+        )[0]
+
+        self.assertIn("Math.floor(note) !== note", function_source)
+        self.assertNotIn("Math.floor(Number(noteValue))", function_source)
+
+    def test_js_cleans_max_dict_payloads(self) -> None:
+        js_source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
+
+        self.assertIn("function clearBuiltPayload", js_source)
+        self.assertGreaterEqual(js_source.count("clearBuiltPayload("), 5)
 
     def test_parse_and_build_midi_cc_commands(self) -> None:
         cfg = bridge.parse_args(

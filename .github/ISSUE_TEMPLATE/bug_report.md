@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a reproducible bridge or workflow problem
+about: Report a reproducible bridge problem
 title: ""
 labels: bug
 assignees: ""

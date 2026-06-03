@@ -406,11 +406,45 @@ function describeDevicesForTrackPath(trackPath) {
   };
 }
 
-function callOptionalIndex(api, methodName, indexValue) {
+function parseOptionalInsertionIndex(indexValue, errorCode, targetPath, requestId) {
   if (indexValue === undefined || indexValue === null || String(indexValue).trim().length === 0) {
-    return api.call(methodName);
+    return { ok: true, has_index: false, value: null };
   }
-  return api.call(methodName, Math.floor(Number(indexValue)));
+  var numeric = Number(indexValue);
+  if (!(isFinite(numeric) && numeric >= 0 && Math.floor(numeric) === numeric)) {
+    ackWithRequest("error", [errorCode, targetPath, indexValue], requestId);
+    return { ok: false, has_index: false, value: null };
+  }
+  return { ok: true, has_index: true, value: numeric };
+}
+
+function isNumericScalar(value) {
+  if (typeof value === "number") {
+    return isFinite(value);
+  }
+  if (typeof value !== "string") {
+    return false;
+  }
+  var text = value.trim();
+  if (text.length === 0) {
+    return false;
+  }
+  return isFinite(Number(text));
+}
+
+function clearBuiltPayload(built) {
+  if (!built) {
+    return;
+  }
+  try {
+    if (built.wrapper) {
+      built.wrapper.clear();
+    } else if (built.dict) {
+      built.dict.clear();
+    }
+  } catch (err) {
+    // Best-effort cleanup for transient Max Dict wrappers.
+  }
 }
 
 function liveApiValueToJson(value, contextName) {
@@ -711,17 +745,7 @@ function api_call(path, method, argsJson, requestId) {
     ackWithRequest("error", ["api_call_failed", api.path, methodName], requestId);
     return;
   } finally {
-    if (builtPayload) {
-      try {
-        if (builtPayload.wrapper) {
-          builtPayload.wrapper.clear();
-        } else if (builtPayload.dict) {
-          builtPayload.dict.clear();
-        }
-      } catch (cleanupErr) {
-        // Best-effort cleanup.
-      }
-    }
+    clearBuiltPayload(builtPayload);
   }
 
   var resultJson = liveApiValueToJson(result, contextName + "_" + methodName);
@@ -942,8 +966,20 @@ function api_parameter_set(parameterPath, valueJson, requestId) {
   }
   var parameterApi = resolveApiOrError(pathText, "parameter_set", requestId);
   if (!parameterApi) return;
+  if (valueJson === undefined || valueJson === null || String(valueJson).trim().length === 0) {
+    ackWithRequest("error", ["api_parameter_set_missing_value", pathText], requestId);
+    return;
+  }
   var parsedValue = parseJsonPayload(valueJson, "parameter_set_value", null, requestId);
   if (parsedValue === null && String(valueJson) !== "null") {
+    return;
+  }
+  if (parsedValue === null) {
+    ackWithRequest("error", ["api_parameter_set_missing_value", pathText], requestId);
+    return;
+  }
+  if (!isNumericScalar(parsedValue)) {
+    ackWithRequest("error", ["api_parameter_set_invalid_value_type", pathText, parsedValue], requestId);
     return;
   }
   var numericValue = Number(parsedValue);
@@ -1022,12 +1058,19 @@ function api_insert_device(targetPath, deviceName, targetIndex, requestId) {
     ackWithRequest("error", ["api_insert_device_unsupported", targetApi.path], requestId);
     return;
   }
+  var parsedIndex = parseOptionalInsertionIndex(
+    targetIndex,
+    "api_insert_device_invalid_index",
+    targetApi.path,
+    requestId
+  );
+  if (!parsedIndex.ok) return;
   var result = null;
   try {
-    if (targetIndex === undefined || targetIndex === null || String(targetIndex).trim().length === 0) {
+    if (!parsedIndex.has_index) {
       result = targetApi.call("insert_device", nameText);
     } else {
-      result = targetApi.call("insert_device", nameText, Math.floor(Number(targetIndex)));
+      result = targetApi.call("insert_device", nameText, parsedIndex.value);
     }
   } catch (err) {
     debug("insert_device failed for " + targetApi.path + " device=" + nameText + ": " + err);
@@ -1038,9 +1081,7 @@ function api_insert_device(targetPath, deviceName, targetIndex, requestId) {
     ok: true,
     target_path: String(targetApi.path || pathText),
     device_name: nameText,
-    target_index: targetIndex === undefined || targetIndex === null || String(targetIndex).trim().length === 0
-      ? null
-      : Math.floor(Number(targetIndex)),
+    target_index: parsedIndex.has_index ? parsedIndex.value : null,
     result: result,
   };
   ackWithRequest("api_insert_device", [targetApi.path, nameText, safeJsonStringify(payload, "insert_device")], requestId);
@@ -1060,9 +1101,20 @@ function api_insert_chain(rackPath, targetIndex, requestId) {
     ackWithRequest("error", ["api_insert_chain_unsupported", rackApi.path], requestId);
     return;
   }
+  var parsedIndex = parseOptionalInsertionIndex(
+    targetIndex,
+    "api_insert_chain_invalid_index",
+    rackApi.path,
+    requestId
+  );
+  if (!parsedIndex.ok) return;
   var result = null;
   try {
-    result = callOptionalIndex(rackApi, "insert_chain", targetIndex);
+    if (parsedIndex.has_index) {
+      result = rackApi.call("insert_chain", parsedIndex.value);
+    } else {
+      result = rackApi.call("insert_chain");
+    }
   } catch (err) {
     debug("insert_chain failed for " + rackApi.path + ": " + err);
     ackWithRequest("error", ["api_insert_chain_failed", rackApi.path], requestId);
@@ -1071,9 +1123,7 @@ function api_insert_chain(rackPath, targetIndex, requestId) {
   var payload = {
     ok: true,
     rack_path: String(rackApi.path || pathText),
-    target_index: targetIndex === undefined || targetIndex === null || String(targetIndex).trim().length === 0
-      ? null
-      : Math.floor(Number(targetIndex)),
+    target_index: parsedIndex.has_index ? parsedIndex.value : null,
     result: result,
   };
   ackWithRequest("api_insert_chain", [rackApi.path, safeJsonStringify(payload, "insert_chain")], requestId);
@@ -1082,8 +1132,8 @@ function api_insert_chain(rackPath, targetIndex, requestId) {
 function api_drum_chain_in_note(chainPath, noteValue, requestId) {
   if (!ensureInitialized()) return;
   var pathText = chainPath === undefined || chainPath === null ? "" : String(chainPath).trim();
-  var note = Math.floor(Number(noteValue));
-  if (pathText.length === 0 || !(note >= -1 && note <= 127)) {
+  var note = Number(noteValue);
+  if (pathText.length === 0 || !isFinite(note) || Math.floor(note) !== note || note < -1 || note > 127) {
     ackWithRequest("error", ["api_drum_chain_in_note_invalid_args", pathText, noteValue], requestId);
     return;
   }
@@ -1230,6 +1280,19 @@ function api_observers(requestId) {
   ackWithRequest("api_observers", [payloadJson], requestId);
 }
 
+var API_FALLBACK_HANDLERS = {
+  "api_session_context": api_session_context,
+  "api_theory_status": api_theory_status,
+  "api_tuning_status": api_tuning_status,
+  "api_device_list": api_device_list,
+  "api_device_parameters": api_device_parameters,
+  "api_parameter_set": api_parameter_set,
+  "api_mixer_status": api_mixer_status,
+  "api_insert_device": api_insert_device,
+  "api_insert_chain": api_insert_chain,
+  "api_drum_chain_in_note": api_drum_chain_in_note,
+};
+
 function anything() {
   var rawName = typeof messagename === "undefined" ? "" : String(messagename || "");
   if (!rawName || rawName.charAt(0) !== "/") {
@@ -1237,7 +1300,7 @@ function anything() {
     return;
   }
   var targetName = rawName.slice(1).replace(/\//g, "_");
-  var target = this[targetName];
+  var target = API_FALLBACK_HANDLERS[targetName];
   if (typeof target !== "function") {
     debug("Unhandled OSC selector: " + rawName);
     ack("ack", "error", "unknown_selector", rawName);
@@ -1691,6 +1754,7 @@ function buildNotesDict(notes, contextName) {
   var notesDict = wrapper.get("wrapper");
   if (!notesDict) {
     ack("ack", "error", contextName + "_notes_dict_build_failed");
+    clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
   return { wrapper: wrapper, dict: notesDict, notes: normalized };
@@ -1704,11 +1768,13 @@ function buildGenericDict(payload, contextName) {
   } catch (err) {
     debug("Failed to build Dict for " + contextName + ": " + err);
     ack("ack", "error", contextName + "_dict_build_failed");
+    clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
   var parsedDict = wrapper.get("wrapper");
   if (!parsedDict) {
     ack("ack", "error", contextName + "_dict_build_failed");
+    clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
   return { wrapper: wrapper, dict: parsedDict };
@@ -1758,6 +1824,7 @@ function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, c
   } catch (err) {
     debug("Unable to access clip slot at " + slotPath + ": " + err);
     ack("ack", "error", contextName + "_clip_slot_access_failed", trackIndex, slot);
+    clearBuiltPayload(built);
     return;
   }
 
@@ -1773,6 +1840,7 @@ function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, c
   } catch (err) {
     debug("Failed to create clip at " + slotPath + " length=" + length + ": " + err);
     ack("ack", "error", contextName + "_create_clip_failed", trackIndex, slot, length);
+    clearBuiltPayload(built);
     return;
   }
 
@@ -1783,6 +1851,7 @@ function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, c
   } catch (err) {
     debug("Unable to access clip at " + clipPath + ": " + err);
     ack("ack", "error", contextName + "_clip_access_failed", trackIndex, slot);
+    clearBuiltPayload(built);
     return;
   }
 
@@ -1819,15 +1888,7 @@ function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, c
     ack("ack", "error", contextName + "_add_notes_failed");
     return;
   } finally {
-    try {
-      if (built.wrapper) {
-        built.wrapper.clear();
-      } else if (built.dict) {
-        built.dict.clear();
-      }
-    } catch (err) {
-      // Best-effort cleanup.
-    }
+    clearBuiltPayload(built);
   }
 
   var noteIdCount = Array.isArray(noteIds) ? noteIds.length : 0;
@@ -1872,7 +1933,10 @@ function append_session_clip_notes(trackIndex, slotIndex, notesJson) {
   }
 
   var clip = getClipFromSlotOrError(trackIndex, slotIndex, contextName);
-  if (!clip) return;
+  if (!clip) {
+    clearBuiltPayload(built);
+    return;
+  }
 
   var noteIds = [];
   try {
@@ -1885,15 +1949,7 @@ function append_session_clip_notes(trackIndex, slotIndex, notesJson) {
     ack("ack", "error", contextName + "_add_notes_failed");
     return;
   } finally {
-    try {
-      if (built.wrapper) {
-        built.wrapper.clear();
-      } else if (built.dict) {
-        built.dict.clear();
-      }
-    } catch (err) {
-      // Best-effort cleanup.
-    }
+    clearBuiltPayload(built);
   }
 
   var noteIdCount = Array.isArray(noteIds) ? noteIds.length : 0;

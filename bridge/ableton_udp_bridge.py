@@ -1167,6 +1167,7 @@ def parse_ack_event(address: str, args: Sequence[OscArg]) -> AckEvent:
                     "property": event_payload.get("property"),
                     "value": event_payload.get("value"),
                     "event_count": event_payload.get("event_count"),
+                    "dropped_events": event_payload.get("dropped_events"),
                     "timestamp_ms": event_payload.get("timestamp_ms"),
                 }
             )
@@ -1780,7 +1781,7 @@ def listen_for_events(cfg: BridgeConfig) -> int:
             f"error: could not listen on {cfg.host}:{cfg.ack_port}",
             file=sys.stderr,
         )
-        return 0
+        return -1
 
     max_events = max(0, int(cfg.listen_max_events))
     deadline = (
@@ -1842,7 +1843,8 @@ def main(argv: Iterable[str]) -> int:
         if commands:
             send_commands(cfg, commands)
         if cfg.listen:
-            listen_for_events(cfg)
+            if listen_for_events(cfg) < 0:
+                return 1
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)
         return 130

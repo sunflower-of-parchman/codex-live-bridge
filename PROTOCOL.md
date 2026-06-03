@@ -4,6 +4,8 @@ This document defines the public OSC/UDP protocol for the Max for Live bridge. I
 
 Push control is out of scope for this protocol.
 
+Protocol status: v3 draft.
+
 ## Transport
 
 - Command target: `127.0.0.1:9000`
@@ -13,6 +15,8 @@ Push control is out of scope for this protocol.
 - Max for Live runtime: `udpreceive`/`udpsend` plus Max `js`.
 
 The bridge should be loaded in Ableton Live through the shipped Max patch/device. Clients send commands to the command port and listen for acknowledgements on the ACK port.
+
+The current bridge is local-first and does not authenticate OSC packets. Keep command and ACK traffic bound to `127.0.0.1` unless a future release adds an authenticated transport.
 
 ## Request IDs
 
@@ -165,7 +169,7 @@ Safety classes:
 - `device_list`, `device_parameters`, and `mixer_status`: read.
 - `parameter_set`: bounded write.
 
-`parameter_set` accepts only numeric values, checks `is_enabled`, and rejects values outside the parameter's `min`/`max` range when Live exposes that metadata.
+`parameter_set` accepts only numeric JSON numbers or numeric strings, checks `is_enabled`, and rejects values outside the parameter's `min`/`max` range when Live exposes that metadata. JSON `null`, booleans, arrays, and objects are rejected before the wrapper calls LiveAPI.
 
 ## Live 12.3 Native Insertion Wrappers
 
@@ -187,9 +191,9 @@ Safety classes:
 
 - `insert_device`: additive mutation.
 - `insert_chain`: additive mutation.
-- `drum_chain_in_note`: bounded write.
+- `drum_chain_in_note`: bounded write accepting integer notes from `-1..127`.
 
-These APIs are gated by LiveAPI capability checks when metadata is available. Native device insertion requires Ableton Live 12.3+ and supports native Live devices only; Max for Live devices and plug-ins are not supported by these insertion calls.
+These APIs are gated by LiveAPI capability checks when metadata is available. Optional insertion indexes must be non-negative integers when provided. Native device insertion requires Ableton Live 12.3+ and supports native Live devices only; Max for Live devices and plug-ins are not supported by these insertion calls.
 
 ## Note Dictionary Schema
 
@@ -237,7 +241,7 @@ Classify commands before adding named wrappers:
 - Additive mutation: create tracks, clips, devices, chains, or notes.
 - Destructive mutation: delete, clear, overwrite, or globally reset state.
 
-The generic RPC layer can reach broad LiveAPI behavior. Public examples and agent defaults should favor read and bounded-write commands, require explicit user intent for additive mutation, and keep destructive operations clearly named.
+The generic RPC layer can reach broad LiveAPI behavior. Public examples and automation defaults should favor read and bounded-write commands, require explicit user approval for additive mutation, and keep destructive operations clearly named.
 
 ## LiveAPI Constraints
 
@@ -252,5 +256,3 @@ The generic RPC layer can reach broad LiveAPI behavior. Public examples and agen
 ## Payload Guidance
 
 Keep command payloads small enough for local UDP transport. For large note sets or inventory reads, prefer chunked/batched commands with request IDs and explicit ACK handling.
-
-The current bridge is local-first and does not authenticate OSC packets. Keep the host bound to `127.0.0.1` unless a future release adds an authenticated transport.
