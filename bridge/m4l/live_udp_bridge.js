@@ -9,6 +9,7 @@ var song = null;
 var initialized = false;
 var apiObservers = {};
 var apiObserverCounter = 0;
+var MAX_API_OBSERVERS = 32;
 
 function debug(msg) {
   var text = "[live-bridge] " + msg;
@@ -109,12 +110,16 @@ function listObserverEntries() {
     items.push({
       observer_id: key,
       requested_path: entry.requested_path,
-      current_path: entry.api ? String(entry.api.path) : String(entry.current_path || entry.requested_path || ""),
+      current_path: entry.api
+        ? normalizeLiveApiPath(entry.api.path, entry.current_path || entry.requested_path)
+        : normalizeLiveApiPath(entry.current_path, entry.requested_path),
       property: entry.property,
       mode: Number(entry.mode || 0),
       live_id: entry.api ? Number(entry.api.id) : Number(entry.live_id || 0),
       created_ms: Number(entry.created_ms || 0),
       event_count: Number(entry.event_count || 0),
+      dropped_events: Number(entry.dropped_events || 0),
+      min_interval_ms: Number(entry.min_interval_ms || 0),
     });
   }
   return items;
@@ -135,7 +140,7 @@ function buildObserverPayload(entry, callbackArgs) {
   return {
     observer_id: String(entry.observer_id || ""),
     requested_path: String(entry.requested_path || ""),
-    current_path: String(entry.api.path || entry.current_path || entry.requested_path || ""),
+    current_path: normalizeLiveApiPath(entry.api.path, entry.current_path || entry.requested_path),
     property: String(entry.property || ""),
     mode: Number(entry.mode || 0),
     live_id: Number(entry.api.id || 0),
@@ -151,10 +156,20 @@ function emitObserverEvent(observerId, callbackArgs) {
   if (!entry) {
     return;
   }
+  var timestamp = nowMs();
+  var minInterval = Number(entry.min_interval_ms || 0);
+  if (minInterval > 0 && Number(entry.last_emit_ms || 0) > 0) {
+    if (timestamp - Number(entry.last_emit_ms || 0) < minInterval) {
+      entry.dropped_events = Number(entry.dropped_events || 0) + 1;
+      return;
+    }
+  }
+  entry.last_emit_ms = timestamp;
   var payload = buildObserverPayload(entry, callbackArgs);
   if (!payload) {
     return;
   }
+  payload.dropped_events = Number(entry.dropped_events || 0);
   ack("ack", "api_event", String(observerId), safeJsonStringify(payload, "api_event"));
 }
 
@@ -200,8 +215,23 @@ function normalizeArgsArray(argsValue) {
   return [argsValue];
 }
 
+function normalizeLiveApiPath(pathValue, fallbackPath) {
+  var text = pathValue === undefined || pathValue === null ? "" : String(pathValue).trim();
+  if (text.length >= 2) {
+    var first = text.charAt(0);
+    var last = text.charAt(text.length - 1);
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      text = text.slice(1, -1).trim();
+    }
+  }
+  if (text.length > 0) {
+    return text;
+  }
+  return fallbackPath === undefined || fallbackPath === null ? "" : String(fallbackPath).trim();
+}
+
 function resolveApiOrError(path, contextName, requestId) {
-  var pathText = path === undefined || path === null ? "" : String(path).trim();
+  var pathText = normalizeLiveApiPath(path, "");
   if (pathText.length === 0) {
     ackWithRequest("error", ["api_invalid_path", contextName], requestId);
     return null;
@@ -218,6 +248,219 @@ function resolveApiOrError(path, contextName, requestId) {
     debug("Failed to resolve LiveAPI path '" + pathText + "' in " + contextName + ": " + err);
     ackWithRequest("error", ["api_path_resolve_failed", pathText], requestId);
     return null;
+  }
+}
+
+function tryResolveApi(path) {
+  try {
+    var api = new LiveAPI(null, normalizeLiveApiPath(path, ""));
+    if (api && Number(api.id) > 0) {
+      return api;
+    }
+  } catch (err) {}
+  return null;
+}
+
+function normalizeLiveValue(value, propName) {
+  if (Array.isArray(value)) {
+    if (value.length === 1) {
+      return value[0];
+    }
+    if (value.length >= 2 && String(value[0]) === String(propName)) {
+      return value[value.length - 1];
+    }
+  }
+  return value;
+}
+
+function readApiProperty(api, propName) {
+  try {
+    return {
+      ok: true,
+      value: normalizeLiveValue(api.get(propName), propName),
+    };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+function readApiPropertyBag(api, propNames) {
+  var bag = {};
+  var errors = {};
+  for (var i = 0; i < propNames.length; i += 1) {
+    var prop = propNames[i];
+    var result = readApiProperty(api, prop);
+    if (result.ok) {
+      bag[prop] = result.value;
+    } else {
+      errors[prop] = "read_failed";
+    }
+  }
+  if (Object.keys(errors).length > 0) {
+    bag.errors = errors;
+  }
+  return bag;
+}
+
+function normalizeTrackPathReference(trackRef, defaultPath) {
+  var text = trackRef === undefined || trackRef === null ? "" : String(trackRef).trim();
+  if (text.length === 0 || text === "default") {
+    return defaultPath || "live_set tracks 0";
+  }
+  if (text === "master") {
+    return "live_set master_track";
+  }
+  var returnMatch = text.match(/^return[:\s]+(\d+)$/);
+  if (returnMatch) {
+    return "live_set return_tracks " + Number(returnMatch[1]);
+  }
+  if (/^\d+$/.test(text)) {
+    return "live_set tracks " + Number(text);
+  }
+  return text;
+}
+
+function describeApiTarget(path, propNames) {
+  var api = tryResolveApi(path);
+  if (!api) {
+    return { path: String(path || ""), id: 0, error: "path_not_found" };
+  }
+  var payload = readApiPropertyBag(api, propNames || []);
+  payload.path = normalizeLiveApiPath(api.path, path);
+  payload.id = Number(api.id || 0);
+  return payload;
+}
+
+function describeParameterApi(parameterApi, requestedPath) {
+  if (!parameterApi || !(Number(parameterApi.id) > 0)) {
+    return { path: String(requestedPath || ""), id: 0, error: "path_not_found" };
+  }
+  var payload = readApiPropertyBag(parameterApi, [
+    "name",
+    "original_name",
+    "value",
+    "min",
+    "max",
+    "default_value",
+    "is_quantized",
+    "value_items",
+    "is_enabled",
+    "automation_state",
+  ]);
+  payload.path = normalizeLiveApiPath(parameterApi.path, requestedPath);
+  payload.id = Number(parameterApi.id || 0);
+  return payload;
+}
+
+function describeParameterPath(parameterPath) {
+  return describeParameterApi(tryResolveApi(parameterPath), parameterPath);
+}
+
+function describeDeviceApi(deviceApi, requestedPath, includeParameters) {
+  if (!deviceApi || !(Number(deviceApi.id) > 0)) {
+    return { path: String(requestedPath || ""), id: 0, error: "path_not_found" };
+  }
+  var payload = readApiPropertyBag(deviceApi, [
+    "name",
+    "class_name",
+    "class_display_name",
+    "type",
+    "is_active",
+    "can_have_chains",
+    "can_have_drum_pads",
+    "latency_in_samples",
+    "latency_in_ms",
+    "can_compare_ab",
+    "is_using_compare_preset_b",
+  ]);
+  payload.path = normalizeLiveApiPath(deviceApi.path, requestedPath);
+  payload.id = Number(deviceApi.id || 0);
+  var parameterCount = 0;
+  try {
+    parameterCount = deviceApi.getcount("parameters");
+  } catch (errCount) {
+    parameterCount = 0;
+  }
+  payload.parameter_count = parameterCount;
+  if (includeParameters) {
+    payload.parameters = [];
+    for (var i = 0; i < parameterCount; i += 1) {
+      payload.parameters.push(describeParameterPath(payload.path + " parameters " + i));
+    }
+  }
+  return payload;
+}
+
+function describeDevicesForTrackPath(trackPath) {
+  var trackApi = tryResolveApi(trackPath);
+  if (!trackApi) {
+    return { track_path: String(trackPath || ""), error: "track_not_found", devices: [] };
+  }
+  var track = readApiPropertyBag(trackApi, [
+    "name",
+    "has_midi_input",
+    "has_audio_input",
+    "has_audio_output",
+    "has_midi_output",
+    "is_frozen",
+  ]);
+  track.path = normalizeLiveApiPath(trackApi.path, trackPath);
+  track.id = Number(trackApi.id || 0);
+  var deviceCount = 0;
+  try {
+    deviceCount = trackApi.getcount("devices");
+  } catch (errCount) {
+    deviceCount = 0;
+  }
+  var devices = [];
+  for (var i = 0; i < deviceCount; i += 1) {
+    devices.push(describeDeviceApi(tryResolveApi(track.path + " devices " + i), track.path + " devices " + i, false));
+  }
+  return {
+    track: track,
+    device_count: deviceCount,
+    devices: devices,
+  };
+}
+
+function parseOptionalInsertionIndex(indexValue, errorCode, targetPath, requestId) {
+  if (indexValue === undefined || indexValue === null || String(indexValue).trim().length === 0) {
+    return { ok: true, has_index: false, value: null };
+  }
+  var numeric = Number(indexValue);
+  if (!(isFinite(numeric) && numeric >= 0 && Math.floor(numeric) === numeric)) {
+    ackWithRequest("error", [errorCode, targetPath, indexValue], requestId);
+    return { ok: false, has_index: false, value: null };
+  }
+  return { ok: true, has_index: true, value: numeric };
+}
+
+function isNumericScalar(value) {
+  if (typeof value === "number") {
+    return isFinite(value);
+  }
+  if (typeof value !== "string") {
+    return false;
+  }
+  var text = value.trim();
+  if (text.length === 0) {
+    return false;
+  }
+  return isFinite(Number(text));
+}
+
+function clearBuiltPayload(built) {
+  if (!built) {
+    return;
+  }
+  try {
+    if (built.wrapper) {
+      built.wrapper.clear();
+    } else if (built.dict) {
+      built.dict.clear();
+    }
+  } catch (err) {
+    // Best-effort cleanup for transient Max Dict wrappers.
   }
 }
 
@@ -519,17 +762,7 @@ function api_call(path, method, argsJson, requestId) {
     ackWithRequest("error", ["api_call_failed", api.path, methodName], requestId);
     return;
   } finally {
-    if (builtPayload) {
-      try {
-        if (builtPayload.wrapper) {
-          builtPayload.wrapper.clear();
-        } else if (builtPayload.dict) {
-          builtPayload.dict.clear();
-        }
-      } catch (cleanupErr) {
-        // Best-effort cleanup.
-      }
-    }
+    clearBuiltPayload(builtPayload);
   }
 
   var resultJson = liveApiValueToJson(result, contextName + "_" + methodName);
@@ -561,8 +794,9 @@ function api_children(path, childName, requestId) {
   }
 
   var children = [];
+  var apiPath = normalizeLiveApiPath(api.path, path);
   for (var i = 0; i < count; i += 1) {
-    var childPath = api.path + " " + childProp + " " + i;
+    var childPath = apiPath + " " + childProp + " " + i;
     try {
       var childApi = new LiveAPI(null, childPath);
       var childId = childApi ? Number(childApi.id) : 0;
@@ -591,7 +825,7 @@ function api_children(path, childName, requestId) {
   }
 
   var childrenJson = safeJsonStringify(children, contextName + "_children");
-  ackWithRequest("api_children", [api.path, childProp, childrenJson], requestId);
+  ackWithRequest("api_children", [apiPath, childProp, childrenJson], requestId);
 }
 
 function api_describe(path, requestId) {
@@ -634,6 +868,312 @@ function api_describe(path, requestId) {
   ackWithRequest("api_describe", [api.path, describeJson], requestId);
 }
 
+function api_session_context(requestId) {
+  if (!ensureInitialized()) return;
+  var totalTracks = getTotalTracksOrError("session_context");
+  var payload = {
+    generated_ms: nowMs(),
+    song: readApiPropertyBag(song, [
+      "tempo",
+      "signature_numerator",
+      "signature_denominator",
+      "current_song_time",
+      "is_playing",
+      "clip_trigger_quantization",
+      "metronome",
+      "overdub",
+      "record_mode",
+      "session_record",
+      "session_record_status",
+      "re_enable_automation_enabled",
+      "swing_amount",
+      "song_length",
+    ]),
+    counts: {
+      tracks: totalTracks,
+      midi_tracks: totalTracks > 0 ? countMidiTracks(totalTracks) : 0,
+      audio_tracks: totalTracks > 0 ? countAudioTracks(totalTracks) : 0,
+      return_tracks: 0,
+      scenes: 0,
+    },
+    selected: {
+      track: describeApiTarget("live_set view selected_track", ["name"]),
+      scene: describeApiTarget("live_set view selected_scene", ["name"]),
+      device: describeApiTarget("live_set view selected_track view selected_device", ["name", "class_name"]),
+    },
+  };
+  payload.song.path = String(song.path || "live_set");
+  payload.song.id = Number(song.id || 0);
+  try {
+    payload.counts.return_tracks = song.getcount("return_tracks");
+  } catch (errReturns) {}
+  try {
+    payload.counts.scenes = song.getcount("scenes");
+  } catch (errScenes) {}
+  ackWithRequest("api_session_context", [safeJsonStringify(payload, "session_context")], requestId);
+}
+
+function api_theory_status(requestId) {
+  if (!ensureInitialized()) return;
+  var payload = {
+    path: String(song.path || "live_set"),
+    id: Number(song.id || 0),
+    theory: readApiPropertyBag(song, [
+      "root_note",
+      "scale_name",
+      "scale_intervals",
+      "scale_mode",
+    ]),
+  };
+  ackWithRequest("api_theory_status", [safeJsonStringify(payload, "theory_status")], requestId);
+}
+
+function api_tuning_status(requestId) {
+  if (!ensureInitialized()) return;
+  var tuningApi = tryResolveApi("live_set tuning_system");
+  var payload = {
+    path: "live_set tuning_system",
+    available: !!tuningApi,
+  };
+  if (tuningApi) {
+    payload.id = Number(tuningApi.id || 0);
+    payload.tuning = readApiPropertyBag(tuningApi, [
+      "name",
+      "pseudo_octave_in_cents",
+      "lowest_note",
+      "highest_note",
+      "reference_pitch",
+      "note_tunings",
+    ]);
+  }
+  ackWithRequest("api_tuning_status", [safeJsonStringify(payload, "tuning_status")], requestId);
+}
+
+function api_device_list(trackRef, requestId) {
+  if (!ensureInitialized()) return;
+  var target = trackRef === undefined || trackRef === null ? "all" : String(trackRef).trim();
+  var payload = { target: target, tracks: [] };
+  if (target.length === 0 || target === "all") {
+    var totalTracks = getTotalTracksOrError("device_list");
+    for (var i = 0; i < totalTracks; i += 1) {
+      payload.tracks.push(describeDevicesForTrackPath("live_set tracks " + i));
+    }
+  } else {
+    payload.tracks.push(describeDevicesForTrackPath(normalizeTrackPathReference(target, "live_set tracks 0")));
+  }
+  ackWithRequest("api_device_list", [target || "all", safeJsonStringify(payload, "device_list")], requestId);
+}
+
+function api_device_parameters(devicePath, requestId) {
+  if (!ensureInitialized()) return;
+  var pathText = devicePath === undefined || devicePath === null ? "" : String(devicePath).trim();
+  if (pathText.length === 0) {
+    ackWithRequest("error", ["api_missing_device_path"], requestId);
+    return;
+  }
+  var payload = describeDeviceApi(tryResolveApi(pathText), pathText, true);
+  ackWithRequest("api_device_parameters", [pathText, safeJsonStringify(payload, "device_parameters")], requestId);
+}
+
+function api_parameter_set(parameterPath, valueJson, requestId) {
+  if (!ensureInitialized()) return;
+  var pathText = parameterPath === undefined || parameterPath === null ? "" : String(parameterPath).trim();
+  if (pathText.length === 0) {
+    ackWithRequest("error", ["api_missing_parameter_path"], requestId);
+    return;
+  }
+  var parameterApi = resolveApiOrError(pathText, "parameter_set", requestId);
+  if (!parameterApi) return;
+  if (valueJson === undefined || valueJson === null || String(valueJson).trim().length === 0) {
+    ackWithRequest("error", ["api_parameter_set_missing_value", pathText], requestId);
+    return;
+  }
+  var parsedValue = parseJsonPayload(valueJson, "parameter_set_value", null, requestId);
+  if (parsedValue === null && String(valueJson) !== "null") {
+    return;
+  }
+  if (parsedValue === null) {
+    ackWithRequest("error", ["api_parameter_set_missing_value", pathText], requestId);
+    return;
+  }
+  if (!isNumericScalar(parsedValue)) {
+    ackWithRequest("error", ["api_parameter_set_invalid_value_type", pathText, parsedValue], requestId);
+    return;
+  }
+  var numericValue = Number(parsedValue);
+  if (!isFinite(numericValue)) {
+    ackWithRequest("error", ["api_parameter_set_invalid_value", pathText, parsedValue], requestId);
+    return;
+  }
+  var before = describeParameterApi(parameterApi, pathText);
+  if (Number(before.is_enabled) === 0) {
+    ackWithRequest("error", ["api_parameter_disabled", pathText], requestId);
+    return;
+  }
+  if (before.min !== undefined && before.min !== null && before.max !== undefined && before.max !== null) {
+    var minValue = Number(before.min);
+    var maxValue = Number(before.max);
+    if (isFinite(minValue) && isFinite(maxValue) && (numericValue < minValue || numericValue > maxValue)) {
+      ackWithRequest("error", ["api_parameter_value_out_of_range", pathText, numericValue, minValue, maxValue], requestId);
+      return;
+    }
+  }
+  try {
+    parameterApi.set("value", numericValue);
+  } catch (err) {
+    debug("Failed to set parameter " + pathText + ": " + err);
+    ackWithRequest("error", ["api_parameter_set_failed", pathText], requestId);
+    return;
+  }
+  var payload = describeParameterApi(parameterApi, pathText);
+  ackWithRequest("api_parameter_set", [pathText, safeJsonStringify(payload, "parameter_set")], requestId);
+}
+
+function api_mixer_status(trackRef, requestId) {
+  if (!ensureInitialized()) return;
+  var trackPath = normalizeTrackPathReference(trackRef, "live_set tracks 0");
+  var mixerPath = trackPath + " mixer_device";
+  var mixerApi = tryResolveApi(mixerPath);
+  if (!mixerApi) {
+    ackWithRequest("error", ["api_mixer_status_failed", trackPath], requestId);
+    return;
+  }
+  var resolvedMixerPath = normalizeLiveApiPath(mixerApi.path, mixerPath);
+  var payload = {
+    track_path: trackPath,
+    mixer_path: resolvedMixerPath,
+    mixer: readApiPropertyBag(mixerApi, ["crossfade_assign", "panning_mode"]),
+    parameters: {
+      volume: describeParameterPath(resolvedMixerPath + " volume"),
+      panning: describeParameterPath(resolvedMixerPath + " panning"),
+      track_activator: describeParameterPath(resolvedMixerPath + " track_activator"),
+    },
+    sends: [],
+  };
+  var sendCount = 0;
+  try {
+    sendCount = mixerApi.getcount("sends");
+  } catch (errSends) {
+    sendCount = 0;
+  }
+  for (var i = 0; i < sendCount; i += 1) {
+    payload.sends.push(describeParameterPath(resolvedMixerPath + " sends " + i));
+  }
+  ackWithRequest("api_mixer_status", [trackPath, safeJsonStringify(payload, "mixer_status")], requestId);
+}
+
+function api_insert_device(targetPath, deviceName, targetIndex, requestId) {
+  if (!ensureInitialized()) return;
+  var pathText = targetPath === undefined || targetPath === null ? "" : String(targetPath).trim();
+  var nameText = deviceName === undefined || deviceName === null ? "" : String(deviceName).trim();
+  if (pathText.length === 0 || nameText.length === 0) {
+    ackWithRequest("error", ["api_insert_device_missing_args"], requestId);
+    return;
+  }
+  var targetApi = resolveApiOrError(pathText, "insert_device", requestId);
+  if (!targetApi) return;
+  var resolvedTargetPath = normalizeLiveApiPath(targetApi.path, pathText);
+  var capabilities = getApiCapabilities(targetApi);
+  if (capabilities.hasFunctionsList && !capabilities.functions.insert_device) {
+    ackWithRequest("error", ["api_insert_device_unsupported", resolvedTargetPath], requestId);
+    return;
+  }
+  var parsedIndex = parseOptionalInsertionIndex(
+    targetIndex,
+    "api_insert_device_invalid_index",
+    resolvedTargetPath,
+    requestId
+  );
+  if (!parsedIndex.ok) return;
+  var result = null;
+  try {
+    if (!parsedIndex.has_index) {
+      result = targetApi.call("insert_device", nameText);
+    } else {
+      result = targetApi.call("insert_device", nameText, parsedIndex.value);
+    }
+  } catch (err) {
+    debug("insert_device failed for " + resolvedTargetPath + " device=" + nameText + ": " + err);
+    ackWithRequest("error", ["api_insert_device_failed", resolvedTargetPath, nameText], requestId);
+    return;
+  }
+  var payload = {
+    ok: true,
+    target_path: resolvedTargetPath,
+    device_name: nameText,
+    target_index: parsedIndex.has_index ? parsedIndex.value : null,
+    result: result,
+  };
+  ackWithRequest("api_insert_device", [resolvedTargetPath, nameText, safeJsonStringify(payload, "insert_device")], requestId);
+}
+
+function api_insert_chain(rackPath, targetIndex, requestId) {
+  if (!ensureInitialized()) return;
+  var pathText = rackPath === undefined || rackPath === null ? "" : String(rackPath).trim();
+  if (pathText.length === 0) {
+    ackWithRequest("error", ["api_insert_chain_missing_path"], requestId);
+    return;
+  }
+  var rackApi = resolveApiOrError(pathText, "insert_chain", requestId);
+  if (!rackApi) return;
+  var resolvedRackPath = normalizeLiveApiPath(rackApi.path, pathText);
+  var capabilities = getApiCapabilities(rackApi);
+  if (capabilities.hasFunctionsList && !capabilities.functions.insert_chain) {
+    ackWithRequest("error", ["api_insert_chain_unsupported", resolvedRackPath], requestId);
+    return;
+  }
+  var parsedIndex = parseOptionalInsertionIndex(
+    targetIndex,
+    "api_insert_chain_invalid_index",
+    resolvedRackPath,
+    requestId
+  );
+  if (!parsedIndex.ok) return;
+  var result = null;
+  try {
+    if (parsedIndex.has_index) {
+      result = rackApi.call("insert_chain", parsedIndex.value);
+    } else {
+      result = rackApi.call("insert_chain");
+    }
+  } catch (err) {
+    debug("insert_chain failed for " + resolvedRackPath + ": " + err);
+    ackWithRequest("error", ["api_insert_chain_failed", resolvedRackPath], requestId);
+    return;
+  }
+  var payload = {
+    ok: true,
+    rack_path: resolvedRackPath,
+    target_index: parsedIndex.has_index ? parsedIndex.value : null,
+    result: result,
+  };
+  ackWithRequest("api_insert_chain", [resolvedRackPath, safeJsonStringify(payload, "insert_chain")], requestId);
+}
+
+function api_drum_chain_in_note(chainPath, noteValue, requestId) {
+  if (!ensureInitialized()) return;
+  var pathText = chainPath === undefined || chainPath === null ? "" : String(chainPath).trim();
+  var note = Number(noteValue);
+  if (pathText.length === 0 || !isFinite(note) || Math.floor(note) !== note || note < -1 || note > 127) {
+    ackWithRequest("error", ["api_drum_chain_in_note_invalid_args", pathText, noteValue], requestId);
+    return;
+  }
+  var chainApi = resolveApiOrError(pathText, "drum_chain_in_note", requestId);
+  if (!chainApi) return;
+  var resolvedChainPath = normalizeLiveApiPath(chainApi.path, pathText);
+  try {
+    chainApi.set("in_note", note);
+  } catch (err) {
+    debug("drum_chain_in_note failed for " + resolvedChainPath + ": " + err);
+    ackWithRequest("error", ["api_drum_chain_in_note_failed", resolvedChainPath, note], requestId);
+    return;
+  }
+  var payload = readApiPropertyBag(chainApi, ["in_note", "out_note", "choke_group", "name"]);
+  payload.path = resolvedChainPath;
+  payload.id = Number(chainApi.id || 0);
+  ackWithRequest("api_drum_chain_in_note", [resolvedChainPath, safeJsonStringify(payload, "drum_chain_in_note")], requestId);
+}
+
 function api_observe(path, property, optionsJson, requestId) {
   if (!ensureInitialized()) return;
   var contextName = "api_observe";
@@ -672,12 +1212,21 @@ function api_observe(path, property, optionsJson, requestId) {
   }
   var mode = normalizeObserverMode(parsedOptions.mode);
   var emitInitial = parsedOptions.emit_initial === false ? false : true;
+  var minIntervalMs = Math.max(
+    0,
+    Math.floor(Number(parsedOptions.min_interval_ms || parsedOptions.throttle_ms || 0))
+  );
 
+  if (!apiObservers[observerId] && Object.keys(apiObservers).length >= MAX_API_OBSERVERS) {
+    ackWithRequest("error", ["api_observer_limit_reached", MAX_API_OBSERVERS], requestId);
+    return;
+  }
   clearObserverEntry(observerId);
 
   var observerApi = null;
+  var apiPath = normalizeLiveApiPath(api.path, path);
   try {
-    observerApi = new LiveAPI(buildObserverCallback(observerId), api.path);
+    observerApi = new LiveAPI(buildObserverCallback(observerId), apiPath);
     observerApi.mode = mode;
     observerApi.property = propName;
   } catch (err) {
@@ -688,9 +1237,12 @@ function api_observe(path, property, optionsJson, requestId) {
 
   var entry = {
     observer_id: observerId,
-    requested_path: api.path,
+    requested_path: apiPath,
     property: propName,
     mode: mode,
+    min_interval_ms: minIntervalMs,
+    dropped_events: 0,
+    last_emit_ms: 0,
     created_ms: nowMs(),
     event_count: 0,
     api: observerApi,
@@ -707,7 +1259,7 @@ function api_observe(path, property, optionsJson, requestId) {
   }
   var payload = buildObserverPayload(entry, initialArgs);
   var payloadJson = safeJsonStringify(payload, contextName + "_payload");
-  ackWithRequest("api_observe", [observerId, observerApi.path, propName, payloadJson], requestId);
+  ackWithRequest("api_observe", [observerId, normalizeLiveApiPath(observerApi.path, apiPath), propName, payloadJson], requestId);
 }
 
 function api_unobserve(observerId, requestId) {
@@ -751,6 +1303,19 @@ function api_observers(requestId) {
   ackWithRequest("api_observers", [payloadJson], requestId);
 }
 
+var API_FALLBACK_HANDLERS = {
+  "api_session_context": api_session_context,
+  "api_theory_status": api_theory_status,
+  "api_tuning_status": api_tuning_status,
+  "api_device_list": api_device_list,
+  "api_device_parameters": api_device_parameters,
+  "api_parameter_set": api_parameter_set,
+  "api_mixer_status": api_mixer_status,
+  "api_insert_device": api_insert_device,
+  "api_insert_chain": api_insert_chain,
+  "api_drum_chain_in_note": api_drum_chain_in_note,
+};
+
 function anything() {
   var rawName = typeof messagename === "undefined" ? "" : String(messagename || "");
   if (!rawName || rawName.charAt(0) !== "/") {
@@ -758,7 +1323,7 @@ function anything() {
     return;
   }
   var targetName = rawName.slice(1).replace(/\//g, "_");
-  var target = this[targetName];
+  var target = API_FALLBACK_HANDLERS[targetName];
   if (typeof target !== "function") {
     debug("Unhandled OSC selector: " + rawName);
     ack("ack", "error", "unknown_selector", rawName);
@@ -1130,11 +1695,30 @@ function parseNotesJson(notesJson, contextName) {
   }
 }
 
+function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue, index, contextName, integerValue) {
+  var raw = note[fieldName];
+  if (raw === undefined || raw === null || String(raw).length === 0) {
+    return true;
+  }
+
+  var value = Number(raw);
+  if (!(isFinite(value) && value >= minValue && value <= maxValue)) {
+    ack("ack", "error", contextName + "_invalid_" + fieldName, index, raw);
+    return false;
+  }
+
+  normalized[fieldName] = integerValue ? Math.floor(value) : value;
+  return true;
+}
+
 function normalizeNote(note, index, contextName) {
   var pitch = Math.floor(Number(note.pitch));
   var startTime = Number(note.start_time);
   var duration = Number(note.duration);
-  var velocity = Math.floor(Number(note.velocity));
+  var velocity = 100;
+  if (note.velocity !== undefined && note.velocity !== null && String(note.velocity).length > 0) {
+    velocity = Math.floor(Number(note.velocity));
+  }
   var mute = Number(note.mute) ? 1 : 0;
 
   if (!(pitch >= 0 && pitch <= 127)) {
@@ -1149,17 +1733,29 @@ function normalizeNote(note, index, contextName) {
     ack("ack", "error", contextName + "_invalid_duration", index, note.duration);
     return null;
   }
-  if (!(velocity > 0 && velocity <= 127)) {
+  if (!(velocity >= 0 && velocity <= 127)) {
     velocity = 100;
   }
 
-  return {
+  var normalized = {
     pitch: pitch,
     start_time: startTime,
     duration: duration,
     velocity: velocity,
     mute: mute,
   };
+
+  if (!copyOptionalNoteNumber(note, normalized, "probability", 0, 1, index, contextName, false)) {
+    return null;
+  }
+  if (!copyOptionalNoteNumber(note, normalized, "velocity_deviation", 0, 127, index, contextName, false)) {
+    return null;
+  }
+  if (!copyOptionalNoteNumber(note, normalized, "release_velocity", 0, 127, index, contextName, true)) {
+    return null;
+  }
+
+  return normalized;
 }
 
 function buildNotesDict(notes, contextName) {
@@ -1181,6 +1777,7 @@ function buildNotesDict(notes, contextName) {
   var notesDict = wrapper.get("wrapper");
   if (!notesDict) {
     ack("ack", "error", contextName + "_notes_dict_build_failed");
+    clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
   return { wrapper: wrapper, dict: notesDict, notes: normalized };
@@ -1194,11 +1791,13 @@ function buildGenericDict(payload, contextName) {
   } catch (err) {
     debug("Failed to build Dict for " + contextName + ": " + err);
     ack("ack", "error", contextName + "_dict_build_failed");
+    clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
   var parsedDict = wrapper.get("wrapper");
   if (!parsedDict) {
     ack("ack", "error", contextName + "_dict_build_failed");
+    clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
   return { wrapper: wrapper, dict: parsedDict };
@@ -1248,6 +1847,7 @@ function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, c
   } catch (err) {
     debug("Unable to access clip slot at " + slotPath + ": " + err);
     ack("ack", "error", contextName + "_clip_slot_access_failed", trackIndex, slot);
+    clearBuiltPayload(built);
     return;
   }
 
@@ -1263,6 +1863,7 @@ function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, c
   } catch (err) {
     debug("Failed to create clip at " + slotPath + " length=" + length + ": " + err);
     ack("ack", "error", contextName + "_create_clip_failed", trackIndex, slot, length);
+    clearBuiltPayload(built);
     return;
   }
 
@@ -1273,6 +1874,7 @@ function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, c
   } catch (err) {
     debug("Unable to access clip at " + clipPath + ": " + err);
     ack("ack", "error", contextName + "_clip_access_failed", trackIndex, slot);
+    clearBuiltPayload(built);
     return;
   }
 
@@ -1309,15 +1911,7 @@ function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, c
     ack("ack", "error", contextName + "_add_notes_failed");
     return;
   } finally {
-    try {
-      if (built.wrapper) {
-        built.wrapper.clear();
-      } else if (built.dict) {
-        built.dict.clear();
-      }
-    } catch (err) {
-      // Best-effort cleanup.
-    }
+    clearBuiltPayload(built);
   }
 
   var noteIdCount = Array.isArray(noteIds) ? noteIds.length : 0;
@@ -1362,7 +1956,10 @@ function append_session_clip_notes(trackIndex, slotIndex, notesJson) {
   }
 
   var clip = getClipFromSlotOrError(trackIndex, slotIndex, contextName);
-  if (!clip) return;
+  if (!clip) {
+    clearBuiltPayload(built);
+    return;
+  }
 
   var noteIds = [];
   try {
@@ -1375,15 +1972,7 @@ function append_session_clip_notes(trackIndex, slotIndex, notesJson) {
     ack("ack", "error", contextName + "_add_notes_failed");
     return;
   } finally {
-    try {
-      if (built.wrapper) {
-        built.wrapper.clear();
-      } else if (built.dict) {
-        built.dict.clear();
-      }
-    } catch (err) {
-      // Best-effort cleanup.
-    }
+    clearBuiltPayload(built);
   }
 
   var noteIdCount = Array.isArray(noteIds) ? noteIds.length : 0;

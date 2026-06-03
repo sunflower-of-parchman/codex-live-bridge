@@ -2,16 +2,22 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+.env.*
+!.env.example
 .venv/
 .venv-musicnn/
 *.egg-info/
 *.wav
 *.WAV
+*.aif
+*.aiff
+*.mp3
+*.m4a
+*.mp4
+*.mov
+*.log
 
 # Generated run artifacts
+logs/
 bridge/.cache/
-memory/composition_prints/
-memory/evals/
 output/
-.playwright-mcp/
-engine/build/

@@ -4,6 +4,20 @@
 
 Security fixes are applied on a best-effort basis to the latest code on `main`.
 
+## Local Runtime Boundary
+
+The bridge controls a local Ableton Live set through unauthenticated OSC/UDP.
+Keep command and ACK traffic on loopback addresses such as `127.0.0.1`; do not
+expose UDP ports `9000` or `9001` to an untrusted network.
+
+The generic `/api/set` and `/api/call` surface can reach broad LiveAPI behavior.
+Treat it as powerful local control of the active Live set. Destructive commands
+can delete tracks or overwrite clips, and additive commands can create tracks,
+devices, chains, clips, and notes.
+
+Do not commit logs, environment files, credentials, rendered audio/video,
+packaged private devices, or machine-specific paths.
+
 ## Reporting a Vulnerability
 
 Please do not open a public issue with exploitable details.

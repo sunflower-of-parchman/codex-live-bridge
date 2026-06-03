@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import socket
 import sys
@@ -16,6 +17,7 @@ HOST = bridge.DEFAULT_HOST
 PORT = bridge.DEFAULT_PORT
 ACK_PORT = bridge.DEFAULT_ACK_PORT
 ACK_TIMEOUT_S = 1.0
+MUTATING_FLAG = "--i-understand-this-mutates-live-set"
 
 OscAck = Tuple[str, List[bridge.OscArg]]
 
@@ -96,6 +98,17 @@ def _extract_note_count(acks: Sequence[OscAck]) -> int | None:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _new_track_index(tracks_before: Sequence[dict], tracks_after: Sequence[dict]) -> int | None:
+    if len(tracks_after) != len(tracks_before) + 1:
+        return None
+    expected_index = len(tracks_after) - 1
+    try:
+        actual_index = int(tracks_after[-1]["index"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return expected_index if actual_index == expected_index else None
 
 
 def _build_notes() -> Tuple[List[dict], float]:
@@ -211,7 +224,14 @@ def run() -> int:
             )
         )
         track_count_after = len(tracks_after)
-        new_track_index = max(0, track_count_after - 1)
+        new_track_index = _new_track_index(tracks_before, tracks_after)
+        if new_track_index is None:
+            print(
+                "error: MIDI track creation did not add exactly one appended track; aborting before writes",
+                file=sys.stderr,
+            )
+            ack_sock.close()
+            return 3
         print(f"info: tracks after={track_count_after}; new_track_index={new_track_index}")
 
         track_path = f"live_set tracks {new_track_index}"
@@ -266,5 +286,29 @@ def run() -> int:
     return 0
 
 
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the full-surface Ableton bridge smoke test. This creates a MIDI "
+            "track, writes a clip, and changes the set tempo and time signature."
+        )
+    )
+    parser.add_argument(
+        MUTATING_FLAG,
+        action="store_true",
+        required=True,
+        help="Required confirmation that this smoke test mutates the active Live set.",
+    )
+    return parser.parse_args(list(argv))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        parse_args(sys.argv[1:] if argv is None else argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    return run()
+
+
 if __name__ == "__main__":
-    raise SystemExit(run())
+    raise SystemExit(main())
