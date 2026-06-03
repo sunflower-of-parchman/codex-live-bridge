@@ -44,9 +44,10 @@ node --check bridge/m4l/live_udp_bridge.js
 LiveUdpBridge.amxd
 ```
 
-Follow `INSTALL.md` to export `LiveUdpBridge.amxd` from the tracked
+Follow `INSTALL.md` to package `LiveUdpBridge.amxd` from the tracked
 `bridge/m4l/LiveUdpBridge.maxpat` source. Tagged releases may also provide the
-packaged device as a downloadable asset.
+packaged device and adjacent JavaScript router as a `LiveUdpBridge.zip`
+download.
 
 3. Keep the JavaScript router next to the exported device so Max resolves `[js
 live_udp_bridge.js]`:
@@ -69,7 +70,7 @@ ack:  /ack status <total_tracks> <midi_tracks> <audio_tracks> <return_tracks> li
 ```
 
 The editable `.maxpat` file is the canonical tracked source. Packaged `.amxd`
-devices are release artifacts generated through Max.
+devices are release artifacts saved from a Live-hosted Max MIDI Effect.
 
 ## Included Files
 
@@ -179,7 +180,8 @@ If you modify `bridge/m4l/live_udp_bridge.js` or
 
 1. Keep the JS file next to the patch, or update the Max `[js ...]` object.
 2. Reload the device in Ableton Live.
-3. Export packaged `.amxd` artifacts only during an explicit release pass.
+3. Save packaged `.amxd` artifacts from a Live-hosted Max MIDI Effect only
+   during an explicit release pass.
 
 Local validation:
 
@@ -192,10 +194,10 @@ bash .github/scripts/audit_public_hygiene.sh
 ```
 
 Live-runtime validation is separate from static validation. Before a release,
-export `LiveUdpBridge.amxd` through Max, load that device in Ableton Live,
-confirm UDP `9000` and `9001` are active, then check read wrappers, observer
-cleanup, bounded parameter writes, and Live 12.3 native insertion wrappers in a
-disposable set.
+package `LiveUdpBridge.amxd` from a Live-hosted Max MIDI Effect, load that
+device in Ableton Live, confirm UDP `9000` and `9001` are active, then check
+read wrappers, observer cleanup, bounded parameter writes, and Live 12.3 native
+insertion wrappers in a disposable set.
 
 ## Data, Training, And Generation Boundary
 

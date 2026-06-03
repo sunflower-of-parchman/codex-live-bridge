@@ -5,7 +5,7 @@ Thanks for your interest in improving `codex-live-bridge`.
 ## Before You Start
 
 - Read `README.md` for project scope and runtime requirements.
-- Read `INSTALL.md` before exporting a packaged `.amxd` release artifact.
+- Read `INSTALL.md` before saving a packaged `.amxd` release artifact.
 - Read `PROTOCOL.md` before changing OSC addresses, ACK shapes, LiveAPI
   wrapper behavior, or safety classes.
 - Keep changes small and focused.

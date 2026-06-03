@@ -62,9 +62,14 @@ class PublicDocsTests(unittest.TestCase):
         install_text = (REPO_ROOT / "INSTALL.md").read_text(encoding="utf-8")
 
         self.assertIn("INSTALL.md", text)
+        self.assertIn("LiveUdpBridge.zip", text)
         self.assertIn("LiveUdpBridge.amxd", install_text)
+        self.assertIn("LiveUdpBridge.zip", install_text)
+        self.assertIn("live_udp_bridge.js", install_text)
         self.assertIn("Max MIDI Effect", install_text)
+        self.assertIn("Edit in Max", install_text)
         self.assertIn("Save As", install_text)
+        self.assertNotIn("Export Max for Live Device", install_text)
 
     def test_removed_auxiliary_files_stay_removed(self) -> None:
         stale_paths = [

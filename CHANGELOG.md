@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2026-06-03
 
 ### Added
 
@@ -35,8 +35,10 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restricted unmatched OSC fallback dispatch to the documented named wrappers.
 - Made the mutating smoke test abort before writes unless track creation adds
   exactly one appended MIDI track.
-- Documented the Max export path from tracked `.maxpat` source to loadable
-  `.amxd` release artifact.
+- Normalized LiveAPI paths before deriving child paths or returning wrapper
+  ACK payloads.
+- Documented the Live-hosted Max MIDI Effect packaging path from tracked
+  `.maxpat` source to loadable `.amxd` release artifact.
 - Made CLI listen-mode socket bind failures return a nonzero process status.
 
 ### Removed
@@ -45,9 +47,3 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
   benchmark, and implementation-plan notes from the public v3 surface. Those
   materials belonged to an earlier higher-level direction and made this repo
   less clear as a standalone Ableton Live bridge.
-
-### Follow-up
-
-- A later release should express this product split more cleanly: this repo as
-  the reliable local Ableton Live/LiveAPI bridge, with any higher-level memory
-  or composition system described and shipped separately if it returns.

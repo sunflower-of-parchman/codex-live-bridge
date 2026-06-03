@@ -408,6 +408,18 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn("Math.floor(note) !== note", function_source)
         self.assertNotIn("Math.floor(Number(noteValue))", function_source)
 
+    def test_js_normalizes_live_api_paths_before_deriving_child_paths(self) -> None:
+        js_source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
+
+        self.assertIn("function normalizeLiveApiPath", js_source)
+        self.assertIn("normalizeLiveApiPath(trackApi.path, trackPath)", js_source)
+        self.assertIn("normalizeLiveApiPath(deviceApi.path, requestedPath)", js_source)
+        self.assertIn("normalizeLiveApiPath(mixerApi.path, mixerPath)", js_source)
+        self.assertIn("normalizeLiveApiPath(api.path, path)", js_source)
+        self.assertIn("normalizeLiveApiPath(targetApi.path, pathText)", js_source)
+        self.assertIn("normalizeLiveApiPath(rackApi.path, pathText)", js_source)
+        self.assertIn("normalizeLiveApiPath(chainApi.path, pathText)", js_source)
+
     def test_js_cleans_max_dict_payloads(self) -> None:
         js_source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
 

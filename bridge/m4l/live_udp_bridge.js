@@ -110,7 +110,9 @@ function listObserverEntries() {
     items.push({
       observer_id: key,
       requested_path: entry.requested_path,
-      current_path: entry.api ? String(entry.api.path) : String(entry.current_path || entry.requested_path || ""),
+      current_path: entry.api
+        ? normalizeLiveApiPath(entry.api.path, entry.current_path || entry.requested_path)
+        : normalizeLiveApiPath(entry.current_path, entry.requested_path),
       property: entry.property,
       mode: Number(entry.mode || 0),
       live_id: entry.api ? Number(entry.api.id) : Number(entry.live_id || 0),
@@ -138,7 +140,7 @@ function buildObserverPayload(entry, callbackArgs) {
   return {
     observer_id: String(entry.observer_id || ""),
     requested_path: String(entry.requested_path || ""),
-    current_path: String(entry.api.path || entry.current_path || entry.requested_path || ""),
+    current_path: normalizeLiveApiPath(entry.api.path, entry.current_path || entry.requested_path),
     property: String(entry.property || ""),
     mode: Number(entry.mode || 0),
     live_id: Number(entry.api.id || 0),
@@ -213,8 +215,23 @@ function normalizeArgsArray(argsValue) {
   return [argsValue];
 }
 
+function normalizeLiveApiPath(pathValue, fallbackPath) {
+  var text = pathValue === undefined || pathValue === null ? "" : String(pathValue).trim();
+  if (text.length >= 2) {
+    var first = text.charAt(0);
+    var last = text.charAt(text.length - 1);
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      text = text.slice(1, -1).trim();
+    }
+  }
+  if (text.length > 0) {
+    return text;
+  }
+  return fallbackPath === undefined || fallbackPath === null ? "" : String(fallbackPath).trim();
+}
+
 function resolveApiOrError(path, contextName, requestId) {
-  var pathText = path === undefined || path === null ? "" : String(path).trim();
+  var pathText = normalizeLiveApiPath(path, "");
   if (pathText.length === 0) {
     ackWithRequest("error", ["api_invalid_path", contextName], requestId);
     return null;
@@ -236,7 +253,7 @@ function resolveApiOrError(path, contextName, requestId) {
 
 function tryResolveApi(path) {
   try {
-    var api = new LiveAPI(null, String(path || ""));
+    var api = new LiveAPI(null, normalizeLiveApiPath(path, ""));
     if (api && Number(api.id) > 0) {
       return api;
     }
@@ -309,7 +326,7 @@ function describeApiTarget(path, propNames) {
     return { path: String(path || ""), id: 0, error: "path_not_found" };
   }
   var payload = readApiPropertyBag(api, propNames || []);
-  payload.path = String(api.path || path || "");
+  payload.path = normalizeLiveApiPath(api.path, path);
   payload.id = Number(api.id || 0);
   return payload;
 }
@@ -330,7 +347,7 @@ function describeParameterApi(parameterApi, requestedPath) {
     "is_enabled",
     "automation_state",
   ]);
-  payload.path = String(parameterApi.path || requestedPath || "");
+  payload.path = normalizeLiveApiPath(parameterApi.path, requestedPath);
   payload.id = Number(parameterApi.id || 0);
   return payload;
 }
@@ -356,7 +373,7 @@ function describeDeviceApi(deviceApi, requestedPath, includeParameters) {
     "can_compare_ab",
     "is_using_compare_preset_b",
   ]);
-  payload.path = String(deviceApi.path || requestedPath || "");
+  payload.path = normalizeLiveApiPath(deviceApi.path, requestedPath);
   payload.id = Number(deviceApi.id || 0);
   var parameterCount = 0;
   try {
@@ -387,7 +404,7 @@ function describeDevicesForTrackPath(trackPath) {
     "has_midi_output",
     "is_frozen",
   ]);
-  track.path = String(trackApi.path || trackPath || "");
+  track.path = normalizeLiveApiPath(trackApi.path, trackPath);
   track.id = Number(trackApi.id || 0);
   var deviceCount = 0;
   try {
@@ -777,8 +794,9 @@ function api_children(path, childName, requestId) {
   }
 
   var children = [];
+  var apiPath = normalizeLiveApiPath(api.path, path);
   for (var i = 0; i < count; i += 1) {
-    var childPath = api.path + " " + childProp + " " + i;
+    var childPath = apiPath + " " + childProp + " " + i;
     try {
       var childApi = new LiveAPI(null, childPath);
       var childId = childApi ? Number(childApi.id) : 0;
@@ -807,7 +825,7 @@ function api_children(path, childName, requestId) {
   }
 
   var childrenJson = safeJsonStringify(children, contextName + "_children");
-  ackWithRequest("api_children", [api.path, childProp, childrenJson], requestId);
+  ackWithRequest("api_children", [apiPath, childProp, childrenJson], requestId);
 }
 
 function api_describe(path, requestId) {
@@ -1020,14 +1038,15 @@ function api_mixer_status(trackRef, requestId) {
     ackWithRequest("error", ["api_mixer_status_failed", trackPath], requestId);
     return;
   }
+  var resolvedMixerPath = normalizeLiveApiPath(mixerApi.path, mixerPath);
   var payload = {
     track_path: trackPath,
-    mixer_path: String(mixerApi.path || mixerPath),
+    mixer_path: resolvedMixerPath,
     mixer: readApiPropertyBag(mixerApi, ["crossfade_assign", "panning_mode"]),
     parameters: {
-      volume: describeParameterPath(String(mixerApi.path || mixerPath) + " volume"),
-      panning: describeParameterPath(String(mixerApi.path || mixerPath) + " panning"),
-      track_activator: describeParameterPath(String(mixerApi.path || mixerPath) + " track_activator"),
+      volume: describeParameterPath(resolvedMixerPath + " volume"),
+      panning: describeParameterPath(resolvedMixerPath + " panning"),
+      track_activator: describeParameterPath(resolvedMixerPath + " track_activator"),
     },
     sends: [],
   };
@@ -1038,7 +1057,7 @@ function api_mixer_status(trackRef, requestId) {
     sendCount = 0;
   }
   for (var i = 0; i < sendCount; i += 1) {
-    payload.sends.push(describeParameterPath(String(mixerApi.path || mixerPath) + " sends " + i));
+    payload.sends.push(describeParameterPath(resolvedMixerPath + " sends " + i));
   }
   ackWithRequest("api_mixer_status", [trackPath, safeJsonStringify(payload, "mixer_status")], requestId);
 }
@@ -1053,15 +1072,16 @@ function api_insert_device(targetPath, deviceName, targetIndex, requestId) {
   }
   var targetApi = resolveApiOrError(pathText, "insert_device", requestId);
   if (!targetApi) return;
+  var resolvedTargetPath = normalizeLiveApiPath(targetApi.path, pathText);
   var capabilities = getApiCapabilities(targetApi);
   if (capabilities.hasFunctionsList && !capabilities.functions.insert_device) {
-    ackWithRequest("error", ["api_insert_device_unsupported", targetApi.path], requestId);
+    ackWithRequest("error", ["api_insert_device_unsupported", resolvedTargetPath], requestId);
     return;
   }
   var parsedIndex = parseOptionalInsertionIndex(
     targetIndex,
     "api_insert_device_invalid_index",
-    targetApi.path,
+    resolvedTargetPath,
     requestId
   );
   if (!parsedIndex.ok) return;
@@ -1073,18 +1093,18 @@ function api_insert_device(targetPath, deviceName, targetIndex, requestId) {
       result = targetApi.call("insert_device", nameText, parsedIndex.value);
     }
   } catch (err) {
-    debug("insert_device failed for " + targetApi.path + " device=" + nameText + ": " + err);
-    ackWithRequest("error", ["api_insert_device_failed", targetApi.path, nameText], requestId);
+    debug("insert_device failed for " + resolvedTargetPath + " device=" + nameText + ": " + err);
+    ackWithRequest("error", ["api_insert_device_failed", resolvedTargetPath, nameText], requestId);
     return;
   }
   var payload = {
     ok: true,
-    target_path: String(targetApi.path || pathText),
+    target_path: resolvedTargetPath,
     device_name: nameText,
     target_index: parsedIndex.has_index ? parsedIndex.value : null,
     result: result,
   };
-  ackWithRequest("api_insert_device", [targetApi.path, nameText, safeJsonStringify(payload, "insert_device")], requestId);
+  ackWithRequest("api_insert_device", [resolvedTargetPath, nameText, safeJsonStringify(payload, "insert_device")], requestId);
 }
 
 function api_insert_chain(rackPath, targetIndex, requestId) {
@@ -1096,15 +1116,16 @@ function api_insert_chain(rackPath, targetIndex, requestId) {
   }
   var rackApi = resolveApiOrError(pathText, "insert_chain", requestId);
   if (!rackApi) return;
+  var resolvedRackPath = normalizeLiveApiPath(rackApi.path, pathText);
   var capabilities = getApiCapabilities(rackApi);
   if (capabilities.hasFunctionsList && !capabilities.functions.insert_chain) {
-    ackWithRequest("error", ["api_insert_chain_unsupported", rackApi.path], requestId);
+    ackWithRequest("error", ["api_insert_chain_unsupported", resolvedRackPath], requestId);
     return;
   }
   var parsedIndex = parseOptionalInsertionIndex(
     targetIndex,
     "api_insert_chain_invalid_index",
-    rackApi.path,
+    resolvedRackPath,
     requestId
   );
   if (!parsedIndex.ok) return;
@@ -1116,17 +1137,17 @@ function api_insert_chain(rackPath, targetIndex, requestId) {
       result = rackApi.call("insert_chain");
     }
   } catch (err) {
-    debug("insert_chain failed for " + rackApi.path + ": " + err);
-    ackWithRequest("error", ["api_insert_chain_failed", rackApi.path], requestId);
+    debug("insert_chain failed for " + resolvedRackPath + ": " + err);
+    ackWithRequest("error", ["api_insert_chain_failed", resolvedRackPath], requestId);
     return;
   }
   var payload = {
     ok: true,
-    rack_path: String(rackApi.path || pathText),
+    rack_path: resolvedRackPath,
     target_index: parsedIndex.has_index ? parsedIndex.value : null,
     result: result,
   };
-  ackWithRequest("api_insert_chain", [rackApi.path, safeJsonStringify(payload, "insert_chain")], requestId);
+  ackWithRequest("api_insert_chain", [resolvedRackPath, safeJsonStringify(payload, "insert_chain")], requestId);
 }
 
 function api_drum_chain_in_note(chainPath, noteValue, requestId) {
@@ -1139,17 +1160,18 @@ function api_drum_chain_in_note(chainPath, noteValue, requestId) {
   }
   var chainApi = resolveApiOrError(pathText, "drum_chain_in_note", requestId);
   if (!chainApi) return;
+  var resolvedChainPath = normalizeLiveApiPath(chainApi.path, pathText);
   try {
     chainApi.set("in_note", note);
   } catch (err) {
-    debug("drum_chain_in_note failed for " + chainApi.path + ": " + err);
-    ackWithRequest("error", ["api_drum_chain_in_note_failed", chainApi.path, note], requestId);
+    debug("drum_chain_in_note failed for " + resolvedChainPath + ": " + err);
+    ackWithRequest("error", ["api_drum_chain_in_note_failed", resolvedChainPath, note], requestId);
     return;
   }
   var payload = readApiPropertyBag(chainApi, ["in_note", "out_note", "choke_group", "name"]);
-  payload.path = String(chainApi.path || pathText);
+  payload.path = resolvedChainPath;
   payload.id = Number(chainApi.id || 0);
-  ackWithRequest("api_drum_chain_in_note", [chainApi.path, safeJsonStringify(payload, "drum_chain_in_note")], requestId);
+  ackWithRequest("api_drum_chain_in_note", [resolvedChainPath, safeJsonStringify(payload, "drum_chain_in_note")], requestId);
 }
 
 function api_observe(path, property, optionsJson, requestId) {
@@ -1202,8 +1224,9 @@ function api_observe(path, property, optionsJson, requestId) {
   clearObserverEntry(observerId);
 
   var observerApi = null;
+  var apiPath = normalizeLiveApiPath(api.path, path);
   try {
-    observerApi = new LiveAPI(buildObserverCallback(observerId), api.path);
+    observerApi = new LiveAPI(buildObserverCallback(observerId), apiPath);
     observerApi.mode = mode;
     observerApi.property = propName;
   } catch (err) {
@@ -1214,7 +1237,7 @@ function api_observe(path, property, optionsJson, requestId) {
 
   var entry = {
     observer_id: observerId,
-    requested_path: api.path,
+    requested_path: apiPath,
     property: propName,
     mode: mode,
     min_interval_ms: minIntervalMs,
@@ -1236,7 +1259,7 @@ function api_observe(path, property, optionsJson, requestId) {
   }
   var payload = buildObserverPayload(entry, initialArgs);
   var payloadJson = safeJsonStringify(payload, contextName + "_payload");
-  ackWithRequest("api_observe", [observerId, observerApi.path, propName, payloadJson], requestId);
+  ackWithRequest("api_observe", [observerId, normalizeLiveApiPath(observerApi.path, apiPath), propName, payloadJson], requestId);
 }
 
 function api_unobserve(observerId, requestId) {

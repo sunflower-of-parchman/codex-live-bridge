@@ -21,8 +21,8 @@ guaranteed response times.
 - Exact command run.
 - Full terminal output, including `/ack` lines.
 - Whether UDP ports `9000` and `9001` are free and local.
-- Whether an exported `LiveUdpBridge.amxd` is loaded in Live.
-- Whether `bridge/m4l/live_udp_bridge.js` is next to the exported device and the device
+- Whether a packaged `LiveUdpBridge.amxd` is loaded in Live.
+- Whether `bridge/m4l/live_udp_bridge.js` is next to the packaged device and the device
   was reloaded after edits.
 - Whether the issue uses a Live 12.3+ wrapper such as `/api/insert_device`.
 - Whether the full-surface smoke test was run, and whether it was run in a
