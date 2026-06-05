@@ -48,8 +48,15 @@ Successful ACKs:
 Error ACKs:
 
 ```text
-/ack error <api_error_code> ... [request_id]
+/ack error <error_code> ... request_correlation <request_correlation>
 ```
+
+Current v3 error ACKs always end with the reserved two-argument correlation
+trailer `request_correlation req:<request_id>`, or
+`request_correlation req:` when the command supplied no request ID. The
+explicit marker keeps variable-length error details unambiguous and lets
+clients preserve older untagged ACK details, including details beginning with
+`req:`.
 
 `/api/children` returns a JSON array of child records:
 
@@ -195,6 +202,12 @@ Safety classes:
 
 These APIs are gated by LiveAPI capability checks when metadata is available. Optional insertion indexes must be non-negative integers when provided. Native device insertion requires Ableton Live 12.3+ and supports native Live devices only; Max for Live devices and plug-ins are not supported by these insertion calls.
 
+`drum_chain_in_note` reads the property back after writing. It reports
+`api_drum_chain_in_note_readback_failed` when the applied value cannot be
+verified and `api_drum_chain_in_note_write_not_applied` when Live returns a
+different applied value. Live documents `-1` as the Drum Chain "All Notes"
+setting, but runtime support can vary by Live build and rack context.
+
 ## Note Dictionary Schema
 
 Commands that create or append notes accept either a raw note array or an object shaped like `{"notes":[...]}`. The bridge converts JSON into the Max `Dict` shape required by LiveAPI note methods.
@@ -229,7 +242,7 @@ Validation:
 - `velocity`: integer `0..127`; omitted or invalid values fall back to `100`
 - `mute`: truthy values become `1`, otherwise `0`
 - `probability`: number `0..1`
-- `velocity_deviation`: number `0..127`
+- `velocity_deviation`: number `-127..127`
 - `release_velocity`: integer `0..127`
 
 ## Safety Classes

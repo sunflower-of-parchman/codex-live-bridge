@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Corrected the note schema to accept documented negative
+  `velocity_deviation` values.
+- Made drum-chain note writes distinguish unreadable readback from a verified
+  unapplied write.
+- Made every error ACK end with an explicit reserved request-ID correlation
+  trailer so clients can preserve all error details and parse older untagged
+  ACKs safely.
+- Made helper failures terminal so request-aware status wrappers and batch
+  track mutations do not emit completion ACKs after an error.
+
 ## [3.0.0] - 2026-06-03
 
 ### Added

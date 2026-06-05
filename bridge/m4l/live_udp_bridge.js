@@ -10,6 +10,7 @@ var initialized = false;
 var apiObservers = {};
 var apiObserverCounter = 0;
 var MAX_API_OBSERVERS = 32;
+var ERROR_CORRELATION_MARKER = "request_correlation";
 
 function debug(msg) {
   var text = "[live-bridge] " + msg;
@@ -32,10 +33,13 @@ function hasRequestId(requestId) {
 
 function ackWithRequest(eventName, argsArray, requestId) {
   var payload = ["ack", eventName].concat(argsArray || []);
-  if (hasRequestId(requestId)) {
+  if (eventName === "error") {
+    payload.push(ERROR_CORRELATION_MARKER);
+    payload.push("req:" + (hasRequestId(requestId) ? String(requestId) : ""));
+  } else if (hasRequestId(requestId)) {
     payload.push(String(requestId));
   }
-  ack.apply(this, payload);
+  emitAck(payload);
 }
 
 function nowMs() {
@@ -572,29 +576,29 @@ function getApiCapabilities(api) {
   return parseApiCapabilities(readApiInfoText(api));
 }
 
-function ensureInitialized() {
+function ensureInitialized(requestId) {
   var currentId = song ? Number(song.id) : 0;
   if (initialized && song && currentId > 0) {
     return true;
   }
-  init();
+  init(requestId);
   currentId = song ? Number(song.id) : 0;
   if (initialized && song && currentId > 0) {
     return true;
   }
   debug("LiveAPI not initialized yet or not attached to live_set.");
-  ack("ack", "error", "not_initialized");
+  ackWithRequest("error", ["not_initialized"], requestId);
   return false;
 }
 
-function init() {
+function init(requestId) {
   try {
     song = new LiveAPI(null, "live_set");
     var id = song ? Number(song.id) : 0;
     if (!(id > 0)) {
       initialized = false;
       debug("LiveAPI attached to live_set but id is invalid: " + id);
-      ack("ack", "error", "not_in_live_set", id);
+      ackWithRequest("error", ["not_in_live_set", id], requestId);
       return;
     }
     initialized = true;
@@ -617,12 +621,12 @@ function ping() {
 }
 
 function api_ping(requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   ackWithRequest("pong", [], requestId);
 }
 
 function api_get(path, property, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_get";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -652,7 +656,7 @@ function api_get(path, property, requestId) {
 }
 
 function api_set(path, property, valueJson, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_set";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -692,7 +696,7 @@ function api_set(path, property, valueJson, requestId) {
 }
 
 function api_call(path, method, argsJson, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_call";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -732,7 +736,7 @@ function api_call(path, method, argsJson, requestId) {
       ackWithRequest("error", ["api_add_new_notes_invalid_payload", api.path], requestId);
       return;
     }
-    builtPayload = buildNotesDict(notesList, contextName + "_add_new_notes");
+    builtPayload = buildNotesDict(notesList, contextName + "_add_new_notes", requestId);
     if (!builtPayload) {
       return;
     }
@@ -747,7 +751,7 @@ function api_call(path, method, argsJson, requestId) {
       ackWithRequest("error", ["api_" + methodName + "_invalid_payload", api.path], requestId);
       return;
     }
-    builtPayload = buildGenericDict(payload, contextName + "_" + methodName);
+    builtPayload = buildGenericDict(payload, contextName + "_" + methodName, requestId);
     if (!builtPayload) {
       return;
     }
@@ -773,7 +777,7 @@ function api_call(path, method, argsJson, requestId) {
 }
 
 function api_children(path, childName, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_children";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -829,7 +833,7 @@ function api_children(path, childName, requestId) {
 }
 
 function api_describe(path, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_describe";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -869,8 +873,13 @@ function api_describe(path, requestId) {
 }
 
 function api_session_context(requestId) {
-  if (!ensureInitialized()) return;
-  var totalTracks = getTotalTracksOrError("session_context");
+  if (!ensureInitialized(requestId)) return;
+  var totalTracks = getTotalTracksOrError("session_context", requestId);
+  if (totalTracks === 0) return;
+  var midiTracks = countMidiTracks(totalTracks, "session_context", requestId);
+  if (midiTracks === null) return;
+  var audioTracks = countAudioTracks(totalTracks, "session_context", requestId);
+  if (audioTracks === null) return;
   var payload = {
     generated_ms: nowMs(),
     song: readApiPropertyBag(song, [
@@ -891,8 +900,8 @@ function api_session_context(requestId) {
     ]),
     counts: {
       tracks: totalTracks,
-      midi_tracks: totalTracks > 0 ? countMidiTracks(totalTracks) : 0,
-      audio_tracks: totalTracks > 0 ? countAudioTracks(totalTracks) : 0,
+      midi_tracks: midiTracks,
+      audio_tracks: audioTracks,
       return_tracks: 0,
       scenes: 0,
     },
@@ -914,7 +923,7 @@ function api_session_context(requestId) {
 }
 
 function api_theory_status(requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var payload = {
     path: String(song.path || "live_set"),
     id: Number(song.id || 0),
@@ -929,7 +938,7 @@ function api_theory_status(requestId) {
 }
 
 function api_tuning_status(requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var tuningApi = tryResolveApi("live_set tuning_system");
   var payload = {
     path: "live_set tuning_system",
@@ -950,11 +959,12 @@ function api_tuning_status(requestId) {
 }
 
 function api_device_list(trackRef, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var target = trackRef === undefined || trackRef === null ? "all" : String(trackRef).trim();
   var payload = { target: target, tracks: [] };
   if (target.length === 0 || target === "all") {
-    var totalTracks = getTotalTracksOrError("device_list");
+    var totalTracks = getTotalTracksOrError("device_list", requestId);
+    if (totalTracks === 0) return;
     for (var i = 0; i < totalTracks; i += 1) {
       payload.tracks.push(describeDevicesForTrackPath("live_set tracks " + i));
     }
@@ -965,7 +975,7 @@ function api_device_list(trackRef, requestId) {
 }
 
 function api_device_parameters(devicePath, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = devicePath === undefined || devicePath === null ? "" : String(devicePath).trim();
   if (pathText.length === 0) {
     ackWithRequest("error", ["api_missing_device_path"], requestId);
@@ -976,7 +986,7 @@ function api_device_parameters(devicePath, requestId) {
 }
 
 function api_parameter_set(parameterPath, valueJson, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = parameterPath === undefined || parameterPath === null ? "" : String(parameterPath).trim();
   if (pathText.length === 0) {
     ackWithRequest("error", ["api_missing_parameter_path"], requestId);
@@ -1030,7 +1040,7 @@ function api_parameter_set(parameterPath, valueJson, requestId) {
 }
 
 function api_mixer_status(trackRef, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var trackPath = normalizeTrackPathReference(trackRef, "live_set tracks 0");
   var mixerPath = trackPath + " mixer_device";
   var mixerApi = tryResolveApi(mixerPath);
@@ -1063,7 +1073,7 @@ function api_mixer_status(trackRef, requestId) {
 }
 
 function api_insert_device(targetPath, deviceName, targetIndex, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = targetPath === undefined || targetPath === null ? "" : String(targetPath).trim();
   var nameText = deviceName === undefined || deviceName === null ? "" : String(deviceName).trim();
   if (pathText.length === 0 || nameText.length === 0) {
@@ -1108,7 +1118,7 @@ function api_insert_device(targetPath, deviceName, targetIndex, requestId) {
 }
 
 function api_insert_chain(rackPath, targetIndex, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = rackPath === undefined || rackPath === null ? "" : String(rackPath).trim();
   if (pathText.length === 0) {
     ackWithRequest("error", ["api_insert_chain_missing_path"], requestId);
@@ -1151,7 +1161,7 @@ function api_insert_chain(rackPath, targetIndex, requestId) {
 }
 
 function api_drum_chain_in_note(chainPath, noteValue, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = chainPath === undefined || chainPath === null ? "" : String(chainPath).trim();
   var note = Number(noteValue);
   if (pathText.length === 0 || !isFinite(note) || Math.floor(note) !== note || note < -1 || note > 127) {
@@ -1169,13 +1179,39 @@ function api_drum_chain_in_note(chainPath, noteValue, requestId) {
     return;
   }
   var payload = readApiPropertyBag(chainApi, ["in_note", "out_note", "choke_group", "name"]);
+  var hasAppliedNote = Object.prototype.hasOwnProperty.call(payload, "in_note");
+  var appliedNote = hasAppliedNote ? Number(payload.in_note) : NaN;
+  if (
+    !hasAppliedNote ||
+    payload.in_note === null ||
+    payload.in_note === undefined ||
+    String(payload.in_note).trim().length === 0 ||
+    (payload.errors && payload.errors.in_note) ||
+    !isFinite(appliedNote) ||
+    Math.floor(appliedNote) !== appliedNote
+  ) {
+    ackWithRequest(
+      "error",
+      ["api_drum_chain_in_note_readback_failed", resolvedChainPath, note],
+      requestId
+    );
+    return;
+  }
+  if (appliedNote !== note) {
+    ackWithRequest(
+      "error",
+      ["api_drum_chain_in_note_write_not_applied", resolvedChainPath, note, appliedNote],
+      requestId
+    );
+    return;
+  }
   payload.path = resolvedChainPath;
   payload.id = Number(chainApi.id || 0);
   ackWithRequest("api_drum_chain_in_note", [resolvedChainPath, safeJsonStringify(payload, "drum_chain_in_note")], requestId);
 }
 
 function api_observe(path, property, optionsJson, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_observe";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -1263,7 +1299,7 @@ function api_observe(path, property, optionsJson, requestId) {
 }
 
 function api_unobserve(observerId, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var key = observerId === undefined || observerId === null ? "" : String(observerId).trim();
   if (key.length === 0) {
     ackWithRequest("error", ["api_missing_observer_id"], requestId);
@@ -1291,14 +1327,14 @@ function api_unobserve(observerId, requestId) {
 }
 
 function api_clear_observers(requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var cleared = clearAllObserverEntries();
   var resultJson = safeJsonStringify({ cleared: Number(cleared || 0) }, "api_clear_observers");
   ackWithRequest("api_clear_observers", [resultJson], requestId);
 }
 
 function api_observers(requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var payloadJson = safeJsonStringify(listObserverEntries(), "api_observers");
   ackWithRequest("api_observers", [payloadJson], requestId);
 }
@@ -1366,13 +1402,13 @@ function emitMidiCc(controller, value, channel, contextName) {
 }
 
 function midi_cc(controller, value, channel, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var result = emitMidiCc(controller, value, channel, "midi_cc");
   ackWithRequest("midi_cc", [result.controller, result.value, result.channel], requestId);
 }
 
 function cc64(value, channel, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var result = emitMidiCc(64, value, channel, "cc64");
   ackWithRequest("cc64", [result.value, result.channel], requestId);
 }
@@ -1466,7 +1502,7 @@ function listTrackIndices(totalTracks, predicate, contextName) {
     } catch (err) {
       debug("Failed to inspect track " + i + " in " + contextName + ": " + err);
       ack("ack", "error", "track_inspect_failed", contextName, i);
-      break;
+      return null;
     }
   }
   return indices;
@@ -1499,37 +1535,44 @@ function add_midi_tracks(count, name) {
 
   for (var i = 0; i < targetCount; i += 1) {
     var before = getTotalTracksOrError("add_midi_tracks_before");
-    if (before === 0) break;
-    song.call("create_midi_track", -1);
+    if (before === 0) return;
+    try {
+      song.call("create_midi_track", -1);
+    } catch (errCreate) {
+      debug("Failed to create MIDI track " + i + ": " + errCreate);
+      ack("ack", "error", "add_midi_tracks_create_failed", i);
+      return;
+    }
     var after = getTotalTracksOrError("add_midi_tracks_after");
-    if (after === 0) break;
+    if (after === 0) return;
 
     var newIndex = after - 1;
     if (newIndex < before) {
       newIndex = before;
     }
 
-    renameTrack(newIndex, trackName);
+    if (!renameTrack(newIndex, trackName)) return;
     created += 1;
     ack("ack", "midi_track_created", newIndex, trackName);
   }
 
   var finalTotal = getTotalTracksOrError("add_midi_tracks_final");
+  if (finalTotal === 0) return;
   ack("ack", "add_midi_tracks", targetCount, trackName, created, finalTotal);
 }
 
-function getTotalTracksOrError(contextName) {
+function getTotalTracksOrError(contextName, requestId) {
   var total = 0;
   try {
     total = song.getcount("tracks");
   } catch (err) {
     debug("Unable to read track count in " + contextName + ": " + err);
-    ack("ack", "error", "track_count_failed", contextName);
+    ackWithRequest("error", ["track_count_failed", contextName], requestId);
     return 0;
   }
   if (total === 0) {
     debug("Track count is 0 in " + contextName + ". Device may not be attached to the Live set.");
-    ack("ack", "error", "not_in_live_set", contextName);
+    ackWithRequest("error", ["not_in_live_set", contextName], requestId);
   }
   return total;
 }
@@ -1553,22 +1596,29 @@ function add_audio_tracks(count, prefix) {
 
   for (var i = 0; i < targetCount; i += 1) {
     var before = getTotalTracksOrError("add_audio_tracks_before");
-    if (before === 0) break;
-    song.call("create_audio_track", -1);
+    if (before === 0) return;
+    try {
+      song.call("create_audio_track", -1);
+    } catch (errCreate) {
+      debug("Failed to create audio track " + i + ": " + errCreate);
+      ack("ack", "error", "add_audio_tracks_create_failed", i);
+      return;
+    }
     var after = getTotalTracksOrError("add_audio_tracks_after");
-    if (after === 0) break;
+    if (after === 0) return;
     var newIndex = after - 1;
     if (newIndex < before) {
       newIndex = before;
     }
 
     var trackName = namePrefix + " " + pad2(i + 1);
-    renameTrack(newIndex, trackName);
+    if (!renameTrack(newIndex, trackName)) return;
     created += 1;
     ack("ack", "audio_track_created", newIndex, trackName);
   }
 
   var finalTotal = getTotalTracksOrError("add_audio_tracks_final");
+  if (finalTotal === 0) return;
   ack("ack", "add_audio_tracks", targetCount, namePrefix, created, finalTotal);
 }
 
@@ -1587,6 +1637,7 @@ function delete_midi_tracks(count) {
   }
 
   var midiIndices = listTrackIndices(totalTracks, isMidiTrack, "delete_midi_tracks");
+  if (midiIndices === null) return;
   // Preserve track 0 as a stable default "do not delete" track.
   var deletableMidiIndices = midiIndices.filter(function (i) {
     return i > 0;
@@ -1612,11 +1663,12 @@ function delete_midi_tracks(count) {
     } catch (err) {
       debug("Failed to delete MIDI track " + index + ": " + err);
       ack("ack", "error", "midi_track_delete_failed", index);
-      break;
+      return;
     }
   }
 
   var finalTotal = getTotalTracksOrError("delete_midi_tracks_final");
+  if (finalTotal === 0) return;
   ack("ack", "delete_midi_tracks", targetCount, deleted, finalTotal);
 }
 
@@ -1695,7 +1747,7 @@ function parseNotesJson(notesJson, contextName) {
   }
 }
 
-function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue, index, contextName, integerValue) {
+function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue, index, contextName, integerValue, requestId) {
   var raw = note[fieldName];
   if (raw === undefined || raw === null || String(raw).length === 0) {
     return true;
@@ -1703,7 +1755,7 @@ function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue,
 
   var value = Number(raw);
   if (!(isFinite(value) && value >= minValue && value <= maxValue)) {
-    ack("ack", "error", contextName + "_invalid_" + fieldName, index, raw);
+    ackWithRequest("error", [contextName + "_invalid_" + fieldName, index, raw], requestId);
     return false;
   }
 
@@ -1711,7 +1763,7 @@ function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue,
   return true;
 }
 
-function normalizeNote(note, index, contextName) {
+function normalizeNote(note, index, contextName, requestId) {
   var pitch = Math.floor(Number(note.pitch));
   var startTime = Number(note.start_time);
   var duration = Number(note.duration);
@@ -1722,15 +1774,15 @@ function normalizeNote(note, index, contextName) {
   var mute = Number(note.mute) ? 1 : 0;
 
   if (!(pitch >= 0 && pitch <= 127)) {
-    ack("ack", "error", contextName + "_invalid_pitch", index, note.pitch);
+    ackWithRequest("error", [contextName + "_invalid_pitch", index, note.pitch], requestId);
     return null;
   }
   if (!(startTime >= 0)) {
-    ack("ack", "error", contextName + "_invalid_start_time", index, note.start_time);
+    ackWithRequest("error", [contextName + "_invalid_start_time", index, note.start_time], requestId);
     return null;
   }
   if (!(duration > 0)) {
-    ack("ack", "error", contextName + "_invalid_duration", index, note.duration);
+    ackWithRequest("error", [contextName + "_invalid_duration", index, note.duration], requestId);
     return null;
   }
   if (!(velocity >= 0 && velocity <= 127)) {
@@ -1745,23 +1797,23 @@ function normalizeNote(note, index, contextName) {
     mute: mute,
   };
 
-  if (!copyOptionalNoteNumber(note, normalized, "probability", 0, 1, index, contextName, false)) {
+  if (!copyOptionalNoteNumber(note, normalized, "probability", 0, 1, index, contextName, false, requestId)) {
     return null;
   }
-  if (!copyOptionalNoteNumber(note, normalized, "velocity_deviation", 0, 127, index, contextName, false)) {
+  if (!copyOptionalNoteNumber(note, normalized, "velocity_deviation", -127, 127, index, contextName, false, requestId)) {
     return null;
   }
-  if (!copyOptionalNoteNumber(note, normalized, "release_velocity", 0, 127, index, contextName, true)) {
+  if (!copyOptionalNoteNumber(note, normalized, "release_velocity", 0, 127, index, contextName, true, requestId)) {
     return null;
   }
 
   return normalized;
 }
 
-function buildNotesDict(notes, contextName) {
+function buildNotesDict(notes, contextName, requestId) {
   var normalized = [];
   for (var i = 0; i < notes.length; i += 1) {
-    var norm = normalizeNote(notes[i], i, contextName);
+    var norm = normalizeNote(notes[i], i, contextName, requestId);
     if (!norm) {
       return null;
     }
@@ -1772,31 +1824,38 @@ function buildNotesDict(notes, contextName) {
   // In Max JS, arrays of dictionaries often need a wrapper key to be parsed
   // into a Dict that LiveAPI accepts as a dictionary argument.
   var wrapperName = "live_bridge_notes_wrapper_" + new Date().getTime();
-  var wrapper = new Dict(wrapperName);
-  wrapper.setparse("wrapper", JSON.stringify(notesData));
-  var notesDict = wrapper.get("wrapper");
-  if (!notesDict) {
-    ack("ack", "error", contextName + "_notes_dict_build_failed");
+  var wrapper = null;
+  var notesDict = null;
+  try {
+    wrapper = new Dict(wrapperName);
+    wrapper.setparse("wrapper", JSON.stringify(notesData));
+    notesDict = wrapper.get("wrapper");
+    if (!notesDict) {
+      throw new Error("Dict wrapper did not return a notes dictionary");
+    }
+  } catch (err) {
+    debug("Failed to build notes Dict for " + contextName + ": " + err);
+    ackWithRequest("error", [contextName + "_notes_dict_build_failed"], requestId);
     clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
   return { wrapper: wrapper, dict: notesDict, notes: normalized };
 }
 
-function buildGenericDict(payload, contextName) {
+function buildGenericDict(payload, contextName, requestId) {
   var wrapperName = "live_bridge_dict_wrapper_" + new Date().getTime();
-  var wrapper = new Dict(wrapperName);
+  var wrapper = null;
+  var parsedDict = null;
   try {
+    wrapper = new Dict(wrapperName);
     wrapper.setparse("wrapper", JSON.stringify(payload));
+    parsedDict = wrapper.get("wrapper");
+    if (!parsedDict) {
+      throw new Error("Dict wrapper did not return a dictionary");
+    }
   } catch (err) {
     debug("Failed to build Dict for " + contextName + ": " + err);
-    ack("ack", "error", contextName + "_dict_build_failed");
-    clearBuiltPayload({ wrapper: wrapper });
-    return null;
-  }
-  var parsedDict = wrapper.get("wrapper");
-  if (!parsedDict) {
-    ack("ack", "error", contextName + "_dict_build_failed");
+    ackWithRequest("error", [contextName + "_dict_build_failed"], requestId);
     clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
@@ -2093,19 +2152,26 @@ function inspect_session_clip_notes(trackIndex, slotIndex) {
   );
 }
 
-function countMidiTracks(totalTracks) {
+function countMidiTracks(totalTracks, contextName, requestId) {
   var midiCount = 0;
   for (var i = 0; i < totalTracks; i += 1) {
-    var track = new LiveAPI(null, "live_set tracks " + i);
-    var hasMidiInput = Number(getScalar(track, "has_midi_input"));
-    if (hasMidiInput === 1) {
-      midiCount += 1;
+    try {
+      var track = new LiveAPI(null, "live_set tracks " + i);
+      var hasMidiInput = Number(getScalar(track, "has_midi_input"));
+      if (hasMidiInput === 1) {
+        midiCount += 1;
+      }
+    } catch (err) {
+      var midiContext = String(contextName || "count_midi_tracks");
+      debug("Failed to inspect MIDI track " + i + " in " + midiContext + ": " + err);
+      ackWithRequest("error", ["count_midi_tracks_failed", midiContext, i], requestId);
+      return null;
     }
   }
   return midiCount;
 }
 
-function countAudioTracks(totalTracks) {
+function countAudioTracks(totalTracks, contextName, requestId) {
   var audioCount = 0;
   for (var i = 0; i < totalTracks; i += 1) {
     try {
@@ -2115,9 +2181,10 @@ function countAudioTracks(totalTracks) {
         audioCount += 1;
       }
     } catch (err) {
-      debug("Failed to inspect audio track " + i + ": " + err);
-      ack("ack", "error", "count_audio_tracks_failed", i);
-      return audioCount;
+      var audioContext = String(contextName || "count_audio_tracks");
+      debug("Failed to inspect audio track " + i + " in " + audioContext + ": " + err);
+      ackWithRequest("error", ["count_audio_tracks_failed", audioContext, i], requestId);
+      return null;
     }
   }
   return audioCount;
@@ -2138,6 +2205,7 @@ function delete_audio_tracks(count) {
   }
 
   var audioIndices = listTrackIndices(totalTracks, isAudioOnlyTrack, "delete_audio_tracks");
+  if (audioIndices === null) return;
   if (audioIndices.length === 0) {
     debug("No audio tracks found to delete.");
     ack("ack", "error", "no_audio_tracks");
@@ -2155,24 +2223,29 @@ function delete_audio_tracks(count) {
     } catch (err) {
       debug("Failed to delete audio track " + trackIndex + ": " + err);
       ack("ack", "error", "delete_audio_track_failed", trackIndex);
+      return;
     }
   }
 
   var finalTotal = getTotalTracksOrError("delete_audio_tracks_final");
+  if (finalTotal === 0) return;
   ack("ack", "delete_audio_tracks", targetCount, deleted, finalTotal);
 }
 
 function status() {
   if (!ensureInitialized()) return;
   var totalTracks = getTotalTracksOrError("status");
+  if (totalTracks === 0) return;
   var returnTracks = 0;
   try {
     returnTracks = song.getcount("return_tracks");
   } catch (err) {
     debug("Unable to read return track count: " + err);
   }
-  var midiTracks = totalTracks > 0 ? countMidiTracks(totalTracks) : 0;
-  var audioTracks = totalTracks > 0 ? countAudioTracks(totalTracks) : 0;
+  var midiTracks = countMidiTracks(totalTracks, "status");
+  if (midiTracks === null) return;
+  var audioTracks = countAudioTracks(totalTracks, "status");
+  if (audioTracks === null) return;
   var id = song ? Number(song.id) : 0;
   ack("ack", "status", totalTracks, midiTracks, audioTracks, returnTracks, song.path, id);
 }
@@ -2190,7 +2263,8 @@ function ensure_midi_tracks(targetCount) {
     return;
   }
 
-  var currentMidiTracks = countMidiTracks(totalTracks);
+  var currentMidiTracks = countMidiTracks(totalTracks, "ensure_midi_tracks");
+  if (currentMidiTracks === null) return;
   var missing = target - currentMidiTracks;
   if (missing <= 0) {
     ack("ack", "ensure_midi_tracks", target, currentMidiTracks, 0, totalTracks);
@@ -2203,14 +2277,22 @@ function ensure_midi_tracks(targetCount) {
   ack("ack", "ensure_midi_tracks", target, currentMidiTracks, missing, totalTracks);
 }
 
-function ack() {
+function emitAck(args) {
   // Emit OSC-friendly messages via udpsend. We use a leading slash address.
   // Example: /ack tempo 120
-  var args = Array.prototype.slice.call(arguments);
   if (args.length === 0) return;
 
   var address = "/" + String(args[0]);
   var rest = args.slice(1);
   var message = [0, address].concat(rest);
   outlet.apply(this, message);
+}
+
+function ack() {
+  var args = Array.prototype.slice.call(arguments);
+  if (args[0] === "ack" && args[1] === "error") {
+    args.push(ERROR_CORRELATION_MARKER);
+    args.push("req:");
+  }
+  emitAck(args);
 }

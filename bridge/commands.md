@@ -5,6 +5,9 @@ This file is a quick reference for commands sent to the Max for Live bridge.
 
 Commands are OSC packets sent to `127.0.0.1:9000`. ACKs and observer events are
 OSC packets emitted from `127.0.0.1:9001` at address `/ack`.
+Current v3 error ACKs always end with the reserved request-ID correlation
+trailer `request_correlation req:<request_id>`, or
+`request_correlation req:` when the command had no request ID.
 
 ## Read Commands
 
@@ -141,7 +144,7 @@ Validation:
 - `velocity`: integer `0..127`; omitted or invalid values default to `100`
 - `mute`: truthy values become `1`, otherwise `0`
 - `probability`: number `0..1`
-- `velocity_deviation`: number `0..127`
+- `velocity_deviation`: number `-127..127`
 - `release_velocity`: integer `0..127`
 
 ## ACK Examples
@@ -153,7 +156,7 @@ Validation:
 /ack api_get live_set tempo 120 req-tempo
 /ack api_children live_set tracks [{"index":0,"id":1,"path":"live_set tracks 0"}] req-tracks
 /ack api_event obs-tempo {"observer_id":"obs-tempo","current_path":"live_set","property":"tempo","value":121.5}
-/ack error api_parameter_value_out_of_range "live_set tracks 0 devices 0 parameters 1" 2 0 1 req-param
+/ack error api_parameter_value_out_of_range "live_set tracks 0 devices 0 parameters 1" 2 0 1 request_correlation req:req-param
 ```
 
 For full ACK schemas, request ID behavior, LiveAPI constraints, and safety

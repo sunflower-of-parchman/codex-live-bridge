@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -12,6 +13,35 @@ from unittest import mock
 sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 
 import ableton_udp_bridge as bridge
+
+
+def _run_bridge_js(body: str) -> object:
+    source_path = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js")
+    harness = f"""
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync({json.dumps(str(source_path))}, "utf8");
+const context = {{
+  post: () => {{}},
+  outlet: () => {{}},
+  ack: () => {{}},
+  Dict: function Dict() {{}},
+  LiveAPI: function LiveAPI() {{}},
+}};
+vm.createContext(context);
+vm.runInContext(source, context);
+const result = (() => {{
+{body}
+}})();
+process.stdout.write(JSON.stringify(result));
+"""
+    completed = subprocess.run(
+        ["node", "-e", harness],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
 
 
 def _base_args() -> list[str]:
@@ -191,6 +221,58 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual(event.payload["value"], 121.5)
         self.assertEqual(event.payload["event_count"], 2)
         self.assertEqual(event.payload["dropped_events"], 1)
+
+    def test_error_ack_terminal_slot_preserves_details_and_optional_request_id(self) -> None:
+        without_request = bridge.parse_ack_event(
+            "/ack",
+            ["error", "api_example_failed", "path detail", 40, "request_correlation", "req:"],
+        )
+        with_request = bridge.parse_ack_event(
+            "/ack",
+            [
+                "error",
+                "api_example_failed",
+                "path detail",
+                40,
+                "request_correlation",
+                "req:req-error",
+            ],
+        )
+        legacy_without_slot = bridge.parse_ack_event(
+            "/ack",
+            ["error", "api_example_failed", "path detail", 40],
+        )
+        legacy_req_prefixed_detail = bridge.parse_ack_event(
+            "/ack",
+            ["error", "api_example_failed", "path detail", "req:Lead"],
+        )
+
+        self.assertIsNone(without_request.request_id)
+        self.assertEqual(without_request.payload["details"], ["path detail", 40])
+        self.assertEqual(with_request.request_id, "req-error")
+        self.assertEqual(with_request.payload["details"], ["path detail", 40])
+        self.assertIsNone(legacy_without_slot.request_id)
+        self.assertEqual(legacy_without_slot.payload["details"], ["path detail", 40])
+        self.assertIsNone(legacy_req_prefixed_detail.request_id)
+        self.assertEqual(legacy_req_prefixed_detail.payload["details"], ["path detail", "req:Lead"])
+
+        without_summary = bridge.summarize_ack(
+            "/ack",
+            ["error", "api_example_failed", "path detail", 40, "request_correlation", "req:"],
+        )
+        with_summary = bridge.summarize_ack(
+            "/ack",
+            [
+                "error",
+                "api_example_failed",
+                "path detail",
+                40,
+                "request_correlation",
+                "req:req-error",
+            ],
+        )
+        self.assertNotIn("req=", without_summary[1])
+        self.assertIn("req=req-error", with_summary[1])
 
     def test_js_note_normalizer_supports_live_12_note_fields(self) -> None:
         source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
@@ -407,6 +489,349 @@ class BridgeCliTests(unittest.TestCase):
 
         self.assertIn("Math.floor(note) !== note", function_source)
         self.assertNotIn("Math.floor(Number(noteValue))", function_source)
+
+    def test_js_note_schema_accepts_negative_velocity_deviation(self) -> None:
+        results = _run_bridge_js(
+            """
+const deviations = [-127, -64.5, 127, -128];
+return deviations.map((velocityDeviation) => context.normalizeNote(
+  {
+    pitch: 60,
+    start_time: 0,
+    duration: 1,
+    velocity: 100,
+    velocity_deviation: velocityDeviation,
+  },
+  0,
+  "test"
+) !== null);
+"""
+        )
+        self.assertEqual(results, [True, True, True, False])
+
+    def test_js_error_ack_always_emits_tagged_terminal_correlation_slot(self) -> None:
+        result = _run_bridge_js(
+            """
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+context.ackWithRequest("error", ["api_example_failed", "detail"], null);
+context.ackWithRequest("error", ["api_example_failed", "detail"], "req-error");
+context.ack("ack", "error", "legacy_failed", 40);
+return outputs;
+"""
+        )
+        self.assertEqual(
+            result,
+            [
+                [
+                    0,
+                    "/ack",
+                    "error",
+                    "api_example_failed",
+                    "detail",
+                    "request_correlation",
+                    "req:",
+                ],
+                [
+                    0,
+                    "/ack",
+                    "error",
+                    "api_example_failed",
+                    "detail",
+                    "request_correlation",
+                    "req:req-error",
+                ],
+                [0, "/ack", "error", "legacy_failed", 40, "request_correlation", "req:"],
+            ],
+        )
+
+    def test_js_request_aware_initialization_and_api_call_helpers_preserve_request_id(self) -> None:
+        result = _run_bridge_js(
+            """
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+context.initialized = false;
+context.song = null;
+context.init = () => {};
+context.api_ping("req-init");
+context.ackWithRequest = (eventName, args, requestId) => {
+  outputs.push([eventName, ...args, requestId ?? null]);
+};
+context.ensureInitialized = () => true;
+context.resolveApiOrError = () => ({
+  path: "live_set tracks 0 clip_slots 0 clip",
+  id: 8,
+  call: () => null,
+});
+context.getApiCapabilities = () => ({ hasFunctionsList: false });
+context.buildNotesDict = (_notes, _contextName, requestId) => {
+  context.ackWithRequest("error", ["api_call_add_new_notes_invalid_pitch"], requestId);
+  return null;
+};
+context.api_call(
+  "live_set tracks 0 clip_slots 0 clip",
+  "add_new_notes",
+  '[{"notes":[{"pitch":-1}]}]',
+  "req-call"
+);
+return outputs.filter((args) => args[1] === "/ack" || args[0] === "error");
+"""
+        )
+        self.assertEqual(
+            result[0],
+            [
+                0,
+                "/ack",
+                "error",
+                "not_initialized",
+                "request_correlation",
+                "req:req-init",
+            ],
+        )
+        self.assertEqual(
+            result[1],
+            ["error", "api_call_add_new_notes_invalid_pitch", "req-call"],
+        )
+
+    def test_js_dict_builder_exceptions_emit_correlated_errors(self) -> None:
+        result = _run_bridge_js(
+            """
+const acks = [];
+context.ackWithRequest = (eventName, args, requestId) => {
+  acks.push([eventName, ...args, requestId ?? null]);
+};
+context.Dict = function DictWithSetparseFailure() {
+  return {
+    setparse: () => { throw new Error("setparse failed"); },
+    get: () => ({}),
+    clear: () => {},
+  };
+};
+context.buildNotesDict(
+  [{ pitch: 60, start_time: 0, duration: 1, velocity: 100 }],
+  "api_call_add_new_notes",
+  "req-notes"
+);
+context.Dict = function DictWithGetFailure() {
+  return {
+    setparse: () => {},
+    get: () => { throw new Error("get failed"); },
+    clear: () => {},
+  };
+};
+context.buildGenericDict(
+  { note_ids: [1] },
+  "api_call_apply_note_modifications",
+  "req-generic"
+);
+return acks;
+"""
+        )
+        self.assertEqual(
+            result,
+            [
+                ["error", "api_call_add_new_notes_notes_dict_build_failed", "req-notes"],
+                [
+                    "error",
+                    "api_call_apply_note_modifications_dict_build_failed",
+                    "req-generic",
+                ],
+            ],
+        )
+
+    def test_js_request_aware_status_helpers_stop_after_correlated_errors(self) -> None:
+        result = _run_bridge_js(
+            """
+function runCase(song, LiveAPI, call) {
+  const acks = [];
+  context.ensureInitialized = () => true;
+  context.song = song;
+  context.LiveAPI = LiveAPI;
+  context.ackWithRequest = (eventName, args, requestId) => {
+    acks.push([eventName, ...args, requestId ?? null]);
+  };
+  call();
+  return acks;
+}
+return {
+  sessionTrackCount: runCase(
+    { path: "live_set", id: 1, getcount: () => { throw new Error("count failed"); } },
+    function LiveAPI() {},
+    () => context.api_session_context("req-session-count")
+  ),
+  deviceTrackCount: runCase(
+    { path: "live_set", id: 1, getcount: () => { throw new Error("count failed"); } },
+    function LiveAPI() {},
+    () => context.api_device_list("all", "req-device-count")
+  ),
+  sessionMidiCount: runCase(
+    { path: "live_set", id: 1, getcount: () => 1 },
+    function LiveAPI() { throw new Error("midi inspect failed"); },
+    () => context.api_session_context("req-session-midi")
+  ),
+  sessionAudioCount: runCase(
+    { path: "live_set", id: 1, getcount: () => 1 },
+    function LiveAPI() {
+      return {
+        get: (property) => {
+          if (property === "has_midi_input") return 1;
+          throw new Error("audio inspect failed");
+        },
+      };
+    },
+    () => context.api_session_context("req-session-audio")
+  ),
+};
+"""
+        )
+        self.assertEqual(
+            result["sessionTrackCount"],
+            [["error", "track_count_failed", "session_context", "req-session-count"]],
+        )
+        self.assertEqual(
+            result["deviceTrackCount"],
+            [["error", "track_count_failed", "device_list", "req-device-count"]],
+        )
+        self.assertEqual(
+            result["sessionMidiCount"],
+            [["error", "count_midi_tracks_failed", "session_context", 0, "req-session-midi"]],
+        )
+        self.assertEqual(
+            result["sessionAudioCount"],
+            [["error", "count_audio_tracks_failed", "session_context", 0, "req-session-audio"]],
+        )
+
+    def test_js_track_mutations_stop_after_count_or_inspection_failures(self) -> None:
+        result = _run_bridge_js(
+            """
+function runWithTrackCounts(counts, call, options = {}) {
+  const events = [];
+  let index = 0;
+  context.ensureInitialized = () => true;
+  context.song = { call: options.songCall || (() => {}) };
+  context.renameTrack = options.renameTrack || (() => true);
+  context.getTotalTracksOrError = () => counts[index++];
+  context.ack = (_address, eventName, ...details) => events.push([eventName, ...details]);
+  call();
+  return events;
+}
+const inspectionEvents = [];
+context.LiveAPI = function LiveAPI() { throw new Error("inspect failed"); };
+context.ack = (_address, eventName) => inspectionEvents.push(eventName);
+const inspectionResult = context.listTrackIndices(2, () => true, "delete_midi_tracks");
+return {
+  addMidiFinalCount: runWithTrackCounts([1, 1, 2, 0], () => context.add_midi_tracks(1, "MIDI")),
+  addAudioFinalCount: runWithTrackCounts([1, 1, 2, 0], () => context.add_audio_tracks(1, "Audio")),
+  deleteMidiFinalCount: (() => {
+    context.listTrackIndices = () => [1];
+    return runWithTrackCounts([2, 0], () => context.delete_midi_tracks(1));
+  })(),
+  deleteAudioFinalCount: (() => {
+    context.listTrackIndices = () => [1];
+    return runWithTrackCounts([2, 0], () => context.delete_audio_tracks(1));
+  })(),
+  addMidiCreate: runWithTrackCounts(
+    [1, 1],
+    () => context.add_midi_tracks(1, "MIDI"),
+    { songCall: () => { throw new Error("create failed"); } }
+  ),
+  addAudioCreate: runWithTrackCounts(
+    [1, 1],
+    () => context.add_audio_tracks(1, "Audio"),
+    { songCall: () => { throw new Error("create failed"); } }
+  ),
+  addMidiRename: runWithTrackCounts(
+    [1, 1, 2],
+    () => context.add_midi_tracks(1, "MIDI"),
+    {
+      renameTrack: () => {
+        context.ack("ack", "error", "rename_track");
+        return false;
+      },
+    }
+  ),
+  addAudioRename: runWithTrackCounts(
+    [1, 1, 2],
+    () => context.add_audio_tracks(1, "Audio"),
+    {
+      renameTrack: () => {
+        context.ack("ack", "error", "rename_track");
+        return false;
+      },
+    }
+  ),
+  deleteMidiFailure: (() => {
+    context.listTrackIndices = () => [1];
+    return runWithTrackCounts(
+      [2],
+      () => context.delete_midi_tracks(1),
+      { songCall: () => { throw new Error("delete failed"); } }
+    );
+  })(),
+  deleteAudioFailure: (() => {
+    context.listTrackIndices = () => [1];
+    return runWithTrackCounts(
+      [2],
+      () => context.delete_audio_tracks(1),
+      { songCall: () => { throw new Error("delete failed"); } }
+    );
+  })(),
+  inspectionResult,
+  inspectionEvents,
+};
+"""
+        )
+        for key, completion_event in [
+            ("addMidiFinalCount", "add_midi_tracks"),
+            ("addAudioFinalCount", "add_audio_tracks"),
+            ("deleteMidiFinalCount", "delete_midi_tracks"),
+            ("deleteAudioFinalCount", "delete_audio_tracks"),
+            ("addMidiCreate", "add_midi_tracks"),
+            ("addAudioCreate", "add_audio_tracks"),
+            ("addMidiRename", "add_midi_tracks"),
+            ("addAudioRename", "add_audio_tracks"),
+            ("deleteMidiFailure", "delete_midi_tracks"),
+            ("deleteAudioFailure", "delete_audio_tracks"),
+        ]:
+            self.assertNotIn(completion_event, [event[0] for event in result[key]])
+        self.assertEqual(result["addMidiCreate"], [["error", "add_midi_tracks_create_failed", 0]])
+        self.assertEqual(result["addAudioCreate"], [["error", "add_audio_tracks_create_failed", 0]])
+        self.assertEqual(result["addMidiRename"], [["error", "rename_track"]])
+        self.assertEqual(result["addAudioRename"], [["error", "rename_track"]])
+        self.assertEqual(result["deleteMidiFailure"], [["error", "midi_track_delete_failed", 1]])
+        self.assertEqual(result["deleteAudioFailure"], [["error", "delete_audio_track_failed", 1]])
+        self.assertIsNone(result["inspectionResult"])
+        self.assertEqual(result["inspectionEvents"], ["error"])
+
+    def test_js_drum_chain_note_validates_readback_and_applied_write(self) -> None:
+        result = _run_bridge_js(
+            """
+const cases = [
+  { requested: 0, payload: { in_note: null } },
+  { requested: 36, payload: { errors: { in_note: "read_failed" } } },
+  { requested: -1, payload: { in_note: 40 } },
+  { requested: 36, payload: { in_note: 36, out_note: 60, choke_group: 0, name: "Chain" } },
+];
+return cases.map((testCase) => {
+  const acks = [];
+  const fakeApi = { path: "live_set tracks 0 devices 0 chains 0", id: 9, set: () => {} };
+  context.ensureInitialized = () => true;
+  context.resolveApiOrError = () => fakeApi;
+  context.readApiPropertyBag = () => testCase.payload;
+  context.ackWithRequest = (eventName, args, requestId) => {
+    acks.push({ eventName, args, requestId: requestId ?? null });
+  };
+  context.api_drum_chain_in_note(fakeApi.path, testCase.requested, "req-note");
+  return acks[0];
+});
+"""
+        )
+
+        self.assertEqual(result[0]["args"][0], "api_drum_chain_in_note_readback_failed")
+        self.assertEqual(result[1]["args"][0], "api_drum_chain_in_note_readback_failed")
+        self.assertEqual(result[2]["args"][0], "api_drum_chain_in_note_write_not_applied")
+        self.assertEqual(result[2]["args"][-2:], [-1, 40])
+        self.assertEqual(result[3]["eventName"], "api_drum_chain_in_note")
 
     def test_js_normalizes_live_api_paths_before_deriving_child_paths(self) -> None:
         js_source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()

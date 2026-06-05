@@ -1062,6 +1062,21 @@ def _optional_request_id(args: Sequence[OscArg], index: int) -> str | None:
     return str(args[index])
 
 
+def _parse_error_ack(args: Sequence[OscArg]) -> tuple[str | None, list[OscArg]]:
+    if len(args) < 3:
+        return None, []
+    marker = args[-2] if len(args) >= 4 else None
+    correlation = args[-1]
+    if (
+        marker == "request_correlation"
+        and isinstance(correlation, str)
+        and correlation.startswith("req:")
+    ):
+        request_id = correlation[4:] or None
+        return request_id, list(args[2:-2])
+    return None, list(args[2:])
+
+
 def parse_ack_event(address: str, args: Sequence[OscArg]) -> AckEvent:
     event = str(args[0]) if args else None
     request_id: str | None = None
@@ -1184,8 +1199,8 @@ def parse_ack_event(address: str, args: Sequence[OscArg]) -> AckEvent:
         if len(args) >= 7:
             payload["timestamp_ms"] = args[6]
     elif event == "error" and len(args) >= 2:
-        request_id = _optional_request_id(args, len(args) - 1) if len(args) >= 3 else None
-        payload = {"code": args[1], "details": list(args[2:])}
+        request_id, details = _parse_error_ack(args)
+        payload = {"code": args[1], "details": details}
 
     return AckEvent(
         address=address,
@@ -1377,8 +1392,8 @@ def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
         return f"api_observe_event {observer_id} {path} {property_name} -> {payload_text}{suffix}"
 
     if event == "error" and len(args) >= 2 and str(args[1]).startswith("api_"):
-        request_id = args[-1] if len(args) >= 3 else None
-        detail = " ".join(str(a) for a in args[1:])
+        request_id, details = _parse_error_ack(args)
+        detail = " ".join(str(a) for a in [args[1], *details])
         return f"api_error {detail}{_req_suffix(request_id)}"
 
     return None
