@@ -1239,6 +1239,39 @@ function utf8ByteLength(value) {
   return length;
 }
 
+function truncateUtf8ToByteLength(value, maxBytes) {
+  var text = String(value);
+  var bounded = "";
+  var length = 0;
+  for (var i = 0; i < text.length; i += 1) {
+    var code = text.charCodeAt(i);
+    var chunk = text.charAt(i);
+    var chunkLength = 0;
+    if (code <= 0x7f) {
+      chunkLength = 1;
+    } else if (code <= 0x7ff) {
+      chunkLength = 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      var next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        chunk += text.charAt(i + 1);
+        chunkLength = 4;
+        i += 1;
+      } else {
+        chunkLength = 3;
+      }
+    } else {
+      chunkLength = 3;
+    }
+    if (length + chunkLength > maxBytes) {
+      break;
+    }
+    bounded += chunk;
+    length += chunkLength;
+  }
+  return bounded;
+}
+
 function oscStringEncodedByteLength(value) {
   var lengthWithNull = utf8ByteLength(value) + 1;
   var remainder = lengthWithNull % 4;
@@ -1676,11 +1709,12 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     sessionClipInspectionError("validation_failed", ["request_id_required"], requestText);
     return;
   }
-  if (utf8ByteLength(requestText) > 128) {
+  var requestByteLength = utf8ByteLength(requestText);
+  if (requestByteLength > 128) {
     sessionClipInspectionError(
       "validation_failed",
-      ["request_id_too_long", utf8ByteLength(requestText)],
-      requestText
+      ["request_id_too_long", requestByteLength],
+      truncateUtf8ToByteLength(requestText, 128)
     );
     return;
   }
@@ -1799,7 +1833,8 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
       requestText
     );
     if (!clipValue.ok) return;
-    clipData[outputProperty] = clipValue.value;
+    clipData[outputProperty] =
+      outputProperty === "looping" ? !!Number(clipValue.value) : clipValue.value;
   }
 
   var deviceCount = 0;

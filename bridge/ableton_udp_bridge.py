@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import select
 import socket
 import struct
@@ -133,6 +134,70 @@ class SessionClipInspectionAssembler:
     PRODUCER_VERSION = "3.1.0"
     PACKET_BUDGET_BYTES = 4096
     _FRAGMENT_KINDS = {"complete", "context", "device_page", "note_page"}
+    _ROOT_KEYS = {
+        "schema",
+        "schema_version",
+        "producer_version",
+        "inspection_id",
+        "correlation",
+        "snapshot",
+        "transfer",
+        "completeness",
+        "data",
+    }
+    _CORRELATION_KEYS = {"request_id", "track_index", "slot_index"}
+    _SNAPSHOT_KEYS = {
+        "started_ms",
+        "completed_ms",
+        "atomic",
+        "consistent",
+    }
+    _TRANSFER_KEYS = {
+        "fragment_index",
+        "fragment_count",
+        "fragment_kind",
+        "is_last",
+        "packet_budget_bytes",
+    }
+    _COMPLETENESS_KEYS = {
+        "track",
+        "clip",
+        "devices",
+        "notes",
+        "missing_fields",
+    }
+    _CONTEXT_DATA_KEYS = {"context", "track", "clip", "summary"}
+    _TRACK_KEYS = {"index", "path", "id", "name"}
+    _CLIP_KEYS = {
+        "slot_index",
+        "path",
+        "id",
+        "name",
+        "start_marker",
+        "end_marker",
+        "live_length",
+        "looping",
+        "loop_start",
+        "loop_end",
+    }
+    _SUMMARY_KEYS = {"note_count", "pitch_min", "pitch_max"}
+    _DEVICE_PAGE_KEYS = {
+        "device_offset",
+        "device_count",
+        "device_total",
+        "devices",
+    }
+    _NOTE_PAGE_KEYS = {"note_offset", "note_count", "note_total", "notes"}
+    _DEVICE_REQUIRED_KEYS = {"index", "path", "id", "name"}
+    _DEVICE_ALLOWED_KEYS = _DEVICE_REQUIRED_KEYS | {"class_name", "type"}
+    _NOTE_REQUIRED_KEYS = {"pitch", "start_time", "duration", "velocity"}
+    _NOTE_ALLOWED_KEYS = _NOTE_REQUIRED_KEYS | {
+        "note_id",
+        "mute",
+        "probability",
+        "velocity_deviation",
+        "release_velocity",
+    }
 
     def __init__(self) -> None:
         self._states: dict[tuple[str, str], dict[str, object]] = {}
@@ -156,10 +221,101 @@ class SessionClipInspectionAssembler:
         return value
 
     @staticmethod
+    def _require_int_range(
+        value: object,
+        label: str,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < minimum
+            or value > maximum
+        ):
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label}"
+            )
+        return value
+
+    @staticmethod
+    def _require_finite_number(
+        value: object,
+        label: str,
+        *,
+        minimum: float | None = None,
+        maximum: float | None = None,
+        strictly_positive: bool = False,
+    ) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label}"
+            )
+        numeric = float(value)
+        if strictly_positive and numeric <= 0:
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label}"
+            )
+        if minimum is not None and numeric < minimum:
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label}"
+            )
+        if maximum is not None and numeric > maximum:
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label}"
+            )
+        return numeric
+
+    @staticmethod
+    def _require_non_empty_string(value: object, label: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label}"
+            )
+        return value
+
+    @staticmethod
+    def _require_exact_keys(
+        value: dict[str, object],
+        expected: set[str],
+        label: str,
+    ) -> None:
+        if set(value) != expected:
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label} keys"
+            )
+
+    @staticmethod
+    def _require_allowed_keys(
+        value: dict[str, object],
+        *,
+        required: set[str],
+        allowed: set[str],
+        label: str,
+    ) -> None:
+        keys = set(value)
+        if not required.issubset(keys) or not keys.issubset(allowed):
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label} keys"
+            )
+
+    @staticmethod
+    def _copy_fields(
+        value: dict[str, object],
+        fields: Sequence[str],
+    ) -> dict[str, object]:
+        return {field: value[field] for field in fields if field in value}
+
+    @staticmethod
     def _canonical(value: object) -> str:
         try:
             return json.dumps(
                 value,
+                allow_nan=False,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -169,6 +325,162 @@ class SessionClipInspectionAssembler:
                 "malformed fragment: not JSON serializable"
             ) from exc
 
+    def _validate_track(
+        self,
+        track: object,
+        correlation: dict[str, object],
+    ) -> dict[str, object]:
+        value = self._require_dict(track, "track")
+        self._require_exact_keys(value, self._TRACK_KEYS, "track")
+        track_index = self._require_non_negative_int(value["index"], "track.index")
+        self._require_non_empty_string(value["path"], "track.path")
+        self._require_non_negative_int(value["id"], "track.id")
+        self._require_non_empty_string(value["name"], "track.name")
+        if track_index != correlation["track_index"]:
+            raise SessionClipInspectionAssemblyError("mixed metadata")
+        return value
+
+    def _validate_clip(
+        self,
+        clip: object,
+        correlation: dict[str, object],
+    ) -> dict[str, object]:
+        value = self._require_dict(clip, "clip")
+        self._require_exact_keys(value, self._CLIP_KEYS, "clip")
+        slot_index = self._require_non_negative_int(
+            value["slot_index"], "clip.slot_index"
+        )
+        self._require_non_empty_string(value["path"], "clip.path")
+        self._require_non_negative_int(value["id"], "clip.id")
+        self._require_non_empty_string(value["name"], "clip.name")
+        start_marker = self._require_finite_number(
+            value["start_marker"], "clip.start_marker", minimum=0
+        )
+        end_marker = self._require_finite_number(
+            value["end_marker"], "clip.end_marker", minimum=0
+        )
+        self._require_finite_number(
+            value["live_length"], "clip.live_length", minimum=0
+        )
+        if not isinstance(value["looping"], bool):
+            raise SessionClipInspectionAssemblyError(
+                "malformed fragment: clip.looping"
+            )
+        loop_start = self._require_finite_number(
+            value["loop_start"], "clip.loop_start", minimum=0
+        )
+        loop_end = self._require_finite_number(
+            value["loop_end"], "clip.loop_end", minimum=0
+        )
+        if end_marker < start_marker or loop_end < loop_start:
+            raise SessionClipInspectionAssemblyError(
+                "malformed fragment: clip ranges"
+            )
+        if slot_index != correlation["slot_index"]:
+            raise SessionClipInspectionAssemblyError("mixed metadata")
+        return value
+
+    def _validate_summary(self, summary: object) -> dict[str, object]:
+        value = self._require_dict(summary, "summary")
+        self._require_exact_keys(value, self._SUMMARY_KEYS, "summary")
+        note_count = self._require_non_negative_int(
+            value["note_count"], "summary.note_count"
+        )
+        pitch_min = value["pitch_min"]
+        pitch_max = value["pitch_max"]
+        if note_count == 0:
+            if pitch_min is not None or pitch_max is not None:
+                raise SessionClipInspectionAssemblyError(
+                    "malformed fragment: summary pitches"
+                )
+        else:
+            minimum = self._require_int_range(
+                pitch_min, "summary.pitch_min", 0, 127
+            )
+            maximum = self._require_int_range(
+                pitch_max, "summary.pitch_max", 0, 127
+            )
+            if minimum > maximum:
+                raise SessionClipInspectionAssemblyError(
+                    "malformed fragment: summary pitches"
+                )
+        return value
+
+    def _validate_context_data(
+        self,
+        data: dict[str, object],
+        correlation: dict[str, object],
+    ) -> None:
+        if data["context"] != "session":
+            raise SessionClipInspectionAssemblyError(
+                "malformed fragment: context"
+            )
+        self._validate_track(data["track"], correlation)
+        self._validate_clip(data["clip"], correlation)
+        self._validate_summary(data["summary"])
+
+    def _validate_device(self, device: object, expected_index: int) -> None:
+        value = self._require_dict(device, "device")
+        self._require_allowed_keys(
+            value,
+            required=self._DEVICE_REQUIRED_KEYS,
+            allowed=self._DEVICE_ALLOWED_KEYS,
+            label="device",
+        )
+        index = self._require_non_negative_int(value["index"], "device.index")
+        if index != expected_index:
+            raise SessionClipInspectionAssemblyError(
+                "noncontiguous device indexes"
+            )
+        self._require_non_empty_string(value["path"], "device.path")
+        self._require_non_negative_int(value["id"], "device.id")
+        self._require_non_empty_string(value["name"], "device.name")
+        if "class_name" in value:
+            self._require_non_empty_string(
+                value["class_name"], "device.class_name"
+            )
+        if "type" in value:
+            self._require_non_negative_int(value["type"], "device.type")
+
+    def _validate_note(self, note: object) -> None:
+        value = self._require_dict(note, "note")
+        self._require_allowed_keys(
+            value,
+            required=self._NOTE_REQUIRED_KEYS,
+            allowed=self._NOTE_ALLOWED_KEYS,
+            label="note",
+        )
+        self._require_int_range(value["pitch"], "note.pitch", 0, 127)
+        self._require_finite_number(
+            value["start_time"], "note.start_time", minimum=0
+        )
+        self._require_finite_number(
+            value["duration"], "note.duration", strictly_positive=True
+        )
+        self._require_int_range(value["velocity"], "note.velocity", 0, 127)
+        if "note_id" in value:
+            self._require_non_negative_int(value["note_id"], "note.note_id")
+        if "mute" in value:
+            self._require_int_range(value["mute"], "note.mute", 0, 1)
+        if "probability" in value:
+            self._require_finite_number(
+                value["probability"],
+                "note.probability",
+                minimum=0,
+                maximum=1,
+            )
+        if "velocity_deviation" in value:
+            self._require_finite_number(
+                value["velocity_deviation"],
+                "note.velocity_deviation",
+                minimum=-127,
+                maximum=127,
+            )
+        if "release_velocity" in value:
+            self._require_int_range(
+                value["release_velocity"], "note.release_velocity", 0, 127
+            )
+
     def _validate_page(
         self,
         data: dict[str, object],
@@ -177,6 +489,7 @@ class SessionClipInspectionAssembler:
         count_field: str,
         total_field: str,
         items_field: str,
+        item_kind: str,
     ) -> None:
         offset = self._require_non_negative_int(data.get(offset_field), offset_field)
         count = self._require_non_negative_int(data.get(count_field), count_field)
@@ -184,6 +497,11 @@ class SessionClipInspectionAssembler:
         items = self._require_list(data.get(items_field), items_field)
         if count != len(items) or offset + count > total:
             raise SessionClipInspectionAssemblyError("inconsistent counts")
+        for item_index, item in enumerate(items):
+            if item_kind == "device":
+                self._validate_device(item, offset + item_index)
+            else:
+                self._validate_note(item)
 
     def _validate_fragment(
         self,
@@ -198,35 +516,64 @@ class SessionClipInspectionAssembler:
         str,
     ]:
         value = self._require_dict(fragment, "root")
+        self._require_exact_keys(value, self._ROOT_KEYS, "root")
         if value.get("schema") != self.SCHEMA:
             raise SessionClipInspectionAssemblyError("malformed fragment: schema")
-        if value.get("schema_version") != self.SCHEMA_VERSION:
+        schema_version = value.get("schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != self.SCHEMA_VERSION
+        ):
             raise SessionClipInspectionAssemblyError("malformed fragment: schema_version")
         if value.get("producer_version") != self.PRODUCER_VERSION:
             raise SessionClipInspectionAssemblyError("malformed fragment: producer_version")
 
         inspection_id = value.get("inspection_id")
-        if not isinstance(inspection_id, str) or not inspection_id:
-            raise SessionClipInspectionAssemblyError("malformed fragment: inspection_id")
+        self._require_non_empty_string(inspection_id, "inspection_id")
+        assert isinstance(inspection_id, str)
 
         correlation = self._require_dict(value.get("correlation"), "correlation")
+        self._require_exact_keys(
+            correlation, self._CORRELATION_KEYS, "correlation"
+        )
         fragment_request_id = correlation.get("request_id")
         if not isinstance(fragment_request_id, str) or not fragment_request_id:
             raise SessionClipInspectionAssemblyError("malformed fragment: request_id")
-        if len(fragment_request_id.encode("utf-8")) > 128:
+        try:
+            request_id_bytes = fragment_request_id.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise SessionClipInspectionAssemblyError(
+                "malformed fragment: request_id"
+            ) from exc
+        if len(request_id_bytes) > 128:
             raise SessionClipInspectionAssemblyError("malformed fragment: request_id")
         if request_id is not None and fragment_request_id != request_id:
             raise SessionClipInspectionAssemblyError("mixed metadata")
-        self._require_non_negative_int(correlation.get("track_index"), "track_index")
-        self._require_non_negative_int(correlation.get("slot_index"), "slot_index")
+        self._require_non_negative_int(
+            correlation.get("track_index"), "track_index"
+        )
+        self._require_non_negative_int(
+            correlation.get("slot_index"), "slot_index"
+        )
 
         snapshot = self._require_dict(value.get("snapshot"), "snapshot")
-        self._require_non_negative_int(snapshot.get("started_ms"), "started_ms")
-        self._require_non_negative_int(snapshot.get("completed_ms"), "completed_ms")
+        self._require_exact_keys(snapshot, self._SNAPSHOT_KEYS, "snapshot")
+        started_ms = self._require_non_negative_int(
+            snapshot.get("started_ms"), "started_ms"
+        )
+        completed_ms = self._require_non_negative_int(
+            snapshot.get("completed_ms"), "completed_ms"
+        )
+        if completed_ms < started_ms:
+            raise SessionClipInspectionAssemblyError(
+                "malformed fragment: snapshot range"
+            )
         if snapshot.get("atomic") is not False or snapshot.get("consistent") is not True:
             raise SessionClipInspectionAssemblyError("malformed fragment: snapshot")
 
         transfer = self._require_dict(value.get("transfer"), "transfer")
+        self._require_exact_keys(transfer, self._TRANSFER_KEYS, "transfer")
         fragment_index = self._require_non_negative_int(
             transfer.get("fragment_index"), "fragment_index"
         )
@@ -238,12 +585,24 @@ class SessionClipInspectionAssembler:
         fragment_kind = transfer.get("fragment_kind")
         if fragment_kind not in self._FRAGMENT_KINDS:
             raise SessionClipInspectionAssemblyError("malformed fragment: fragment_kind")
+        if not isinstance(transfer.get("is_last"), bool):
+            raise SessionClipInspectionAssemblyError(
+                "malformed fragment: is_last"
+            )
         if transfer.get("is_last") is not (fragment_index == fragment_count - 1):
             raise SessionClipInspectionAssemblyError("mixed transfer metadata")
-        if transfer.get("packet_budget_bytes") != self.PACKET_BUDGET_BYTES:
+        packet_budget_bytes = transfer.get("packet_budget_bytes")
+        if (
+            isinstance(packet_budget_bytes, bool)
+            or not isinstance(packet_budget_bytes, int)
+            or packet_budget_bytes != self.PACKET_BUDGET_BYTES
+        ):
             raise SessionClipInspectionAssemblyError("mixed transfer metadata")
 
         completeness = self._require_dict(value.get("completeness"), "completeness")
+        self._require_exact_keys(
+            completeness, self._COMPLETENESS_KEYS, "completeness"
+        )
         for field in ("track", "clip", "devices", "notes"):
             if completeness.get(field) != "complete":
                 raise SessionClipInspectionAssemblyError("malformed fragment: completeness")
@@ -254,17 +613,21 @@ class SessionClipInspectionAssembler:
         if fragment_kind == "complete":
             if fragment_count != 1 or fragment_index != 0:
                 raise SessionClipInspectionAssemblyError("mixed transfer metadata")
-            if data.get("context") != "session":
-                raise SessionClipInspectionAssemblyError("malformed fragment: context")
-            self._require_dict(data.get("track"), "track")
-            self._require_dict(data.get("clip"), "clip")
-            self._require_dict(data.get("summary"), "summary")
+            self._require_exact_keys(
+                data,
+                self._CONTEXT_DATA_KEYS
+                | self._DEVICE_PAGE_KEYS
+                | self._NOTE_PAGE_KEYS,
+                "complete data",
+            )
+            self._validate_context_data(data, correlation)
             self._validate_page(
                 data,
                 offset_field="device_offset",
                 count_field="device_count",
                 total_field="device_total",
                 items_field="devices",
+                item_kind="device",
             )
             self._validate_page(
                 data,
@@ -272,30 +635,48 @@ class SessionClipInspectionAssembler:
                 count_field="note_count",
                 total_field="note_total",
                 items_field="notes",
+                item_kind="note",
             )
             if data.get("device_offset") != 0 or data.get("note_offset") != 0:
                 raise SessionClipInspectionAssemblyError("noncontiguous page offsets")
         elif fragment_kind == "context":
-            if data.get("context") != "session":
-                raise SessionClipInspectionAssemblyError("malformed fragment: context")
-            self._require_dict(data.get("track"), "track")
-            self._require_dict(data.get("clip"), "clip")
-            self._require_dict(data.get("summary"), "summary")
+            if fragment_index != 0:
+                raise SessionClipInspectionAssemblyError(
+                    "mixed transfer metadata"
+                )
+            self._require_exact_keys(
+                data, self._CONTEXT_DATA_KEYS, "context data"
+            )
+            self._validate_context_data(data, correlation)
         elif fragment_kind == "device_page":
+            if fragment_index == 0:
+                raise SessionClipInspectionAssemblyError(
+                    "mixed transfer metadata"
+                )
+            self._require_exact_keys(
+                data, self._DEVICE_PAGE_KEYS, "device page"
+            )
             self._validate_page(
                 data,
                 offset_field="device_offset",
                 count_field="device_count",
                 total_field="device_total",
                 items_field="devices",
+                item_kind="device",
             )
         elif fragment_kind == "note_page":
+            if fragment_index == 0:
+                raise SessionClipInspectionAssemblyError(
+                    "mixed transfer metadata"
+                )
+            self._require_exact_keys(data, self._NOTE_PAGE_KEYS, "note page")
             self._validate_page(
                 data,
                 offset_field="note_offset",
                 count_field="note_count",
                 total_field="note_total",
                 items_field="notes",
+                item_kind="note",
             )
 
         metadata = {
@@ -473,25 +854,89 @@ class SessionClipInspectionAssembler:
         summary = self._require_dict(context_data["summary"], "summary")
         if summary.get("note_count") != len(notes):
             raise SessionClipInspectionAssemblyError("inconsistent counts")
+        note_pitches = [
+            self._require_dict(note, "note")["pitch"] for note in notes
+        ]
+        expected_pitch_min = min(note_pitches) if note_pitches else None
+        expected_pitch_max = max(note_pitches) if note_pitches else None
+        if (
+            summary.get("pitch_min") != expected_pitch_min
+            or summary.get("pitch_max") != expected_pitch_max
+        ):
+            raise SessionClipInspectionAssemblyError("inconsistent summary")
 
         correlation = self._require_dict(first["correlation"], "correlation")
         snapshot = self._require_dict(first["snapshot"], "snapshot")
         completeness = self._require_dict(first["completeness"], "completeness")
         fragment_count = int(state["fragment_count"])
+        track = self._require_dict(context_data["track"], "track")
+        clip = self._require_dict(context_data["clip"], "clip")
+        device_values = [
+            self._require_dict(device, "device") for device in devices
+        ]
+        note_values = [self._require_dict(note, "note") for note in notes]
         return {
             "schema": first["schema"],
             "schema_version": first["schema_version"],
             "producer_version": first["producer_version"],
             "inspection_id": key[1],
-            "correlation": correlation,
-            "snapshot": snapshot,
-            "completeness": completeness,
+            "correlation": self._copy_fields(
+                correlation,
+                ("request_id", "track_index", "slot_index"),
+            ),
+            "snapshot": self._copy_fields(
+                snapshot,
+                ("started_ms", "completed_ms", "atomic", "consistent"),
+            ),
+            "completeness": self._copy_fields(
+                completeness,
+                ("track", "clip", "devices", "notes", "missing_fields"),
+            ),
             "context": context_data["context"],
-            "track": context_data["track"],
-            "clip": context_data["clip"],
-            "summary": summary,
-            "devices": devices,
-            "notes": notes,
+            "track": self._copy_fields(track, ("index", "path", "id", "name")),
+            "clip": self._copy_fields(
+                clip,
+                (
+                    "slot_index",
+                    "path",
+                    "id",
+                    "name",
+                    "start_marker",
+                    "end_marker",
+                    "live_length",
+                    "looping",
+                    "loop_start",
+                    "loop_end",
+                ),
+            ),
+            "summary": self._copy_fields(
+                summary,
+                ("note_count", "pitch_min", "pitch_max"),
+            ),
+            "devices": [
+                self._copy_fields(
+                    device,
+                    ("index", "path", "id", "name", "class_name", "type"),
+                )
+                for device in device_values
+            ],
+            "notes": [
+                self._copy_fields(
+                    note,
+                    (
+                        "note_id",
+                        "pitch",
+                        "start_time",
+                        "duration",
+                        "velocity",
+                        "mute",
+                        "probability",
+                        "velocity_deviation",
+                        "release_velocity",
+                    ),
+                )
+                for note in note_values
+            ],
             "transport": {
                 "complete": True,
                 "fragment_count": fragment_count,

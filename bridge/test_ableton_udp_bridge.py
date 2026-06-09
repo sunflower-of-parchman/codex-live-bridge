@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 import subprocess
 import sys
@@ -198,6 +199,98 @@ def _inspection_fragment(
         },
         "data": data,
     }
+
+
+def _inspection_context_data(
+    *,
+    note_count: int = 0,
+    pitch_min: int | None = None,
+    pitch_max: int | None = None,
+) -> dict[str, object]:
+    return {
+        "context": "session",
+        "track": {
+            "index": 2,
+            "path": "live_set tracks 2",
+            "id": 101,
+            "name": "Inspection Track",
+        },
+        "clip": {
+            "slot_index": 3,
+            "path": "live_set tracks 2 clip_slots 3 clip",
+            "id": 303,
+            "name": "Inspection Clip",
+            "start_marker": 0,
+            "end_marker": 8,
+            "live_length": 8,
+            "looping": True,
+            "loop_start": 0,
+            "loop_end": 8,
+        },
+        "summary": {
+            "note_count": note_count,
+            "pitch_min": pitch_min,
+            "pitch_max": pitch_max,
+        },
+    }
+
+
+def _inspection_device(index: int = 0) -> dict[str, object]:
+    return {
+        "index": index,
+        "path": f"live_set tracks 2 devices {index}",
+        "id": 400 + index,
+        "name": f"Device {index}",
+    }
+
+
+def _inspection_note(
+    *,
+    note_id: int = 1,
+    pitch: int = 60,
+    start_time: float = 0.0,
+) -> dict[str, object]:
+    return {
+        "note_id": note_id,
+        "pitch": pitch,
+        "start_time": start_time,
+        "duration": 0.5,
+        "velocity": 100,
+    }
+
+
+def _complete_inspection_fragment(
+    *,
+    devices: list[object] | None = None,
+    notes: list[object] | None = None,
+) -> dict[str, object]:
+    device_items = [] if devices is None else devices
+    note_items = [] if notes is None else notes
+    pitches = [
+        int(note["pitch"])
+        for note in note_items
+        if isinstance(note, dict)
+        and isinstance(note.get("pitch"), int)
+        and not isinstance(note.get("pitch"), bool)
+    ]
+    data = _inspection_context_data(
+        note_count=len(note_items),
+        pitch_min=min(pitches) if pitches else None,
+        pitch_max=max(pitches) if pitches else None,
+    )
+    data.update(
+        {
+            "device_offset": 0,
+            "device_count": len(device_items),
+            "device_total": len(device_items),
+            "devices": device_items,
+            "note_offset": 0,
+            "note_count": len(note_items),
+            "note_total": len(note_items),
+            "notes": note_items,
+        }
+    )
+    return _inspection_fragment(index=0, count=1, kind="complete", data=data)
 
 
 class BridgeCliTests(unittest.TestCase):
@@ -723,6 +816,37 @@ return outputs.filter((args) => args[1] === "/ack");
         self.assertEqual(result[2][-1], "req:req-slot")
         self.assertEqual(result[3][-1], "req:req-schema")
 
+    def test_js_session_clip_inspect_too_long_request_errors_are_packet_bounded(self) -> None:
+        request_ids = ["x" * 5000, "𝄞" * 1500]
+        result = _run_bridge_js(
+            f"""
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+const requestIds = {json.dumps(request_ids)};
+requestIds.forEach((requestId) => {{
+  context.api_session_clip_inspect(0, 0, 1, requestId);
+}});
+return outputs.filter((args) => args[1] === "/ack");
+"""
+        )
+
+        self.assertEqual(len(result), 2)
+        for request_id, args in zip(request_ids, result):
+            packet = bridge.encode_osc_message("/ack", tuple(args[2:]))
+            self.assertLessEqual(len(packet), 4096)
+            self.assertEqual(
+                args[3:5],
+                [
+                    "api_session_clip_inspect_validation_failed",
+                    "request_id_too_long",
+                ],
+            )
+            self.assertNotIn(request_id, args)
+            self.assertNotIn(request_id, args[4:-2])
+            self.assertEqual(args[-2], "request_correlation")
+            self.assertTrue(str(args[-1]).startswith("req:"))
+            self.assertLessEqual(len(str(args[-1])[4:].encode("utf-8")), 128)
+
     def test_js_session_clip_inspect_empty_clip_is_one_complete_fragment(self) -> None:
         outputs = _run_session_clip_inspect_js(notes=[], devices=[])
 
@@ -788,7 +912,7 @@ return outputs.filter((args) => args[1] === "/ack");
                 "start_marker": 0,
                 "end_marker": 8,
                 "live_length": 8,
-                "looping": 1,
+                "looping": True,
                 "loop_start": 0,
                 "loop_end": 8,
             },
@@ -1113,12 +1237,11 @@ return outputs.filter((args) => args[1] === "/ack");
                 index=0,
                 count=3,
                 kind="context",
-                data={
-                    "context": "session",
-                    "track": {"index": 2},
-                    "clip": {"slot_index": 3},
-                    "summary": {"note_count": 2, "pitch_min": 60, "pitch_max": 64},
-                },
+                data=_inspection_context_data(
+                    note_count=2,
+                    pitch_min=60,
+                    pitch_max=64,
+                ),
             ),
             _inspection_fragment(
                 index=1,
@@ -1128,7 +1251,7 @@ return outputs.filter((args) => args[1] === "/ack");
                     "device_offset": 0,
                     "device_count": 1,
                     "device_total": 1,
-                    "devices": [{"index": 0, "name": "Operator"}],
+                    "devices": [_inspection_device()],
                 },
             ),
             _inspection_fragment(
@@ -1139,7 +1262,10 @@ return outputs.filter((args) => args[1] === "/ack");
                     "note_offset": 0,
                     "note_count": 2,
                     "note_total": 2,
-                    "notes": [{"note_id": 1, "pitch": 60}, {"note_id": 2, "pitch": 64}],
+                    "notes": [
+                        _inspection_note(note_id=1, pitch=60),
+                        _inspection_note(note_id=2, pitch=64, start_time=0.5),
+                    ],
                 },
             ),
         ]
@@ -1153,10 +1279,13 @@ return outputs.filter((args) => args[1] === "/ack");
         self.assertIsNotNone(assembled)
         assert assembled is not None
         self.assertEqual(assembled["context"], "session")
-        self.assertEqual(assembled["devices"], [{"index": 0, "name": "Operator"}])
+        self.assertEqual(assembled["devices"], [_inspection_device()])
         self.assertEqual(
             assembled["notes"],
-            [{"note_id": 1, "pitch": 60}, {"note_id": 2, "pitch": 64}],
+            [
+                _inspection_note(note_id=1, pitch=60),
+                _inspection_note(note_id=2, pitch=64, start_time=0.5),
+            ],
         )
         self.assertEqual(
             assembled["transport"],
@@ -1174,18 +1303,13 @@ return outputs.filter((args) => args[1] === "/ack");
             index=0,
             count=2,
             kind="context",
-            data={
-                "context": "session",
-                "track": {"index": 2},
-                "clip": {"slot_index": 3},
-                "summary": {"note_count": 0, "pitch_min": None, "pitch_max": None},
-            },
+            data=_inspection_context_data(),
         )
         assembler = bridge.SessionClipInspectionAssembler()
         assembler.add_fragment(context_fragment)
 
         conflicting = json.loads(json.dumps(context_fragment))
-        conflicting["data"]["track"]["index"] = 9
+        conflicting["data"]["track"]["name"] = "Changed Track"
         with self.assertRaisesRegex(bridge.SessionClipInspectionAssemblyError, "conflicting duplicate"):
             assembler.add_fragment(conflicting)
         with self.assertRaisesRegex(bridge.SessionClipInspectionAssemblyError, "missing fragment indexes"):
@@ -1208,8 +1332,8 @@ return outputs.filter((args) => args[1] === "/ack");
     def test_session_clip_inspection_assembler_rejects_malformed_and_noncontiguous_pages(self) -> None:
         assembler = bridge.SessionClipInspectionAssembler()
         malformed = _inspection_fragment(
-            index=0,
-            count=1,
+            index=1,
+            count=2,
             kind="note_page",
             data={
                 "note_offset": 0,
@@ -1226,12 +1350,11 @@ return outputs.filter((args) => args[1] === "/ack");
                 index=0,
                 count=3,
                 kind="context",
-                data={
-                    "context": "session",
-                    "track": {"index": 2},
-                    "clip": {"slot_index": 3},
-                    "summary": {"note_count": 2, "pitch_min": 60, "pitch_max": 64},
-                },
+                data=_inspection_context_data(
+                    note_count=2,
+                    pitch_min=60,
+                    pitch_max=64,
+                ),
             ),
             _inspection_fragment(
                 index=1,
@@ -1241,7 +1364,7 @@ return outputs.filter((args) => args[1] === "/ack");
                     "note_offset": 0,
                     "note_count": 1,
                     "note_total": 3,
-                    "notes": [{"note_id": 1, "pitch": 60}],
+                    "notes": [_inspection_note(note_id=1, pitch=60)],
                 },
             ),
             _inspection_fragment(
@@ -1252,7 +1375,9 @@ return outputs.filter((args) => args[1] === "/ack");
                     "note_offset": 2,
                     "note_count": 1,
                     "note_total": 3,
-                    "notes": [{"note_id": 2, "pitch": 64}],
+                    "notes": [
+                        _inspection_note(note_id=2, pitch=64, start_time=0.5)
+                    ],
                 },
             ),
         ]
@@ -1267,12 +1392,7 @@ return outputs.filter((args) => args[1] === "/ack");
             index=0,
             count=2,
             kind="context",
-            data={
-                "context": "session",
-                "track": {"index": 2},
-                "clip": {"slot_index": 3},
-                "summary": {"note_count": 0, "pitch_min": None, "pitch_max": None},
-            },
+            data=_inspection_context_data(),
         )
         fragment["transfer"]["is_last"] = True
 
@@ -1281,6 +1401,115 @@ return outputs.filter((args) => args[1] === "/ack");
             "mixed transfer metadata",
         ):
             bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+    def test_session_clip_inspection_assembler_rejects_unknown_schema_keys(self) -> None:
+        cases: list[tuple[str, dict[str, object]]] = []
+
+        top_level = _complete_inspection_fragment()
+        top_level["invented"] = True
+        cases.append(("root", top_level))
+
+        correlation = _complete_inspection_fragment()
+        correlation["correlation"]["invented"] = True
+        cases.append(("correlation", correlation))
+
+        transfer = _complete_inspection_fragment()
+        transfer["transfer"]["invented"] = True
+        cases.append(("transfer", transfer))
+
+        data = _complete_inspection_fragment()
+        data["data"]["invented"] = True
+        cases.append(("data", data))
+
+        for label, fragment in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(bridge.SessionClipInspectionAssemblyError):
+                    bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+    def test_session_clip_inspection_assembler_rejects_invalid_context_facts(self) -> None:
+        mutations = {
+            "empty_track_path": ("track", "path", ""),
+            "empty_clip_name": ("clip", "name", ""),
+            "bool_track_id": ("track", "id", True),
+            "negative_clip_id": ("clip", "id", -1),
+            "nan_marker": ("clip", "start_marker", math.nan),
+            "negative_length": ("clip", "live_length", -1),
+            "numeric_looping": ("clip", "looping", 1),
+            "null_pitch_with_notes": ("summary", "pitch_min", None),
+        }
+        for label, (section, field, value) in mutations.items():
+            fragment = _complete_inspection_fragment(notes=[_inspection_note()])
+            fragment["data"][section][field] = value
+            with self.subTest(label=label):
+                with self.assertRaises(bridge.SessionClipInspectionAssemblyError):
+                    bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+    def test_session_clip_inspection_assembler_rejects_invalid_device_facts(self) -> None:
+        invalid_devices: list[object] = [
+            "Operator",
+            {"index": 0, "path": "live_set tracks 2 devices 0", "id": 400},
+            {**_inspection_device(), "invented": True},
+            {**_inspection_device(), "index": True},
+            {**_inspection_device(), "type": "instrument"},
+        ]
+        for device in invalid_devices:
+            with self.subTest(device=device):
+                fragment = _complete_inspection_fragment(devices=[device])
+                with self.assertRaises(bridge.SessionClipInspectionAssemblyError):
+                    bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+    def test_session_clip_inspection_assembler_rejects_invalid_note_facts(self) -> None:
+        invalid_notes = [
+            {**_inspection_note(), "invented": True},
+            {
+                key: value
+                for key, value in _inspection_note().items()
+                if key != "velocity"
+            },
+            {**_inspection_note(), "pitch": True},
+            {**_inspection_note(), "pitch": 128},
+            {**_inspection_note(), "start_time": math.inf},
+            {**_inspection_note(), "duration": 0},
+            {**_inspection_note(), "velocity": 128},
+            {**_inspection_note(), "note_id": -1},
+            {**_inspection_note(), "mute": True},
+            {**_inspection_note(), "probability": 1.01},
+            {**_inspection_note(), "velocity_deviation": -128},
+            {**_inspection_note(), "release_velocity": 12.5},
+        ]
+        for note in invalid_notes:
+            with self.subTest(note=note):
+                fragment = _complete_inspection_fragment(notes=[note])
+                with self.assertRaises(bridge.SessionClipInspectionAssemblyError):
+                    bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+    def test_session_clip_inspection_assembler_rejects_invalid_envelope_metadata(self) -> None:
+        cases: list[dict[str, object]] = []
+
+        boolean_schema_version = _complete_inspection_fragment()
+        boolean_schema_version["schema_version"] = True
+        cases.append(boolean_schema_version)
+
+        completed_before_started = _complete_inspection_fragment()
+        completed_before_started["snapshot"]["completed_ms"] = 99
+        cases.append(completed_before_started)
+
+        mismatched_track = _complete_inspection_fragment()
+        mismatched_track["correlation"]["track_index"] = 1
+        cases.append(mismatched_track)
+
+        nonzero_context_index = _inspection_fragment(
+            index=1,
+            count=2,
+            kind="context",
+            data=_inspection_context_data(),
+        )
+        cases.append(nonzero_context_index)
+
+        for fragment in cases:
+            with self.subTest(fragment=fragment):
+                with self.assertRaises(bridge.SessionClipInspectionAssemblyError):
+                    bridge.SessionClipInspectionAssembler().add_fragment(fragment)
 
     def test_js_drum_chain_note_rejects_fractional_values(self) -> None:
         js_source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
@@ -1750,12 +1979,11 @@ return cases.map((testCase) => {
                 kind="context",
                 request_id="req-wait",
                 inspection_id="inspection-wait",
-                data={
-                    "context": "session",
-                    "track": {"index": 2},
-                    "clip": {"slot_index": 3},
-                    "summary": {"note_count": 1, "pitch_min": 60, "pitch_max": 60},
-                },
+                data=_inspection_context_data(
+                    note_count=1,
+                    pitch_min=60,
+                    pitch_max=60,
+                ),
             ),
             _inspection_fragment(
                 index=1,
@@ -1767,7 +1995,7 @@ return cases.map((testCase) => {
                     "note_offset": 0,
                     "note_count": 1,
                     "note_total": 1,
-                    "notes": [{"note_id": 1, "pitch": 60}],
+                    "notes": [_inspection_note(note_id=1, pitch=60)],
                 },
             ),
         ]
