@@ -226,22 +226,45 @@ Fragment indexes and page offsets are zero-based. Context data contains
 identity and timing (`slot_index`, `path`, `id`, `name`, `start_marker`,
 `end_marker`, `live_length`, `looping`, `loop_start`, `loop_end`), and summary
 fields (`note_count`, `pitch_min`, `pitch_max`). Empty clips use `null` pitch
-bounds.
+bounds. Track and clip `name` values are strings or explicit `null`.
 
 Device pages contain `device_offset`, `device_count`, `device_total`, and
-ordered device records. Each device record includes `index`, `path`, and `id`,
-plus `name`, `class_name`, and `type` when Live exposes them.
+ordered device records. Every device record has exactly `index`, `path`, `id`,
+`name`, `class_name`, and `type`. The three metadata fields are strings or
+explicit `null`; they are never omitted.
 
 Note pages contain `note_offset`, `note_count`, `note_total`, and ordered note
-records. The bridge preserves available `note_id`, `pitch`, `start_time`,
-`duration`, `velocity`, `mute`, `probability`, `velocity_deviation`, and
-`release_velocity` fields without synthesizing missing values. Empty MIDI
-clips are successful.
+records. Every note has exactly `note_id`, `pitch`, `start_time`, `duration`,
+`velocity`, `mute`, `probability`, `velocity_deviation`, and
+`release_velocity`. Missing fields cause a correlated parse error. Values are
+preserved without coercion and validated as follows:
+
+- `note_id`: non-negative integer
+- `pitch`: integer `0..127`
+- `start_time`: finite number
+- `duration`: finite number `>= 0` with a finite `start_time + duration`
+- `velocity`: finite number `0..127`
+- `mute`: boolean or numeric `0`/`1`
+- `probability`: finite number `0..1`
+- `velocity_deviation`: finite number `-127..127`
+- `release_velocity`: finite number `0..127`
+
+Empty MIDI clips are successful.
+
+Fragment sequence is defined by `fragment_index`. A multi-fragment transfer
+starts with exactly one `context` fragment, followed by zero or more
+contiguous `device_page` fragments, then zero or more contiguous `note_page`
+fragments. A `device_page` cannot follow a `note_page`. Page offsets advance
+contiguously in fragment order, page totals agree, and zero totals are
+represented by no page fragments. A `complete` fragment is valid only as the
+sole fragment and its counts equal its totals.
 
 Before emitting any success fragment, the bridge re-reads the clip ID. A
 changed ID produces only a correlated
 `api_session_clip_inspect_snapshot_changed` error. Other endpoint errors use
-the reserved correlation trailer and one of these codes:
+the reserved correlation trailer and one of these codes. Every error packet
+from this handler is also at most 4096 encoded OSC bytes; raw validation
+diagnostics are UTF-8 bounded before emission.
 
 ```text
 api_session_clip_inspect_validation_failed
@@ -258,8 +281,8 @@ api_session_clip_inspect_snapshot_changed
 The Python client exposes `SessionClipInspectionAssembler`. It keys assemblies
 by request ID and inspection ID, accepts out-of-order identical duplicates,
 and rejects conflicting duplicates, malformed fragments, mixed metadata,
-missing fragment indexes, inconsistent counts, and noncontiguous device or
-note offsets.
+missing fragment indexes, invalid fragment-kind ordering, inconsistent
+counts, and noncontiguous device or note offsets.
 
 The legacy `/inspect_session_clip_notes <track_index> <slot_index>` command and
 its single ACK remain unchanged for compatibility. Clients needing bounded

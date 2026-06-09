@@ -188,11 +188,13 @@ class SessionClipInspectionAssembler:
         "devices",
     }
     _NOTE_PAGE_KEYS = {"note_offset", "note_count", "note_total", "notes"}
-    _DEVICE_REQUIRED_KEYS = {"index", "path", "id", "name"}
-    _DEVICE_ALLOWED_KEYS = _DEVICE_REQUIRED_KEYS | {"class_name", "type"}
-    _NOTE_REQUIRED_KEYS = {"pitch", "start_time", "duration", "velocity"}
-    _NOTE_ALLOWED_KEYS = _NOTE_REQUIRED_KEYS | {
+    _DEVICE_KEYS = {"index", "path", "id", "name", "class_name", "type"}
+    _NOTE_KEYS = {
         "note_id",
+        "pitch",
+        "start_time",
+        "duration",
+        "velocity",
         "mute",
         "probability",
         "velocity_deviation",
@@ -245,18 +247,18 @@ class SessionClipInspectionAssembler:
         *,
         minimum: float | None = None,
         maximum: float | None = None,
-        strictly_positive: bool = False,
     ) -> float:
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-        ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise SessionClipInspectionAssemblyError(
                 f"malformed fragment: {label}"
             )
-        numeric = float(value)
-        if strictly_positive and numeric <= 0:
+        try:
+            numeric = float(value)
+        except (OverflowError, ValueError) as exc:
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label}"
+            ) from exc
+        if not math.isfinite(numeric):
             raise SessionClipInspectionAssemblyError(
                 f"malformed fragment: {label}"
             )
@@ -279,26 +281,20 @@ class SessionClipInspectionAssembler:
         return value
 
     @staticmethod
+    def _require_nullable_string(value: object, label: str) -> str | None:
+        if value is not None and not isinstance(value, str):
+            raise SessionClipInspectionAssemblyError(
+                f"malformed fragment: {label}"
+            )
+        return value
+
+    @staticmethod
     def _require_exact_keys(
         value: dict[str, object],
         expected: set[str],
         label: str,
     ) -> None:
         if set(value) != expected:
-            raise SessionClipInspectionAssemblyError(
-                f"malformed fragment: {label} keys"
-            )
-
-    @staticmethod
-    def _require_allowed_keys(
-        value: dict[str, object],
-        *,
-        required: set[str],
-        allowed: set[str],
-        label: str,
-    ) -> None:
-        keys = set(value)
-        if not required.issubset(keys) or not keys.issubset(allowed):
             raise SessionClipInspectionAssemblyError(
                 f"malformed fragment: {label} keys"
             )
@@ -335,7 +331,7 @@ class SessionClipInspectionAssembler:
         track_index = self._require_non_negative_int(value["index"], "track.index")
         self._require_non_empty_string(value["path"], "track.path")
         self._require_non_negative_int(value["id"], "track.id")
-        self._require_non_empty_string(value["name"], "track.name")
+        self._require_nullable_string(value["name"], "track.name")
         if track_index != correlation["track_index"]:
             raise SessionClipInspectionAssemblyError("mixed metadata")
         return value
@@ -352,7 +348,7 @@ class SessionClipInspectionAssembler:
         )
         self._require_non_empty_string(value["path"], "clip.path")
         self._require_non_negative_int(value["id"], "clip.id")
-        self._require_non_empty_string(value["name"], "clip.name")
+        self._require_nullable_string(value["name"], "clip.name")
         start_marker = self._require_finite_number(
             value["start_marker"], "clip.start_marker", minimum=0
         )
@@ -421,12 +417,7 @@ class SessionClipInspectionAssembler:
 
     def _validate_device(self, device: object, expected_index: int) -> None:
         value = self._require_dict(device, "device")
-        self._require_allowed_keys(
-            value,
-            required=self._DEVICE_REQUIRED_KEYS,
-            allowed=self._DEVICE_ALLOWED_KEYS,
-            label="device",
-        )
+        self._require_exact_keys(value, self._DEVICE_KEYS, "device")
         index = self._require_non_negative_int(value["index"], "device.index")
         if index != expected_index:
             raise SessionClipInspectionAssemblyError(
@@ -434,52 +425,55 @@ class SessionClipInspectionAssembler:
             )
         self._require_non_empty_string(value["path"], "device.path")
         self._require_non_negative_int(value["id"], "device.id")
-        self._require_non_empty_string(value["name"], "device.name")
-        if "class_name" in value:
-            self._require_non_empty_string(
-                value["class_name"], "device.class_name"
-            )
-        if "type" in value:
-            self._require_non_negative_int(value["type"], "device.type")
+        self._require_nullable_string(value["name"], "device.name")
+        self._require_nullable_string(value["class_name"], "device.class_name")
+        self._require_nullable_string(value["type"], "device.type")
 
     def _validate_note(self, note: object) -> None:
         value = self._require_dict(note, "note")
-        self._require_allowed_keys(
-            value,
-            required=self._NOTE_REQUIRED_KEYS,
-            allowed=self._NOTE_ALLOWED_KEYS,
-            label="note",
-        )
+        self._require_exact_keys(value, self._NOTE_KEYS, "note")
+        self._require_non_negative_int(value["note_id"], "note.note_id")
         self._require_int_range(value["pitch"], "note.pitch", 0, 127)
+        start_time = self._require_finite_number(
+            value["start_time"], "note.start_time"
+        )
+        duration = self._require_finite_number(
+            value["duration"], "note.duration", minimum=0
+        )
+        if not math.isfinite(start_time + duration):
+            raise SessionClipInspectionAssemblyError(
+                "malformed fragment: note.end_time"
+            )
         self._require_finite_number(
-            value["start_time"], "note.start_time", minimum=0
+            value["velocity"], "note.velocity", minimum=0, maximum=127
+        )
+        mute = value["mute"]
+        if not isinstance(mute, bool):
+            self._require_finite_number(
+                mute, "note.mute", minimum=0, maximum=1
+            )
+            if float(mute) not in (0.0, 1.0):
+                raise SessionClipInspectionAssemblyError(
+                    "malformed fragment: note.mute"
+                )
+        self._require_finite_number(
+            value["probability"],
+            "note.probability",
+            minimum=0,
+            maximum=1,
         )
         self._require_finite_number(
-            value["duration"], "note.duration", strictly_positive=True
+            value["velocity_deviation"],
+            "note.velocity_deviation",
+            minimum=-127,
+            maximum=127,
         )
-        self._require_int_range(value["velocity"], "note.velocity", 0, 127)
-        if "note_id" in value:
-            self._require_non_negative_int(value["note_id"], "note.note_id")
-        if "mute" in value:
-            self._require_int_range(value["mute"], "note.mute", 0, 1)
-        if "probability" in value:
-            self._require_finite_number(
-                value["probability"],
-                "note.probability",
-                minimum=0,
-                maximum=1,
-            )
-        if "velocity_deviation" in value:
-            self._require_finite_number(
-                value["velocity_deviation"],
-                "note.velocity_deviation",
-                minimum=-127,
-                maximum=127,
-            )
-        if "release_velocity" in value:
-            self._require_int_range(
-                value["release_velocity"], "note.release_velocity", 0, 127
-            )
+        self._require_finite_number(
+            value["release_velocity"],
+            "note.release_velocity",
+            minimum=0,
+            maximum=127,
+        )
 
     def _validate_page(
         self,
@@ -639,6 +633,11 @@ class SessionClipInspectionAssembler:
             )
             if data.get("device_offset") != 0 or data.get("note_offset") != 0:
                 raise SessionClipInspectionAssemblyError("noncontiguous page offsets")
+            if (
+                data.get("device_count") != data.get("device_total")
+                or data.get("note_count") != data.get("note_total")
+            ):
+                raise SessionClipInspectionAssemblyError("inconsistent counts")
         elif fragment_kind == "context":
             if fragment_index != 0:
                 raise SessionClipInspectionAssemblyError(
@@ -778,17 +777,20 @@ class SessionClipInspectionAssembler:
     ) -> list[object]:
         if not pages:
             return []
-        ordered = sorted(pages, key=lambda page: int(page[offset_field]))
         expected_offset = 0
-        expected_total = int(ordered[0][total_field])
+        expected_total = int(pages[0][total_field])
+        if expected_total == 0:
+            raise SessionClipInspectionAssemblyError("inconsistent counts")
         items: list[object] = []
-        for page in ordered:
+        for page in pages:
             if int(page[total_field]) != expected_total:
                 raise SessionClipInspectionAssemblyError("mixed metadata")
             if int(page[offset_field]) != expected_offset:
                 raise SessionClipInspectionAssemblyError(
                     f"noncontiguous {label} offsets"
                 )
+            if int(page[count_field]) <= 0:
+                raise SessionClipInspectionAssemblyError("inconsistent counts")
             page_items = self._require_list(page[items_field], items_field)
             items.extend(page_items)
             expected_offset += int(page[count_field])
@@ -813,27 +815,35 @@ class SessionClipInspectionAssembler:
             notes = list(self._require_list(data["notes"], "notes"))
             context_data = data
         else:
-            context_fragments = [
-                fragment
+            kinds = [
+                self._require_dict(fragment["transfer"], "transfer")[
+                    "fragment_kind"
+                ]
                 for fragment in ordered
-                if self._require_dict(fragment["transfer"], "transfer")["fragment_kind"]
-                == "context"
             ]
-            if len(context_fragments) != 1:
-                raise SessionClipInspectionAssemblyError("malformed fragments: context")
-            context_data = self._require_dict(context_fragments[0]["data"], "data")
-            device_pages = [
-                self._require_dict(fragment["data"], "data")
-                for fragment in ordered
-                if self._require_dict(fragment["transfer"], "transfer")["fragment_kind"]
-                == "device_page"
-            ]
-            note_pages = [
-                self._require_dict(fragment["data"], "data")
-                for fragment in ordered
-                if self._require_dict(fragment["transfer"], "transfer")["fragment_kind"]
-                == "note_page"
-            ]
+            if not kinds or kinds[0] != "context":
+                raise SessionClipInspectionAssemblyError(
+                    "malformed fragments: context"
+                )
+            page_phase = "device_page"
+            device_pages: list[dict[str, object]] = []
+            note_pages: list[dict[str, object]] = []
+            for fragment, kind in zip(ordered[1:], kinds[1:]):
+                data = self._require_dict(fragment["data"], "data")
+                if kind == "device_page":
+                    if page_phase == "note_page":
+                        raise SessionClipInspectionAssemblyError(
+                            "invalid fragment ordering"
+                        )
+                    device_pages.append(data)
+                elif kind == "note_page":
+                    page_phase = "note_page"
+                    note_pages.append(data)
+                else:
+                    raise SessionClipInspectionAssemblyError(
+                        "invalid fragment ordering"
+                    )
+            context_data = self._require_dict(ordered[0]["data"], "data")
             devices = self._assemble_pages(
                 device_pages,
                 offset_field="device_offset",

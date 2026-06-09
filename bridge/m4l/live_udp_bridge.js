@@ -1289,10 +1289,22 @@ function sessionClipInspectionAckPacketByteLength(fragmentJson, requestId) {
 }
 
 function sessionClipInspectionError(category, details, requestId) {
+  var boundedDetails = (details || []).map(function (detail) {
+    if (typeof detail === "number" && isFinite(detail)) {
+      return detail;
+    }
+    return truncateUtf8ToByteLength(
+      detail === undefined ? "undefined" : detail === null ? "null" : String(detail),
+      256
+    );
+  });
   ackWithRequest(
     "error",
-    ["api_session_clip_inspect_" + category].concat(details || []),
-    requestId
+    ["api_session_clip_inspect_" + category].concat(boundedDetails),
+    truncateUtf8ToByteLength(
+      requestId === undefined || requestId === null ? "" : String(requestId),
+      128
+    )
   );
 }
 
@@ -1302,8 +1314,12 @@ function newSessionClipInspectionId() {
 }
 
 function isNonNegativeInteger(value) {
-  var numeric = Number(value);
-  return isFinite(numeric) && numeric >= 0 && Math.floor(numeric) === numeric;
+  return (
+    typeof value === "number" &&
+    isFinite(value) &&
+    value >= 0 &&
+    Math.floor(value) === value
+  );
 }
 
 function readSessionClipInspectionProperty(api, property, target, requestId) {
@@ -1328,14 +1344,12 @@ function readSessionClipInspectionProperty(api, property, target, requestId) {
   }
 }
 
-function readOptionalSessionClipInspectionProperty(api, property, target) {
+function readNullableSessionClipInspectionTextProperty(api, property) {
   try {
     var value = getScalar(api, property);
-    if (value !== undefined && value !== null) {
-      target[property] = value;
-    }
+    return typeof value === "string" ? value : null;
   } catch (err) {
-    // Device metadata varies by Live object type; omit unavailable values.
+    return null;
   }
 }
 
@@ -1398,12 +1412,99 @@ function copySessionClipInspectionNote(note, index, requestId) {
   var copied = {};
   for (var i = 0; i < fields.length; i += 1) {
     var field = fields[i];
-    if (
-      Object.prototype.hasOwnProperty.call(note, field) &&
-      note[field] !== undefined
-    ) {
-      copied[field] = note[field];
+    if (!Object.prototype.hasOwnProperty.call(note, field) || note[field] === undefined) {
+      sessionClipInspectionError(
+        "parse_failed",
+        ["note_missing_field", index, field],
+        requestId
+      );
+      return null;
     }
+    copied[field] = note[field];
+  }
+
+  function isFiniteNumber(value) {
+    return typeof value === "number" && isFinite(value);
+  }
+
+  if (
+    !isFiniteNumber(copied.note_id) ||
+    copied.note_id < 0 ||
+    Math.floor(copied.note_id) !== copied.note_id
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "note_id"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.pitch) ||
+    copied.pitch < 0 ||
+    copied.pitch > 127 ||
+    Math.floor(copied.pitch) !== copied.pitch
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "pitch"], requestId);
+    return null;
+  }
+  if (!isFiniteNumber(copied.start_time)) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "start_time"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.duration) ||
+    copied.duration < 0 ||
+    !isFinite(copied.start_time + copied.duration)
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "duration"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.velocity) ||
+    copied.velocity < 0 ||
+    copied.velocity > 127
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "velocity"], requestId);
+    return null;
+  }
+  if (
+    typeof copied.mute !== "boolean" &&
+    !(
+      isFiniteNumber(copied.mute) &&
+      (copied.mute === 0 || copied.mute === 1)
+    )
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "mute"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.probability) ||
+    copied.probability < 0 ||
+    copied.probability > 1
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "probability"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.velocity_deviation) ||
+    copied.velocity_deviation < -127 ||
+    copied.velocity_deviation > 127
+  ) {
+    sessionClipInspectionError(
+      "parse_failed",
+      ["note_invalid_field", index, "velocity_deviation"],
+      requestId
+    );
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.release_velocity) ||
+    copied.release_velocity < 0 ||
+    copied.release_velocity > 127
+  ) {
+    sessionClipInspectionError(
+      "parse_failed",
+      ["note_invalid_field", index, "release_velocity"],
+      requestId
+    );
+    return null;
   }
   return copied;
 }
@@ -1734,7 +1835,10 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     );
     return;
   }
-  if (Number(schemaVersion) !== SESSION_CLIP_INSPECTION_SCHEMA_VERSION) {
+  if (
+    typeof schemaVersion !== "number" ||
+    schemaVersion !== SESSION_CLIP_INSPECTION_SCHEMA_VERSION
+  ) {
     sessionClipInspectionError(
       "validation_failed",
       ["unsupported_schema_version", schemaVersion],
@@ -1763,13 +1867,10 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     sessionClipInspectionError("not_midi", [track, trackPath], requestText);
     return;
   }
-  var trackName = readSessionClipInspectionProperty(
+  var trackName = readNullableSessionClipInspectionTextProperty(
     trackApi,
-    "name",
-    "track",
-    requestText
+    "name"
   );
-  if (!trackName.ok) return;
 
   var slotCount = 0;
   try {
@@ -1810,7 +1911,6 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   var initialClipId = Number(clipApi.id);
 
   var clipPropertyMap = [
-    ["name", "name"],
     ["start_marker", "start_marker"],
     ["end_marker", "end_marker"],
     ["length", "live_length"],
@@ -1822,6 +1922,7 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     slot_index: slot,
     path: clipPath,
     id: initialClipId,
+    name: readNullableSessionClipInspectionTextProperty(clipApi, "name"),
   };
   for (var clipPropIndex = 0; clipPropIndex < clipPropertyMap.length; clipPropIndex += 1) {
     var clipProperty = clipPropertyMap[clipPropIndex][0];
@@ -1868,10 +1969,13 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
       index: deviceIndex,
       path: normalizeLiveApiPath(deviceApi.path, devicePath),
       id: Number(deviceApi.id),
+      name: readNullableSessionClipInspectionTextProperty(deviceApi, "name"),
+      class_name: readNullableSessionClipInspectionTextProperty(
+        deviceApi,
+        "class_name"
+      ),
+      type: readNullableSessionClipInspectionTextProperty(deviceApi, "type"),
     };
-    readOptionalSessionClipInspectionProperty(deviceApi, "name", device);
-    readOptionalSessionClipInspectionProperty(deviceApi, "class_name", device);
-    readOptionalSessionClipInspectionProperty(deviceApi, "type", device);
     devices.push(device);
   }
 
@@ -1916,7 +2020,7 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
       index: track,
       path: trackPath,
       id: Number(trackApi.id),
-      name: trackName.value,
+      name: trackName,
     },
     clip: clipData,
     summary: buildSessionClipInspectionSummary(notes),

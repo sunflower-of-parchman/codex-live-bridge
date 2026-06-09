@@ -20,9 +20,15 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented packet policy, fragment transfer semantics, correlated inspection
   errors, and byte-for-byte compatibility for legacy
   `/inspect_session_clip_notes` ACKs.
+- Froze session clip inspection V1 around complete nine-field extended notes,
+  explicit nullable text metadata, index-ordered device/note page phases, and
+  bounded diagnostics for every endpoint error ACK.
 
 ### Fixed
 
+- Aligned the JavaScript producer and Python assembler on note scalar types,
+  nullable device/track/clip metadata, complete-fragment totals, and strict
+  fragment ordering.
 - Corrected the note schema to accept documented negative
   `velocity_deviation` values.
 - Made drum-chain note writes distinguish unreadable readback from a verified
