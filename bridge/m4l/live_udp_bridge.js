@@ -11,6 +11,11 @@ var apiObservers = {};
 var apiObserverCounter = 0;
 var MAX_API_OBSERVERS = 32;
 var ERROR_CORRELATION_MARKER = "request_correlation";
+var SESSION_CLIP_INSPECTION_SCHEMA = "codex-live-bridge.session-midi-clip-inspection";
+var SESSION_CLIP_INSPECTION_SCHEMA_VERSION = 1;
+var SESSION_CLIP_INSPECTION_PRODUCER_VERSION = "3.1.0";
+var SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES = 4096;
+var sessionClipInspectionCounter = 0;
 
 function debug(msg) {
   var text = "[live-bridge] " + msg;
@@ -1210,6 +1215,716 @@ function api_drum_chain_in_note(chainPath, noteValue, requestId) {
   ackWithRequest("api_drum_chain_in_note", [resolvedChainPath, safeJsonStringify(payload, "drum_chain_in_note")], requestId);
 }
 
+function utf8ByteLength(value) {
+  var text = String(value);
+  var length = 0;
+  for (var i = 0; i < text.length; i += 1) {
+    var code = text.charCodeAt(i);
+    if (code <= 0x7f) {
+      length += 1;
+    } else if (code <= 0x7ff) {
+      length += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      var next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 4;
+        i += 1;
+      } else {
+        length += 3;
+      }
+    } else {
+      length += 3;
+    }
+  }
+  return length;
+}
+
+function oscStringEncodedByteLength(value) {
+  var lengthWithNull = utf8ByteLength(value) + 1;
+  var remainder = lengthWithNull % 4;
+  return remainder === 0 ? lengthWithNull : lengthWithNull + (4 - remainder);
+}
+
+function sessionClipInspectionAckPacketByteLength(fragmentJson, requestId) {
+  return (
+    oscStringEncodedByteLength("/ack") +
+    oscStringEncodedByteLength(",sss") +
+    oscStringEncodedByteLength("api_session_clip_inspect") +
+    oscStringEncodedByteLength(fragmentJson) +
+    oscStringEncodedByteLength(requestId)
+  );
+}
+
+function sessionClipInspectionError(category, details, requestId) {
+  ackWithRequest(
+    "error",
+    ["api_session_clip_inspect_" + category].concat(details || []),
+    requestId
+  );
+}
+
+function newSessionClipInspectionId() {
+  sessionClipInspectionCounter += 1;
+  return "session_clip_" + nowMs() + "_" + sessionClipInspectionCounter;
+}
+
+function isNonNegativeInteger(value) {
+  var numeric = Number(value);
+  return isFinite(numeric) && numeric >= 0 && Math.floor(numeric) === numeric;
+}
+
+function readSessionClipInspectionProperty(api, property, target, requestId) {
+  try {
+    var value = getScalar(api, property);
+    if (value === undefined || value === null) {
+      sessionClipInspectionError("read_failed", [target, property], requestId);
+      return { ok: false, value: null };
+    }
+    return { ok: true, value: value };
+  } catch (err) {
+    debug(
+      "Session clip inspection failed to read " +
+        target +
+        "." +
+        property +
+        ": " +
+        err
+    );
+    sessionClipInspectionError("read_failed", [target, property], requestId);
+    return { ok: false, value: null };
+  }
+}
+
+function readOptionalSessionClipInspectionProperty(api, property, target) {
+  try {
+    var value = getScalar(api, property);
+    if (value !== undefined && value !== null) {
+      target[property] = value;
+    }
+  } catch (err) {
+    // Device metadata varies by Live object type; omit unavailable values.
+  }
+}
+
+function openSessionClipInspectionApi(path, target, requestId) {
+  try {
+    var api = new LiveAPI(null, path);
+    if (!api || !(Number(api.id) > 0)) {
+      sessionClipInspectionError("not_found", [target, path], requestId);
+      return null;
+    }
+    return api;
+  } catch (err) {
+    debug("Session clip inspection could not resolve " + target + " at " + path + ": " + err);
+    sessionClipInspectionError("not_found", [target, path], requestId);
+    return null;
+  }
+}
+
+function parseSessionClipInspectionNotes(rawResult, requestId) {
+  var parsed = null;
+  if (rawResult && typeof rawResult === "object" && !Array.isArray(rawResult)) {
+    parsed = rawResult;
+  } else {
+    var rawText = Array.isArray(rawResult)
+      ? rawResult.join(" ")
+      : rawResult === undefined || rawResult === null
+        ? ""
+        : String(rawResult);
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (err) {
+      debug("Session clip inspection note JSON parse failed: " + err);
+      sessionClipInspectionError("parse_failed", ["notes"], requestId);
+      return null;
+    }
+  }
+  if (!parsed || !Array.isArray(parsed.notes)) {
+    sessionClipInspectionError("parse_failed", ["notes_shape"], requestId);
+    return null;
+  }
+  return parsed.notes;
+}
+
+function copySessionClipInspectionNote(note, index, requestId) {
+  if (!note || typeof note !== "object" || Array.isArray(note)) {
+    sessionClipInspectionError("parse_failed", ["note", index], requestId);
+    return null;
+  }
+  var fields = [
+    "note_id",
+    "pitch",
+    "start_time",
+    "duration",
+    "velocity",
+    "mute",
+    "probability",
+    "velocity_deviation",
+    "release_velocity",
+  ];
+  var copied = {};
+  for (var i = 0; i < fields.length; i += 1) {
+    var field = fields[i];
+    if (
+      Object.prototype.hasOwnProperty.call(note, field) &&
+      note[field] !== undefined
+    ) {
+      copied[field] = note[field];
+    }
+  }
+  return copied;
+}
+
+function buildSessionClipInspectionSummary(notes) {
+  var pitchMin = null;
+  var pitchMax = null;
+  for (var i = 0; i < notes.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(notes[i], "pitch")) {
+      continue;
+    }
+    var pitch = Number(notes[i].pitch);
+    if (!isFinite(pitch)) {
+      continue;
+    }
+    if (pitchMin === null || pitch < pitchMin) pitchMin = pitch;
+    if (pitchMax === null || pitch > pitchMax) pitchMax = pitch;
+  }
+  return {
+    note_count: notes.length,
+    pitch_min: pitchMin,
+    pitch_max: pitchMax,
+  };
+}
+
+function makeSessionClipInspectionFragment(
+  metadata,
+  fragmentIndex,
+  fragmentCount,
+  fragmentKind,
+  isLast,
+  data
+) {
+  return {
+    schema: SESSION_CLIP_INSPECTION_SCHEMA,
+    schema_version: SESSION_CLIP_INSPECTION_SCHEMA_VERSION,
+    producer_version: SESSION_CLIP_INSPECTION_PRODUCER_VERSION,
+    inspection_id: metadata.inspection_id,
+    correlation: metadata.correlation,
+    snapshot: metadata.snapshot,
+    transfer: {
+      fragment_index: fragmentIndex,
+      fragment_count: fragmentCount,
+      fragment_kind: fragmentKind,
+      is_last: !!isLast,
+      packet_budget_bytes: SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES,
+    },
+    completeness: {
+      track: "complete",
+      clip: "complete",
+      devices: "complete",
+      notes: "complete",
+      missing_fields: [],
+    },
+    data: data,
+  };
+}
+
+function serializeSessionClipInspectionFragment(fragment) {
+  try {
+    var json = JSON.stringify(fragment);
+    if (typeof json !== "string") {
+      return { ok: false, json: "", packet_bytes: 0 };
+    }
+    return { ok: true, json: json, packet_bytes: 0 };
+  } catch (err) {
+    debug("Session clip inspection fragment serialization failed: " + err);
+    return { ok: false, json: "", packet_bytes: 0 };
+  }
+}
+
+function measureSessionClipInspectionFragment(
+  metadata,
+  fragmentIndex,
+  fragmentCount,
+  fragmentKind,
+  isLast,
+  data,
+  requestId
+) {
+  var fragment = makeSessionClipInspectionFragment(
+    metadata,
+    fragmentIndex,
+    fragmentCount,
+    fragmentKind,
+    isLast,
+    data
+  );
+  var serialized = serializeSessionClipInspectionFragment(fragment);
+  if (!serialized.ok) {
+    return serialized;
+  }
+  serialized.packet_bytes = sessionClipInspectionAckPacketByteLength(
+    serialized.json,
+    requestId
+  );
+  return serialized;
+}
+
+function paginateSessionClipInspectionItems(
+  metadata,
+  items,
+  fragmentKind,
+  offsetField,
+  countField,
+  totalField,
+  itemsField,
+  requestId,
+  maxFragmentCount
+) {
+  var pages = [];
+  var offset = 0;
+  while (offset < items.length) {
+    var pageItems = [];
+    while (offset + pageItems.length < items.length) {
+      var candidateItems = pageItems.concat([items[offset + pageItems.length]]);
+      var candidateData = {};
+      candidateData[offsetField] = offset;
+      candidateData[countField] = candidateItems.length;
+      candidateData[totalField] = items.length;
+      candidateData[itemsField] = candidateItems;
+      var measured = measureSessionClipInspectionFragment(
+        metadata,
+        Math.max(0, maxFragmentCount - 1),
+        maxFragmentCount,
+        fragmentKind,
+        false,
+        candidateData,
+        requestId
+      );
+      if (!measured.ok) {
+        return {
+          ok: false,
+          error: "serialization_failed",
+          details: [fragmentKind, offset + pageItems.length],
+          pages: [],
+        };
+      }
+      if (measured.packet_bytes > SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES) {
+        if (pageItems.length === 0) {
+          return {
+            ok: false,
+            error: "item_too_large",
+            details: [fragmentKind, offset, measured.packet_bytes],
+            pages: [],
+          };
+        }
+        break;
+      }
+      pageItems = candidateItems;
+    }
+    var pageData = {};
+    pageData[offsetField] = offset;
+    pageData[countField] = pageItems.length;
+    pageData[totalField] = items.length;
+    pageData[itemsField] = pageItems;
+    pages.push(pageData);
+    offset += pageItems.length;
+  }
+  return { ok: true, pages: pages };
+}
+
+function buildSessionClipInspectionFragments(metadata, contextData, devices, notes, requestId) {
+  var completeData = {
+    context: contextData.context,
+    track: contextData.track,
+    clip: contextData.clip,
+    summary: contextData.summary,
+    device_offset: 0,
+    device_count: devices.length,
+    device_total: devices.length,
+    devices: devices,
+    note_offset: 0,
+    note_count: notes.length,
+    note_total: notes.length,
+    notes: notes,
+  };
+  var complete = measureSessionClipInspectionFragment(
+    metadata,
+    0,
+    1,
+    "complete",
+    true,
+    completeData,
+    requestId
+  );
+  if (!complete.ok) {
+    return { ok: false, error: "serialization_failed", details: ["complete"], fragments: [] };
+  }
+  if (complete.packet_bytes <= SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES) {
+    return { ok: true, fragments: [complete.json] };
+  }
+
+  var maxFragmentCount = Math.max(1, 1 + devices.length + notes.length);
+  var contextMeasured = measureSessionClipInspectionFragment(
+    metadata,
+    Math.max(0, maxFragmentCount - 1),
+    maxFragmentCount,
+    "context",
+    false,
+    contextData,
+    requestId
+  );
+  if (!contextMeasured.ok) {
+    return { ok: false, error: "serialization_failed", details: ["context"], fragments: [] };
+  }
+  if (contextMeasured.packet_bytes > SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES) {
+    return {
+      ok: false,
+      error: "item_too_large",
+      details: ["context", 0, contextMeasured.packet_bytes],
+      fragments: [],
+    };
+  }
+
+  var devicePages = paginateSessionClipInspectionItems(
+    metadata,
+    devices,
+    "device_page",
+    "device_offset",
+    "device_count",
+    "device_total",
+    "devices",
+    requestId,
+    maxFragmentCount
+  );
+  if (!devicePages.ok) {
+    return {
+      ok: false,
+      error: devicePages.error,
+      details: devicePages.details,
+      fragments: [],
+    };
+  }
+  var notePages = paginateSessionClipInspectionItems(
+    metadata,
+    notes,
+    "note_page",
+    "note_offset",
+    "note_count",
+    "note_total",
+    "notes",
+    requestId,
+    maxFragmentCount
+  );
+  if (!notePages.ok) {
+    return {
+      ok: false,
+      error: notePages.error,
+      details: notePages.details,
+      fragments: [],
+    };
+  }
+
+  var pageSpecs = [{ kind: "context", data: contextData }]
+    .concat(
+      devicePages.pages.map(function (page) {
+        return { kind: "device_page", data: page };
+      })
+    )
+    .concat(
+      notePages.pages.map(function (page) {
+        return { kind: "note_page", data: page };
+      })
+    );
+  var fragmentCount = pageSpecs.length;
+  var fragments = [];
+  for (var i = 0; i < pageSpecs.length; i += 1) {
+    var measured = measureSessionClipInspectionFragment(
+      metadata,
+      i,
+      fragmentCount,
+      pageSpecs[i].kind,
+      i === fragmentCount - 1,
+      pageSpecs[i].data,
+      requestId
+    );
+    if (!measured.ok) {
+      return {
+        ok: false,
+        error: "serialization_failed",
+        details: [pageSpecs[i].kind, i],
+        fragments: [],
+      };
+    }
+    if (measured.packet_bytes > SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES) {
+      return {
+        ok: false,
+        error: "item_too_large",
+        details: [pageSpecs[i].kind, i, measured.packet_bytes],
+        fragments: [],
+      };
+    }
+    fragments.push(measured.json);
+  }
+  return { ok: true, fragments: fragments };
+}
+
+function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestId) {
+  var requestText =
+    requestId === undefined || requestId === null ? "" : String(requestId);
+  if (requestText.length === 0) {
+    sessionClipInspectionError("validation_failed", ["request_id_required"], requestText);
+    return;
+  }
+  if (utf8ByteLength(requestText) > 128) {
+    sessionClipInspectionError(
+      "validation_failed",
+      ["request_id_too_long", utf8ByteLength(requestText)],
+      requestText
+    );
+    return;
+  }
+  if (!isNonNegativeInteger(trackIndex)) {
+    sessionClipInspectionError(
+      "validation_failed",
+      ["invalid_track_index", trackIndex],
+      requestText
+    );
+    return;
+  }
+  if (!isNonNegativeInteger(slotIndex)) {
+    sessionClipInspectionError(
+      "validation_failed",
+      ["invalid_slot_index", slotIndex],
+      requestText
+    );
+    return;
+  }
+  if (Number(schemaVersion) !== SESSION_CLIP_INSPECTION_SCHEMA_VERSION) {
+    sessionClipInspectionError(
+      "validation_failed",
+      ["unsupported_schema_version", schemaVersion],
+      requestText
+    );
+    return;
+  }
+  if (!ensureInitialized(requestText)) return;
+
+  var track = Number(trackIndex);
+  var slot = Number(slotIndex);
+  var startedMs = nowMs();
+  var trackPath = "live_set tracks " + track;
+  var trackApi = openSessionClipInspectionApi(trackPath, "track", requestText);
+  if (!trackApi) return;
+  trackPath = normalizeLiveApiPath(trackApi.path, trackPath);
+
+  var midiResult = readSessionClipInspectionProperty(
+    trackApi,
+    "has_midi_input",
+    "track",
+    requestText
+  );
+  if (!midiResult.ok) return;
+  if (Number(midiResult.value) !== 1) {
+    sessionClipInspectionError("not_midi", [track, trackPath], requestText);
+    return;
+  }
+  var trackName = readSessionClipInspectionProperty(
+    trackApi,
+    "name",
+    "track",
+    requestText
+  );
+  if (!trackName.ok) return;
+
+  var slotCount = 0;
+  try {
+    slotCount = Number(trackApi.getcount("clip_slots"));
+  } catch (errSlotCount) {
+    debug("Session clip inspection could not read clip slot count: " + errSlotCount);
+    sessionClipInspectionError("read_failed", ["track", "clip_slots"], requestText);
+    return;
+  }
+  if (!(isFinite(slotCount) && slotCount >= 0 && Math.floor(slotCount) === slotCount)) {
+    sessionClipInspectionError("read_failed", ["track", "clip_slots"], requestText);
+    return;
+  }
+  if (!(slot < slotCount)) {
+    sessionClipInspectionError("not_found", ["clip_slot", track, slot], requestText);
+    return;
+  }
+
+  var slotPath = trackPath + " clip_slots " + slot;
+  var slotApi = openSessionClipInspectionApi(slotPath, "clip_slot", requestText);
+  if (!slotApi) return;
+  var hasClip = readSessionClipInspectionProperty(
+    slotApi,
+    "has_clip",
+    "clip_slot",
+    requestText
+  );
+  if (!hasClip.ok) return;
+  if (Number(hasClip.value) !== 1) {
+    sessionClipInspectionError("no_clip", [track, slot], requestText);
+    return;
+  }
+
+  var clipPath = slotPath + " clip";
+  var clipApi = openSessionClipInspectionApi(clipPath, "clip", requestText);
+  if (!clipApi) return;
+  clipPath = normalizeLiveApiPath(clipApi.path, clipPath);
+  var initialClipId = Number(clipApi.id);
+
+  var clipPropertyMap = [
+    ["name", "name"],
+    ["start_marker", "start_marker"],
+    ["end_marker", "end_marker"],
+    ["length", "live_length"],
+    ["looping", "looping"],
+    ["loop_start", "loop_start"],
+    ["loop_end", "loop_end"],
+  ];
+  var clipData = {
+    slot_index: slot,
+    path: clipPath,
+    id: initialClipId,
+  };
+  for (var clipPropIndex = 0; clipPropIndex < clipPropertyMap.length; clipPropIndex += 1) {
+    var clipProperty = clipPropertyMap[clipPropIndex][0];
+    var outputProperty = clipPropertyMap[clipPropIndex][1];
+    var clipValue = readSessionClipInspectionProperty(
+      clipApi,
+      clipProperty,
+      "clip",
+      requestText
+    );
+    if (!clipValue.ok) return;
+    clipData[outputProperty] = clipValue.value;
+  }
+
+  var deviceCount = 0;
+  try {
+    deviceCount = Number(trackApi.getcount("devices"));
+  } catch (errDeviceCount) {
+    debug("Session clip inspection could not read device count: " + errDeviceCount);
+    sessionClipInspectionError("read_failed", ["track", "devices"], requestText);
+    return;
+  }
+  if (!(isFinite(deviceCount) && deviceCount >= 0 && Math.floor(deviceCount) === deviceCount)) {
+    sessionClipInspectionError("read_failed", ["track", "devices"], requestText);
+    return;
+  }
+  var devices = [];
+  for (var deviceIndex = 0; deviceIndex < deviceCount; deviceIndex += 1) {
+    var devicePath = trackPath + " devices " + deviceIndex;
+    var deviceApi = null;
+    try {
+      deviceApi = new LiveAPI(null, devicePath);
+    } catch (errDevice) {
+      debug("Session clip inspection could not read device " + deviceIndex + ": " + errDevice);
+      sessionClipInspectionError("read_failed", ["device", deviceIndex], requestText);
+      return;
+    }
+    if (!deviceApi || !(Number(deviceApi.id) > 0)) {
+      sessionClipInspectionError("read_failed", ["device", deviceIndex], requestText);
+      return;
+    }
+    var device = {
+      index: deviceIndex,
+      path: normalizeLiveApiPath(deviceApi.path, devicePath),
+      id: Number(deviceApi.id),
+    };
+    readOptionalSessionClipInspectionProperty(deviceApi, "name", device);
+    readOptionalSessionClipInspectionProperty(deviceApi, "class_name", device);
+    readOptionalSessionClipInspectionProperty(deviceApi, "type", device);
+    devices.push(device);
+  }
+
+  var rawNotes = null;
+  try {
+    rawNotes = clipApi.call("get_all_notes_extended");
+  } catch (errNotes) {
+    debug("Session clip inspection note read failed: " + errNotes);
+    sessionClipInspectionError("read_failed", ["notes"], requestText);
+    return;
+  }
+  var parsedNotes = parseSessionClipInspectionNotes(rawNotes, requestText);
+  if (parsedNotes === null) return;
+  var notes = [];
+  for (var noteIndex = 0; noteIndex < parsedNotes.length; noteIndex += 1) {
+    var copiedNote = copySessionClipInspectionNote(
+      parsedNotes[noteIndex],
+      noteIndex,
+      requestText
+    );
+    if (copiedNote === null) return;
+    notes.push(copiedNote);
+  }
+
+  var metadata = {
+    inspection_id: newSessionClipInspectionId(),
+    correlation: {
+      request_id: requestText,
+      track_index: track,
+      slot_index: slot,
+    },
+    snapshot: {
+      started_ms: startedMs,
+      completed_ms: nowMs(),
+      atomic: false,
+      consistent: true,
+    },
+  };
+  var contextData = {
+    context: "session",
+    track: {
+      index: track,
+      path: trackPath,
+      id: Number(trackApi.id),
+      name: trackName.value,
+    },
+    clip: clipData,
+    summary: buildSessionClipInspectionSummary(notes),
+  };
+  var built = buildSessionClipInspectionFragments(
+    metadata,
+    contextData,
+    devices,
+    notes,
+    requestText
+  );
+  if (!built.ok) {
+    sessionClipInspectionError(built.error, built.details, requestText);
+    return;
+  }
+
+  var finalClipApi = null;
+  try {
+    finalClipApi = new LiveAPI(null, clipPath);
+  } catch (errReread) {
+    debug("Session clip inspection clip id reread failed: " + errReread);
+    sessionClipInspectionError("read_failed", ["clip", "id_reread"], requestText);
+    return;
+  }
+  var finalClipId = finalClipApi ? Number(finalClipApi.id) : 0;
+  if (finalClipId !== initialClipId) {
+    sessionClipInspectionError(
+      "snapshot_changed",
+      [initialClipId, finalClipId],
+      requestText
+    );
+    return;
+  }
+
+  for (var fragmentIndex = 0; fragmentIndex < built.fragments.length; fragmentIndex += 1) {
+    ackWithRequest(
+      "api_session_clip_inspect",
+      [built.fragments[fragmentIndex]],
+      requestText
+    );
+  }
+}
+
 function api_observe(path, property, optionsJson, requestId) {
   if (!ensureInitialized(requestId)) return;
   var contextName = "api_observe";
@@ -1350,6 +2065,7 @@ var API_FALLBACK_HANDLERS = {
   "api_insert_device": api_insert_device,
   "api_insert_chain": api_insert_chain,
   "api_drum_chain_in_note": api_drum_chain_in_note,
+  "api_session_clip_inspect": api_session_clip_inspect,
 };
 
 function anything() {

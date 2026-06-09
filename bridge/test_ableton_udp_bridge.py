@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -59,6 +60,144 @@ def _base_args() -> list[str]:
         "--add-audio-tracks",
         "0",
     ]
+
+
+def _run_session_clip_inspect_js(
+    *,
+    notes: list[dict[str, object]],
+    devices: list[dict[str, object]],
+    request_id: str = "req-inspect",
+    clip_ids: list[int] | None = None,
+) -> list[list[object]]:
+    fixture = {
+        "notes": notes,
+        "devices": devices,
+        "clip_ids": clip_ids or [303, 303],
+    }
+    return _run_bridge_js(
+        f"""
+const fixture = {json.dumps(fixture)};
+const outputs = [];
+let clipOpenCount = 0;
+context.outlet = (...args) => outputs.push(args);
+context.ensureInitialized = () => true;
+context.LiveAPI = function LiveAPI(_callback, rawPath) {{
+  const path = String(rawPath);
+  if (path === "live_set tracks 2") {{
+    return {{
+      id: 101,
+      path,
+      get: (property) => {{
+        if (property === "has_midi_input") return 1;
+        if (property === "name") return "Inspection Track";
+        throw new Error("unknown track property " + property);
+      }},
+      getcount: (child) => {{
+        if (child === "clip_slots") return 8;
+        if (child === "devices") return fixture.devices.length;
+        throw new Error("unknown track child " + child);
+      }},
+    }};
+  }}
+  if (path === "live_set tracks 2 clip_slots 3") {{
+    return {{
+      id: 202,
+      path,
+      get: (property) => {{
+        if (property === "has_clip") return 1;
+        throw new Error("unknown slot property " + property);
+      }},
+    }};
+  }}
+  if (path === "live_set tracks 2 clip_slots 3 clip") {{
+    const id = fixture.clip_ids[Math.min(clipOpenCount, fixture.clip_ids.length - 1)];
+    clipOpenCount += 1;
+    return {{
+      id,
+      path,
+      get: (property) => {{
+        const values = {{
+          name: "Inspection Clip",
+          start_marker: 0,
+          end_marker: 8,
+          length: 8,
+          looping: 1,
+          loop_start: 0,
+          loop_end: 8,
+        }};
+        if (Object.prototype.hasOwnProperty.call(values, property)) return values[property];
+        throw new Error("unknown clip property " + property);
+      }},
+      call: (method) => {{
+        if (method === "get_all_notes_extended") {{
+          return JSON.stringify({{ notes: fixture.notes }});
+        }}
+        throw new Error("unknown clip method " + method);
+      }},
+    }};
+  }}
+  const match = path.match(/^live_set tracks 2 devices (\\d+)$/);
+  if (match) {{
+    const index = Number(match[1]);
+    const item = fixture.devices[index];
+    return {{
+      id: 400 + index,
+      path,
+      get: (property) => {{
+        if (Object.prototype.hasOwnProperty.call(item, property)) return item[property];
+        throw new Error("unavailable device property " + property);
+      }},
+    }};
+  }}
+  throw new Error("unknown path " + path);
+}};
+context.api_session_clip_inspect(2, 3, 1, {json.dumps(request_id)});
+return outputs.filter((args) => args[1] === "/ack");
+"""
+    )
+
+
+def _inspection_fragment(
+    *,
+    index: int,
+    count: int,
+    kind: str,
+    data: dict[str, object],
+    request_id: str = "req-assembly",
+    inspection_id: str = "inspection-1",
+) -> dict[str, object]:
+    return {
+        "schema": "codex-live-bridge.session-midi-clip-inspection",
+        "schema_version": 1,
+        "producer_version": "3.1.0",
+        "inspection_id": inspection_id,
+        "correlation": {
+            "request_id": request_id,
+            "track_index": 2,
+            "slot_index": 3,
+        },
+        "snapshot": {
+            "started_ms": 100,
+            "completed_ms": 110,
+            "atomic": False,
+            "consistent": True,
+        },
+        "transfer": {
+            "fragment_index": index,
+            "fragment_count": count,
+            "fragment_kind": kind,
+            "is_last": index == count - 1,
+            "packet_budget_bytes": 4096,
+        },
+        "completeness": {
+            "track": "complete",
+            "clip": "complete",
+            "devices": "complete",
+            "notes": "complete",
+            "missing_fields": [],
+        },
+        "data": data,
+    }
 
 
 class BridgeCliTests(unittest.TestCase):
@@ -150,6 +289,50 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn("/api_unobserve", addresses)
         self.assertIn("/api_clear_observers", addresses)
 
+    def test_parse_and_build_session_clip_inspect_commands(self) -> None:
+        cfg = bridge.parse_args(
+            _base_args()
+            + [
+                "--api-session-clip-inspect",
+                "2",
+                "3",
+                "req-a",
+                "--api-session-clip-inspect",
+                "4",
+                "5",
+                "req-b",
+            ]
+        )
+
+        self.assertEqual(
+            cfg.api_session_clip_inspects,
+            ((2, 3, "req-a"), (4, 5, "req-b")),
+        )
+        commands = [
+            command
+            for command in bridge.build_commands(cfg)
+            if command.address == "/api/session_clip_inspect"
+        ]
+        self.assertEqual(
+            commands,
+            [
+                bridge.OscCommand("/api/session_clip_inspect", (2, 3, 1, "req-a")),
+                bridge.OscCommand("/api/session_clip_inspect", (4, 5, 1, "req-b")),
+            ],
+        )
+
+    def test_session_clip_inspect_cli_rejects_invalid_inputs(self) -> None:
+        invalid_argv = [
+            ["--api-session-clip-inspect", "-1", "0", "req"],
+            ["--api-session-clip-inspect", "0", "-1", "req"],
+            ["--api-session-clip-inspect", "0", "0", ""],
+            ["--api-session-clip-inspect", "0", "0", "é" * 65],
+        ]
+
+        for argv in invalid_argv:
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                bridge.parse_args(_base_args() + argv)
+
     def test_rpc_ack_summary_children(self) -> None:
         children = [
             {"index": 0, "id": 1, "path": "live_set tracks 0", "name": "Track 1"},
@@ -221,6 +404,39 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual(event.payload["value"], 121.5)
         self.assertEqual(event.payload["event_count"], 2)
         self.assertEqual(event.payload["dropped_events"], 1)
+
+    def test_parse_and_summarize_session_clip_inspect_fragment(self) -> None:
+        fragment = _inspection_fragment(
+            index=0,
+            count=1,
+            kind="complete",
+            request_id="req-fragment",
+            data={
+                "context": "session",
+                "track": {"index": 2},
+                "clip": {"slot_index": 3},
+                "summary": {"note_count": 0, "pitch_min": None, "pitch_max": None},
+                "device_offset": 0,
+                "device_count": 0,
+                "device_total": 0,
+                "devices": [],
+                "note_offset": 0,
+                "note_count": 0,
+                "note_total": 0,
+                "notes": [],
+            },
+        )
+        args = ["api_session_clip_inspect", json.dumps(fragment), "req-fragment"]
+
+        event = bridge.parse_ack_event("/ack", args)
+        lines = bridge.summarize_ack("/ack", args)
+
+        self.assertEqual(event.request_id, "req-fragment")
+        self.assertEqual(event.payload["fragment"], fragment)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("api_session_clip_inspect complete fragment=1/1", lines[0])
+        self.assertIn("notes=0", lines[0])
+        self.assertNotIn(json.dumps(fragment), lines[0])
 
     def test_error_ack_terminal_slot_preserves_details_and_optional_request_id(self) -> None:
         without_request = bridge.parse_ack_event(
@@ -455,6 +671,7 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn("function anything", js_source)
         self.assertNotIn("/api/session_context", route_tokens)
         self.assertNotIn("/api/insert_device", route_tokens)
+        self.assertNotIn("/api/session_clip_inspect", route_tokens)
         self.assertTrue(
             any(
                 line.get("source") == [route_box["id"], fallback_outlet]
@@ -479,7 +696,591 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn("var API_FALLBACK_HANDLERS = {", js_source)
         self.assertIn('"api_session_context": api_session_context', js_source)
         self.assertIn('"api_insert_device": api_insert_device', js_source)
+        self.assertIn('"api_session_clip_inspect": api_session_clip_inspect', js_source)
         self.assertNotIn("var target = this[targetName];", js_source)
+
+    def test_js_session_clip_inspect_validation_errors_are_correlated(self) -> None:
+        result = _run_bridge_js(
+            """
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+context.ensureInitialized = () => true;
+context.api_session_clip_inspect(0, 0, 1, "");
+context.api_session_clip_inspect(-1, 0, 1, "req-track");
+context.api_session_clip_inspect(0, 1.5, 1, "req-slot");
+context.api_session_clip_inspect(0, 0, 2, "req-schema");
+context.api_session_clip_inspect(0, 0, 1, "é".repeat(65));
+return outputs.filter((args) => args[1] === "/ack");
+"""
+        )
+
+        self.assertEqual(
+            [args[3] for args in result],
+            ["api_session_clip_inspect_validation_failed"] * 5,
+        )
+        self.assertEqual(result[0][-2:], ["request_correlation", "req:"])
+        self.assertEqual(result[1][-1], "req:req-track")
+        self.assertEqual(result[2][-1], "req:req-slot")
+        self.assertEqual(result[3][-1], "req:req-schema")
+
+    def test_js_session_clip_inspect_empty_clip_is_one_complete_fragment(self) -> None:
+        outputs = _run_session_clip_inspect_js(notes=[], devices=[])
+
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(outputs[0][2], "api_session_clip_inspect")
+        self.assertEqual(outputs[0][4], "req-inspect")
+        fragment = json.loads(str(outputs[0][3]))
+        self.assertEqual(fragment["transfer"]["fragment_kind"], "complete")
+        self.assertEqual(fragment["transfer"]["fragment_count"], 1)
+        self.assertTrue(fragment["transfer"]["is_last"])
+        self.assertEqual(fragment["data"]["summary"]["note_count"], 0)
+        self.assertIsNone(fragment["data"]["summary"]["pitch_min"])
+        self.assertIsNone(fragment["data"]["summary"]["pitch_max"])
+        self.assertEqual(fragment["data"]["devices"], [])
+        self.assertEqual(fragment["data"]["notes"], [])
+
+    def test_js_session_clip_inspect_preserves_metadata_devices_and_all_note_fields(self) -> None:
+        note = {
+            "note_id": 91,
+            "pitch": 64,
+            "start_time": 1.25,
+            "duration": 0.5,
+            "velocity": 102,
+            "mute": 0,
+            "probability": 0.75,
+            "velocity_deviation": -12.5,
+            "release_velocity": 88,
+            "ignored": "not part of the protocol",
+        }
+        outputs = _run_session_clip_inspect_js(
+            notes=[note],
+            devices=[
+                {
+                    "name": "Operator",
+                    "class_name": "Operator",
+                    "type": 1,
+                },
+                {"name": "Optional Fields Device"},
+            ],
+        )
+
+        fragment = json.loads(str(outputs[0][3]))
+        data = fragment["data"]
+        self.assertEqual(fragment["schema"], "codex-live-bridge.session-midi-clip-inspection")
+        self.assertEqual(fragment["producer_version"], "3.1.0")
+        self.assertEqual(data["context"], "session")
+        self.assertEqual(
+            data["track"],
+            {
+                "index": 2,
+                "path": "live_set tracks 2",
+                "id": 101,
+                "name": "Inspection Track",
+            },
+        )
+        self.assertEqual(
+            data["clip"],
+            {
+                "slot_index": 3,
+                "path": "live_set tracks 2 clip_slots 3 clip",
+                "id": 303,
+                "name": "Inspection Clip",
+                "start_marker": 0,
+                "end_marker": 8,
+                "live_length": 8,
+                "looping": 1,
+                "loop_start": 0,
+                "loop_end": 8,
+            },
+        )
+        self.assertEqual(data["summary"], {"note_count": 1, "pitch_min": 64, "pitch_max": 64})
+        self.assertEqual(
+            data["devices"][0],
+            {
+                "index": 0,
+                "path": "live_set tracks 2 devices 0",
+                "id": 400,
+                "name": "Operator",
+                "class_name": "Operator",
+                "type": 1,
+            },
+        )
+        self.assertEqual(
+            data["devices"][1],
+            {
+                "index": 1,
+                "path": "live_set tracks 2 devices 1",
+                "id": 401,
+                "name": "Optional Fields Device",
+            },
+        )
+        self.assertEqual(data["notes"], [{key: note[key] for key in note if key != "ignored"}])
+
+    def test_js_session_clip_inspect_pages_large_payloads_with_bounded_packets(self) -> None:
+        devices = [
+            {
+                "name": f"Device {index} " + ("D" * 140),
+                "class_name": "MockDevice",
+                "type": 1,
+            }
+            for index in range(30)
+        ]
+        notes = [
+            {
+                "note_id": index,
+                "pitch": 36 + (index % 48),
+                "start_time": index * 0.25,
+                "duration": 0.25,
+                "velocity": 80 + (index % 40),
+                "mute": index % 2,
+                "probability": 0.5,
+                "velocity_deviation": -10,
+                "release_velocity": 64,
+            }
+            for index in range(180)
+        ]
+        outputs = _run_session_clip_inspect_js(notes=notes, devices=devices)
+        fragments = [json.loads(str(args[3])) for args in outputs]
+
+        self.assertGreater(len(fragments), 2)
+        self.assertEqual(
+            [fragment["transfer"]["fragment_index"] for fragment in fragments],
+            list(range(len(fragments))),
+        )
+        self.assertTrue(fragments[-1]["transfer"]["is_last"])
+        for output in outputs:
+            packet = bridge.encode_osc_message(
+                "/ack",
+                ("api_session_clip_inspect", str(output[3]), str(output[4])),
+            )
+            self.assertLessEqual(len(packet), 4096)
+
+        device_pages = [
+            fragment["data"]
+            for fragment in fragments
+            if fragment["transfer"]["fragment_kind"] == "device_page"
+        ]
+        note_pages = [
+            fragment["data"]
+            for fragment in fragments
+            if fragment["transfer"]["fragment_kind"] == "note_page"
+        ]
+        self.assertEqual(
+            [page["device_offset"] for page in device_pages],
+            [sum(previous["device_count"] for previous in device_pages[:index]) for index in range(len(device_pages))],
+        )
+        self.assertEqual(
+            [page["note_offset"] for page in note_pages],
+            [sum(previous["note_count"] for previous in note_pages[:index]) for index in range(len(note_pages))],
+        )
+        emitted_devices = [item for page in device_pages for item in page["devices"]]
+        emitted_notes = [item for page in note_pages for item in page["notes"]]
+        self.assertEqual([item["index"] for item in emitted_devices], list(range(len(devices))))
+        self.assertEqual([item["note_id"] for item in emitted_notes], list(range(len(notes))))
+
+    def test_js_session_clip_inspect_packet_size_matches_python_osc_encoding(self) -> None:
+        cases = [
+            ("{}", "r"),
+            ('{"name":"é"}', "req-é"),
+            ('{"name":"𝄞","padding":"abc"}', "四拍子"),
+        ]
+        js_sizes = _run_bridge_js(
+            f"""
+const cases = {json.dumps(cases)};
+return cases.map((item) =>
+  context.sessionClipInspectionAckPacketByteLength(item[0], item[1])
+);
+"""
+        )
+        python_sizes = [
+            len(
+                bridge.encode_osc_message(
+                    "/ack",
+                    ("api_session_clip_inspect", fragment_json, request_id),
+                )
+            )
+            for fragment_json, request_id in cases
+        ]
+
+        self.assertEqual(js_sizes, python_sizes)
+
+    def test_js_session_clip_inspection_ids_are_unique(self) -> None:
+        inspection_ids = _run_bridge_js(
+            """
+context.nowMs = () => 123456;
+return [
+  context.newSessionClipInspectionId(),
+  context.newSessionClipInspectionId(),
+];
+"""
+        )
+
+        self.assertEqual(inspection_ids, ["session_clip_123456_1", "session_clip_123456_2"])
+
+    def test_js_session_clip_inspect_snapshot_change_emits_only_correlated_error(self) -> None:
+        outputs = _run_session_clip_inspect_js(
+            notes=[],
+            devices=[],
+            clip_ids=[303, 999],
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(outputs[0][2:5], ["error", "api_session_clip_inspect_snapshot_changed", 303])
+        self.assertEqual(outputs[0][-2:], ["request_correlation", "req:req-inspect"])
+
+    def test_js_session_clip_inspect_runtime_errors_use_reserved_codes(self) -> None:
+        result = _run_bridge_js(
+            """
+function runCase(LiveAPI) {
+  const outputs = [];
+  context.outlet = (...args) => outputs.push(args);
+  context.ensureInitialized = () => true;
+  context.LiveAPI = LiveAPI;
+  context.api_session_clip_inspect(0, 0, 1, "req-runtime");
+  return outputs.find((args) => args[1] === "/ack");
+}
+function trackApi(overrides) {
+  return Object.assign({
+    id: 10,
+    path: "live_set tracks 0",
+    get: (property) => {
+      if (property === "has_midi_input") return 1;
+      if (property === "name") return "Track";
+      throw new Error("unknown property");
+    },
+    getcount: (child) => {
+      if (child === "clip_slots") return 1;
+      if (child === "devices") return 0;
+      throw new Error("unknown child");
+    },
+  }, overrides || {});
+}
+function clipApi(callResult) {
+  return {
+    id: 30,
+    path: "live_set tracks 0 clip_slots 0 clip",
+    get: (property) => ({
+      name: "Clip",
+      start_marker: 0,
+      end_marker: 4,
+      length: 4,
+      looping: 1,
+      loop_start: 0,
+      loop_end: 4,
+    })[property],
+    call: () => callResult,
+  };
+}
+return [
+  runCase(function LiveAPI() { return { id: 0, path: "" }; }),
+  runCase(function LiveAPI(_callback, path) {
+    if (path === "live_set tracks 0") {
+      return trackApi({ get: (property) => property === "has_midi_input" ? 0 : "Track" });
+    }
+    throw new Error("unexpected path");
+  }),
+  runCase(function LiveAPI(_callback, path) {
+    if (path === "live_set tracks 0") return trackApi();
+    if (path === "live_set tracks 0 clip_slots 0") {
+      return { id: 20, path, get: () => 0 };
+    }
+    throw new Error("unexpected path");
+  }),
+  runCase(function LiveAPI(_callback, path) {
+    if (path === "live_set tracks 0") {
+      return trackApi({ get: () => { throw new Error("read failed"); } });
+    }
+    throw new Error("unexpected path");
+  }),
+  runCase(function LiveAPI(_callback, path) {
+    if (path === "live_set tracks 0") return trackApi();
+    if (path === "live_set tracks 0 clip_slots 0") {
+      return { id: 20, path, get: () => 1 };
+    }
+    if (path === "live_set tracks 0 clip_slots 0 clip") return clipApi("not-json");
+    throw new Error("unexpected path");
+  }),
+];
+"""
+        )
+
+        self.assertEqual(
+            [args[3] for args in result],
+            [
+                "api_session_clip_inspect_not_found",
+                "api_session_clip_inspect_not_midi",
+                "api_session_clip_inspect_no_clip",
+                "api_session_clip_inspect_read_failed",
+                "api_session_clip_inspect_parse_failed",
+            ],
+        )
+        for args in result:
+            self.assertEqual(args[-2:], ["request_correlation", "req:req-runtime"])
+
+    def test_js_session_clip_inspect_reports_serialization_and_item_too_large(self) -> None:
+        serialization_error = _run_bridge_js(
+            """
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+const circular = {};
+circular.self = circular;
+const built = context.buildSessionClipInspectionFragments(
+  {
+    inspection_id: "inspection-circular",
+    correlation: { request_id: "req-serialization", track_index: 0, slot_index: 0 },
+    snapshot: { started_ms: 1, completed_ms: 2, atomic: false, consistent: true },
+  },
+  {
+    context: "session",
+    track: circular,
+    clip: { slot_index: 0 },
+    summary: { note_count: 0, pitch_min: null, pitch_max: null },
+  },
+  [],
+  [],
+  "req-serialization"
+);
+context.sessionClipInspectionError(built.error, built.details, "req-serialization");
+return outputs.filter((args) => args[1] === "/ack");
+"""
+        )
+        item_too_large = _run_session_clip_inspect_js(
+            notes=[],
+            devices=[{"name": "X" * 5000}],
+            request_id="req-large-item",
+        )
+
+        self.assertEqual(
+            serialization_error[0][3],
+            "api_session_clip_inspect_serialization_failed",
+        )
+        self.assertEqual(
+            item_too_large[0][3],
+            "api_session_clip_inspect_item_too_large",
+        )
+        self.assertEqual(
+            item_too_large[0][-2:],
+            ["request_correlation", "req:req-large-item"],
+        )
+
+    def test_legacy_session_clip_inspect_source_and_ack_remain_unchanged(self) -> None:
+        source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
+        function_source = source.split("function inspect_session_clip_notes", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        digest = hashlib.sha256(
+            ("function inspect_session_clip_notes" + function_source + "\n}\n").encode()
+        ).hexdigest()
+        self.assertEqual(
+            digest,
+            "e3cfa4781d667e4c21c3c146cbe06aab398786bed5ef63b3ed0e6f1828388b63",
+        )
+
+        raw_notes = '{"notes":[{"pitch":60,"start_time":0,"duration":1,"velocity":100}]}'
+        result = _run_bridge_js(
+            f"""
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+context.ensureInitialized = () => true;
+context.song = {{ getcount: (child) => child === "tracks" ? 3 : 0 }};
+context.LiveAPI = function LiveAPI(_callback, path) {{
+  if (path === "live_set tracks 2") {{
+    return {{ get: (property) => property === "has_midi_input" ? 1 : null }};
+  }}
+  if (path === "live_set tracks 2 clip_slots 3") {{
+    return {{ get: (property) => property === "has_clip" ? 1 : null }};
+  }}
+  if (path === "live_set tracks 2 clip_slots 3 clip") {{
+    return {{
+      get: (property) => property === "length" ? 4 : null,
+      call: () => {json.dumps(raw_notes)},
+    }};
+  }}
+  throw new Error("unknown path");
+}};
+context.inspect_session_clip_notes(2, 3);
+return outputs.filter((args) => args[1] === "/ack");
+"""
+        )
+        self.assertEqual(
+            result,
+            [[0, "/ack", "inspect_session_clip_notes", 2, 3, 1, 60, 60, 4, raw_notes]],
+        )
+
+    def test_session_clip_inspection_assembler_accepts_out_of_order_duplicates(self) -> None:
+        fragments = [
+            _inspection_fragment(
+                index=0,
+                count=3,
+                kind="context",
+                data={
+                    "context": "session",
+                    "track": {"index": 2},
+                    "clip": {"slot_index": 3},
+                    "summary": {"note_count": 2, "pitch_min": 60, "pitch_max": 64},
+                },
+            ),
+            _inspection_fragment(
+                index=1,
+                count=3,
+                kind="device_page",
+                data={
+                    "device_offset": 0,
+                    "device_count": 1,
+                    "device_total": 1,
+                    "devices": [{"index": 0, "name": "Operator"}],
+                },
+            ),
+            _inspection_fragment(
+                index=2,
+                count=3,
+                kind="note_page",
+                data={
+                    "note_offset": 0,
+                    "note_count": 2,
+                    "note_total": 2,
+                    "notes": [{"note_id": 1, "pitch": 60}, {"note_id": 2, "pitch": 64}],
+                },
+            ),
+        ]
+        assembler = bridge.SessionClipInspectionAssembler()
+
+        self.assertIsNone(assembler.add_fragment(fragments[2]))
+        self.assertIsNone(assembler.add_fragment(fragments[2]))
+        self.assertIsNone(assembler.add_fragment(fragments[0]))
+        assembled = assembler.add_fragment(fragments[1])
+
+        self.assertIsNotNone(assembled)
+        assert assembled is not None
+        self.assertEqual(assembled["context"], "session")
+        self.assertEqual(assembled["devices"], [{"index": 0, "name": "Operator"}])
+        self.assertEqual(
+            assembled["notes"],
+            [{"note_id": 1, "pitch": 60}, {"note_id": 2, "pitch": 64}],
+        )
+        self.assertEqual(
+            assembled["transport"],
+            {
+                "complete": True,
+                "fragment_count": 3,
+                "received_fragment_count": 3,
+                "fragment_indexes": [0, 1, 2],
+                "packet_budget_bytes": 4096,
+            },
+        )
+
+    def test_session_clip_inspection_assembler_rejects_conflicts_and_gaps(self) -> None:
+        context_fragment = _inspection_fragment(
+            index=0,
+            count=2,
+            kind="context",
+            data={
+                "context": "session",
+                "track": {"index": 2},
+                "clip": {"slot_index": 3},
+                "summary": {"note_count": 0, "pitch_min": None, "pitch_max": None},
+            },
+        )
+        assembler = bridge.SessionClipInspectionAssembler()
+        assembler.add_fragment(context_fragment)
+
+        conflicting = json.loads(json.dumps(context_fragment))
+        conflicting["data"]["track"]["index"] = 9
+        with self.assertRaisesRegex(bridge.SessionClipInspectionAssemblyError, "conflicting duplicate"):
+            assembler.add_fragment(conflicting)
+        with self.assertRaisesRegex(bridge.SessionClipInspectionAssemblyError, "missing fragment indexes"):
+            assembler.assemble("req-assembly", "inspection-1")
+
+        mixed_count = _inspection_fragment(
+            index=1,
+            count=3,
+            kind="note_page",
+            data={
+                "note_offset": 0,
+                "note_count": 0,
+                "note_total": 0,
+                "notes": [],
+            },
+        )
+        with self.assertRaisesRegex(bridge.SessionClipInspectionAssemblyError, "mixed metadata"):
+            assembler.add_fragment(mixed_count)
+
+    def test_session_clip_inspection_assembler_rejects_malformed_and_noncontiguous_pages(self) -> None:
+        assembler = bridge.SessionClipInspectionAssembler()
+        malformed = _inspection_fragment(
+            index=0,
+            count=1,
+            kind="note_page",
+            data={
+                "note_offset": 0,
+                "note_count": 2,
+                "note_total": 1,
+                "notes": [{"note_id": 1}],
+            },
+        )
+        with self.assertRaisesRegex(bridge.SessionClipInspectionAssemblyError, "inconsistent counts"):
+            assembler.add_fragment(malformed)
+
+        fragments = [
+            _inspection_fragment(
+                index=0,
+                count=3,
+                kind="context",
+                data={
+                    "context": "session",
+                    "track": {"index": 2},
+                    "clip": {"slot_index": 3},
+                    "summary": {"note_count": 2, "pitch_min": 60, "pitch_max": 64},
+                },
+            ),
+            _inspection_fragment(
+                index=1,
+                count=3,
+                kind="note_page",
+                data={
+                    "note_offset": 0,
+                    "note_count": 1,
+                    "note_total": 3,
+                    "notes": [{"note_id": 1, "pitch": 60}],
+                },
+            ),
+            _inspection_fragment(
+                index=2,
+                count=3,
+                kind="note_page",
+                data={
+                    "note_offset": 2,
+                    "note_count": 1,
+                    "note_total": 3,
+                    "notes": [{"note_id": 2, "pitch": 64}],
+                },
+            ),
+        ]
+        assembler = bridge.SessionClipInspectionAssembler()
+        assembler.add_fragment(fragments[0])
+        assembler.add_fragment(fragments[1])
+        with self.assertRaisesRegex(bridge.SessionClipInspectionAssemblyError, "noncontiguous note offsets"):
+            assembler.add_fragment(fragments[2])
+
+    def test_session_clip_inspection_assembler_rejects_mixed_transfer_metadata(self) -> None:
+        fragment = _inspection_fragment(
+            index=0,
+            count=2,
+            kind="context",
+            data={
+                "context": "session",
+                "track": {"index": 2},
+                "clip": {"slot_index": 3},
+                "summary": {"note_count": 0, "pitch_min": None, "pitch_max": None},
+            },
+        )
+        fragment["transfer"]["is_last"] = True
+
+        with self.assertRaisesRegex(
+            bridge.SessionClipInspectionAssemblyError,
+            "mixed transfer metadata",
+        ):
+            bridge.SessionClipInspectionAssembler().add_fragment(fragment)
 
     def test_js_drum_chain_note_rejects_fractional_values(self) -> None:
         js_source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
@@ -940,6 +1741,125 @@ return cases.map((testCase) => {
         self.assertEqual(len(acks), 1)
         self.assertGreater(timeouts[0], 0.90)
         self.assertLessEqual(timeouts[1], 0.05 + 1e-6)
+
+    def test_session_clip_inspect_waits_for_assembly_instead_of_quiet_window(self) -> None:
+        fragments = [
+            _inspection_fragment(
+                index=0,
+                count=2,
+                kind="context",
+                request_id="req-wait",
+                inspection_id="inspection-wait",
+                data={
+                    "context": "session",
+                    "track": {"index": 2},
+                    "clip": {"slot_index": 3},
+                    "summary": {"note_count": 1, "pitch_min": 60, "pitch_max": 60},
+                },
+            ),
+            _inspection_fragment(
+                index=1,
+                count=2,
+                kind="note_page",
+                request_id="req-wait",
+                inspection_id="inspection-wait",
+                data={
+                    "note_offset": 0,
+                    "note_count": 1,
+                    "note_total": 1,
+                    "notes": [{"note_id": 1, "pitch": 60}],
+                },
+            ),
+        ]
+        packets = [
+            bridge.encode_osc_message(
+                "/ack",
+                ("api_session_clip_inspect", json.dumps(fragment), "req-wait"),
+            )
+            for fragment in fragments
+        ]
+        timeouts: list[float] = []
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.ready = False
+                self.packet_index = 0
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if not self.ready:
+                    raise BlockingIOError
+                self.ready = False
+                packet = packets[self.packet_index]
+                self.packet_index += 1
+                return packet, ("127.0.0.1", 9001)
+
+        fake_sock = _FakeSock()
+
+        def _fake_select(
+            _r: object,
+            _w: object,
+            _e: object,
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            timeouts.append(float(timeout))
+            fake_sock.ready = True
+            return [fake_sock], [], []
+
+        with mock.patch("ableton_udp_bridge.select.select", side_effect=_fake_select):
+            acks = bridge.wait_for_session_clip_inspection_acks(
+                fake_sock,
+                timeout_s=1.0,
+                request_id="req-wait",
+            )
+
+        self.assertEqual(len(acks), 2)
+        self.assertEqual(fake_sock.packet_index, 2)
+        self.assertGreater(timeouts[1], 0.5)
+
+    def test_send_commands_uses_completion_aware_collection_for_session_clip_inspect(self) -> None:
+        cfg = bridge.parse_args(
+            _base_args()
+            + [
+                "--api-session-clip-inspect",
+                "2",
+                "3",
+                "req-send",
+            ]
+        )
+        command = next(
+            command
+            for command in bridge.build_commands(cfg)
+            if command.address == "/api/session_clip_inspect"
+        )
+        calls: list[tuple[object, ...]] = []
+
+        class _FakeAckSock:
+            def close(self) -> None:
+                return None
+
+        class _FakeSendSock:
+            def sendto(self, _payload: bytes, _target: tuple[str, int]) -> None:
+                return None
+
+            def __enter__(self) -> "_FakeSendSock":
+                return self
+
+            def __exit__(self, *_exc: object) -> bool:
+                return False
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=_FakeAckSock()),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=_FakeSendSock()),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch(
+                "ableton_udp_bridge._collect_and_print_session_clip_inspection_acks",
+                side_effect=lambda *args: calls.append(args),
+            ),
+        ):
+            bridge.send_commands(cfg, [command])
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2], "req-send")
 
     def test_send_commands_drains_stale_acks_before_each_send(self) -> None:
         cfg = bridge.parse_args(_base_args() + ["--status"])

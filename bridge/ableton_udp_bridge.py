@@ -89,6 +89,7 @@ class BridgeConfig:
     api_insert_devices: Tuple[Tuple[str, str, str, str | None], ...] = ()
     api_insert_chains: Tuple[Tuple[str, str, str | None], ...] = ()
     api_drum_chain_in_notes: Tuple[Tuple[str, int, str | None], ...] = ()
+    api_session_clip_inspects: Tuple[Tuple[int, int, str], ...] = ()
     ack_mode: str = "per_command"
     ack_flush_interval: int = 10
     listen: bool = False
@@ -118,6 +119,387 @@ class AckEvent:
     request_id: str | None
     payload: dict[str, object]
     is_error: bool = False
+
+
+class SessionClipInspectionAssemblyError(ValueError):
+    """Raised when session clip inspection fragments cannot be assembled safely."""
+
+
+class SessionClipInspectionAssembler:
+    """Assemble packet-bounded session clip inspection fragments."""
+
+    SCHEMA = "codex-live-bridge.session-midi-clip-inspection"
+    SCHEMA_VERSION = 1
+    PRODUCER_VERSION = "3.1.0"
+    PACKET_BUDGET_BYTES = 4096
+    _FRAGMENT_KINDS = {"complete", "context", "device_page", "note_page"}
+
+    def __init__(self) -> None:
+        self._states: dict[tuple[str, str], dict[str, object]] = {}
+
+    @staticmethod
+    def _require_dict(value: object, label: str) -> dict[str, object]:
+        if not isinstance(value, dict):
+            raise SessionClipInspectionAssemblyError(f"malformed fragment: {label}")
+        return value
+
+    @staticmethod
+    def _require_list(value: object, label: str) -> list[object]:
+        if not isinstance(value, list):
+            raise SessionClipInspectionAssemblyError(f"malformed fragment: {label}")
+        return value
+
+    @staticmethod
+    def _require_non_negative_int(value: object, label: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SessionClipInspectionAssemblyError(f"malformed fragment: {label}")
+        return value
+
+    @staticmethod
+    def _canonical(value: object) -> str:
+        try:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise SessionClipInspectionAssemblyError(
+                "malformed fragment: not JSON serializable"
+            ) from exc
+
+    def _validate_page(
+        self,
+        data: dict[str, object],
+        *,
+        offset_field: str,
+        count_field: str,
+        total_field: str,
+        items_field: str,
+    ) -> None:
+        offset = self._require_non_negative_int(data.get(offset_field), offset_field)
+        count = self._require_non_negative_int(data.get(count_field), count_field)
+        total = self._require_non_negative_int(data.get(total_field), total_field)
+        items = self._require_list(data.get(items_field), items_field)
+        if count != len(items) or offset + count > total:
+            raise SessionClipInspectionAssemblyError("inconsistent counts")
+
+    def _validate_fragment(
+        self,
+        fragment: object,
+        request_id: str | None,
+    ) -> tuple[
+        dict[str, object],
+        tuple[str, str],
+        int,
+        int,
+        str,
+        str,
+    ]:
+        value = self._require_dict(fragment, "root")
+        if value.get("schema") != self.SCHEMA:
+            raise SessionClipInspectionAssemblyError("malformed fragment: schema")
+        if value.get("schema_version") != self.SCHEMA_VERSION:
+            raise SessionClipInspectionAssemblyError("malformed fragment: schema_version")
+        if value.get("producer_version") != self.PRODUCER_VERSION:
+            raise SessionClipInspectionAssemblyError("malformed fragment: producer_version")
+
+        inspection_id = value.get("inspection_id")
+        if not isinstance(inspection_id, str) or not inspection_id:
+            raise SessionClipInspectionAssemblyError("malformed fragment: inspection_id")
+
+        correlation = self._require_dict(value.get("correlation"), "correlation")
+        fragment_request_id = correlation.get("request_id")
+        if not isinstance(fragment_request_id, str) or not fragment_request_id:
+            raise SessionClipInspectionAssemblyError("malformed fragment: request_id")
+        if len(fragment_request_id.encode("utf-8")) > 128:
+            raise SessionClipInspectionAssemblyError("malformed fragment: request_id")
+        if request_id is not None and fragment_request_id != request_id:
+            raise SessionClipInspectionAssemblyError("mixed metadata")
+        self._require_non_negative_int(correlation.get("track_index"), "track_index")
+        self._require_non_negative_int(correlation.get("slot_index"), "slot_index")
+
+        snapshot = self._require_dict(value.get("snapshot"), "snapshot")
+        self._require_non_negative_int(snapshot.get("started_ms"), "started_ms")
+        self._require_non_negative_int(snapshot.get("completed_ms"), "completed_ms")
+        if snapshot.get("atomic") is not False or snapshot.get("consistent") is not True:
+            raise SessionClipInspectionAssemblyError("malformed fragment: snapshot")
+
+        transfer = self._require_dict(value.get("transfer"), "transfer")
+        fragment_index = self._require_non_negative_int(
+            transfer.get("fragment_index"), "fragment_index"
+        )
+        fragment_count = self._require_non_negative_int(
+            transfer.get("fragment_count"), "fragment_count"
+        )
+        if fragment_count <= 0 or fragment_index >= fragment_count:
+            raise SessionClipInspectionAssemblyError("inconsistent counts")
+        fragment_kind = transfer.get("fragment_kind")
+        if fragment_kind not in self._FRAGMENT_KINDS:
+            raise SessionClipInspectionAssemblyError("malformed fragment: fragment_kind")
+        if transfer.get("is_last") is not (fragment_index == fragment_count - 1):
+            raise SessionClipInspectionAssemblyError("mixed transfer metadata")
+        if transfer.get("packet_budget_bytes") != self.PACKET_BUDGET_BYTES:
+            raise SessionClipInspectionAssemblyError("mixed transfer metadata")
+
+        completeness = self._require_dict(value.get("completeness"), "completeness")
+        for field in ("track", "clip", "devices", "notes"):
+            if completeness.get(field) != "complete":
+                raise SessionClipInspectionAssemblyError("malformed fragment: completeness")
+        if completeness.get("missing_fields") != []:
+            raise SessionClipInspectionAssemblyError("malformed fragment: missing_fields")
+
+        data = self._require_dict(value.get("data"), "data")
+        if fragment_kind == "complete":
+            if fragment_count != 1 or fragment_index != 0:
+                raise SessionClipInspectionAssemblyError("mixed transfer metadata")
+            if data.get("context") != "session":
+                raise SessionClipInspectionAssemblyError("malformed fragment: context")
+            self._require_dict(data.get("track"), "track")
+            self._require_dict(data.get("clip"), "clip")
+            self._require_dict(data.get("summary"), "summary")
+            self._validate_page(
+                data,
+                offset_field="device_offset",
+                count_field="device_count",
+                total_field="device_total",
+                items_field="devices",
+            )
+            self._validate_page(
+                data,
+                offset_field="note_offset",
+                count_field="note_count",
+                total_field="note_total",
+                items_field="notes",
+            )
+            if data.get("device_offset") != 0 or data.get("note_offset") != 0:
+                raise SessionClipInspectionAssemblyError("noncontiguous page offsets")
+        elif fragment_kind == "context":
+            if data.get("context") != "session":
+                raise SessionClipInspectionAssemblyError("malformed fragment: context")
+            self._require_dict(data.get("track"), "track")
+            self._require_dict(data.get("clip"), "clip")
+            self._require_dict(data.get("summary"), "summary")
+        elif fragment_kind == "device_page":
+            self._validate_page(
+                data,
+                offset_field="device_offset",
+                count_field="device_count",
+                total_field="device_total",
+                items_field="devices",
+            )
+        elif fragment_kind == "note_page":
+            self._validate_page(
+                data,
+                offset_field="note_offset",
+                count_field="note_count",
+                total_field="note_total",
+                items_field="notes",
+            )
+
+        metadata = {
+            "schema": value["schema"],
+            "schema_version": value["schema_version"],
+            "producer_version": value["producer_version"],
+            "inspection_id": inspection_id,
+            "correlation": correlation,
+            "snapshot": snapshot,
+            "completeness": completeness,
+            "fragment_count": fragment_count,
+            "packet_budget_bytes": transfer["packet_budget_bytes"],
+        }
+        key = (fragment_request_id, inspection_id)
+        return (
+            value,
+            key,
+            fragment_index,
+            fragment_count,
+            str(fragment_kind),
+            self._canonical(metadata),
+        )
+
+    def add_event(self, event: AckEvent) -> dict[str, object] | None:
+        if event.event != "api_session_clip_inspect":
+            raise SessionClipInspectionAssemblyError("malformed fragment event")
+        return self.add_fragment(event.payload.get("fragment"), event.request_id)
+
+    def add_fragment(
+        self,
+        fragment: object,
+        request_id: str | None = None,
+    ) -> dict[str, object] | None:
+        (
+            value,
+            key,
+            fragment_index,
+            fragment_count,
+            _fragment_kind,
+            metadata_key,
+        ) = self._validate_fragment(fragment, request_id)
+        canonical_fragment = self._canonical(value)
+        state = self._states.get(key)
+        if state is None:
+            state = {
+                "metadata_key": metadata_key,
+                "fragment_count": fragment_count,
+                "fragments": {},
+            }
+            self._states[key] = state
+        elif (
+            state["metadata_key"] != metadata_key
+            or state["fragment_count"] != fragment_count
+        ):
+            raise SessionClipInspectionAssemblyError("mixed metadata")
+
+        fragments = state["fragments"]
+        assert isinstance(fragments, dict)
+        existing = fragments.get(fragment_index)
+        if existing is not None:
+            existing_fragment, existing_canonical = existing
+            if existing_canonical != canonical_fragment:
+                raise SessionClipInspectionAssemblyError(
+                    f"conflicting duplicate fragment index {fragment_index}"
+                )
+            if len(fragments) == fragment_count:
+                return self._assemble_state(key, state)
+            return None
+
+        fragments[fragment_index] = (value, canonical_fragment)
+        if len(fragments) == fragment_count:
+            return self._assemble_state(key, state)
+        return None
+
+    def assemble(self, request_id: str, inspection_id: str) -> dict[str, object]:
+        key = (request_id, inspection_id)
+        state = self._states.get(key)
+        if state is None:
+            raise SessionClipInspectionAssemblyError("missing fragment indexes: all")
+        fragment_count = int(state["fragment_count"])
+        fragments = state["fragments"]
+        assert isinstance(fragments, dict)
+        missing = [index for index in range(fragment_count) if index not in fragments]
+        if missing:
+            raise SessionClipInspectionAssemblyError(
+                "missing fragment indexes: " + ",".join(str(index) for index in missing)
+            )
+        return self._assemble_state(key, state)
+
+    def _assemble_pages(
+        self,
+        pages: list[dict[str, object]],
+        *,
+        offset_field: str,
+        count_field: str,
+        total_field: str,
+        items_field: str,
+        label: str,
+    ) -> list[object]:
+        if not pages:
+            return []
+        ordered = sorted(pages, key=lambda page: int(page[offset_field]))
+        expected_offset = 0
+        expected_total = int(ordered[0][total_field])
+        items: list[object] = []
+        for page in ordered:
+            if int(page[total_field]) != expected_total:
+                raise SessionClipInspectionAssemblyError("mixed metadata")
+            if int(page[offset_field]) != expected_offset:
+                raise SessionClipInspectionAssemblyError(
+                    f"noncontiguous {label} offsets"
+                )
+            page_items = self._require_list(page[items_field], items_field)
+            items.extend(page_items)
+            expected_offset += int(page[count_field])
+        if expected_offset != expected_total:
+            raise SessionClipInspectionAssemblyError("inconsistent counts")
+        return items
+
+    def _assemble_state(
+        self,
+        key: tuple[str, str],
+        state: dict[str, object],
+    ) -> dict[str, object]:
+        fragments = state["fragments"]
+        assert isinstance(fragments, dict)
+        ordered = [fragments[index][0] for index in sorted(fragments)]
+        first = ordered[0]
+        transfer = self._require_dict(first["transfer"], "transfer")
+
+        if len(ordered) == 1 and transfer["fragment_kind"] == "complete":
+            data = self._require_dict(first["data"], "data")
+            devices = list(self._require_list(data["devices"], "devices"))
+            notes = list(self._require_list(data["notes"], "notes"))
+            context_data = data
+        else:
+            context_fragments = [
+                fragment
+                for fragment in ordered
+                if self._require_dict(fragment["transfer"], "transfer")["fragment_kind"]
+                == "context"
+            ]
+            if len(context_fragments) != 1:
+                raise SessionClipInspectionAssemblyError("malformed fragments: context")
+            context_data = self._require_dict(context_fragments[0]["data"], "data")
+            device_pages = [
+                self._require_dict(fragment["data"], "data")
+                for fragment in ordered
+                if self._require_dict(fragment["transfer"], "transfer")["fragment_kind"]
+                == "device_page"
+            ]
+            note_pages = [
+                self._require_dict(fragment["data"], "data")
+                for fragment in ordered
+                if self._require_dict(fragment["transfer"], "transfer")["fragment_kind"]
+                == "note_page"
+            ]
+            devices = self._assemble_pages(
+                device_pages,
+                offset_field="device_offset",
+                count_field="device_count",
+                total_field="device_total",
+                items_field="devices",
+                label="device",
+            )
+            notes = self._assemble_pages(
+                note_pages,
+                offset_field="note_offset",
+                count_field="note_count",
+                total_field="note_total",
+                items_field="notes",
+                label="note",
+            )
+
+        summary = self._require_dict(context_data["summary"], "summary")
+        if summary.get("note_count") != len(notes):
+            raise SessionClipInspectionAssemblyError("inconsistent counts")
+
+        correlation = self._require_dict(first["correlation"], "correlation")
+        snapshot = self._require_dict(first["snapshot"], "snapshot")
+        completeness = self._require_dict(first["completeness"], "completeness")
+        fragment_count = int(state["fragment_count"])
+        return {
+            "schema": first["schema"],
+            "schema_version": first["schema_version"],
+            "producer_version": first["producer_version"],
+            "inspection_id": key[1],
+            "correlation": correlation,
+            "snapshot": snapshot,
+            "completeness": completeness,
+            "context": context_data["context"],
+            "track": context_data["track"],
+            "clip": context_data["clip"],
+            "summary": summary,
+            "devices": devices,
+            "notes": notes,
+            "transport": {
+                "complete": True,
+                "fragment_count": fragment_count,
+                "received_fragment_count": len(fragments),
+                "fragment_indexes": sorted(int(index) for index in fragments),
+                "packet_budget_bytes": self.PACKET_BUDGET_BYTES,
+            },
+        }
 
 
 def _percentile(values: Sequence[float], pct: float) -> float:
@@ -422,6 +804,14 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         default=[],
         metavar="ARGS",
         help="Send /api/drum_chain_in_note <drum_chain_path> <note|-1> [request_id]",
+    )
+    parser.add_argument(
+        "--api-session-clip-inspect",
+        nargs=3,
+        action="append",
+        default=[],
+        metavar=("TRACK_INDEX", "SLOT_INDEX", "REQUEST_ID"),
+        help="Send /api/session_clip_inspect <track_index> <slot_index> 1 <request_id>",
     )
 
     parser.add_argument(
@@ -819,6 +1209,30 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
             parsed.append((str(parts[0]), note, _optional_request_id(parts, 2)))
         return tuple(parsed)
 
+    def _parse_api_session_clip_inspect(
+        entries: Sequence[Sequence[str]],
+    ) -> Tuple[Tuple[int, int, str], ...]:
+        parsed: List[Tuple[int, int, str]] = []
+        for parts in entries:
+            try:
+                track_index = non_negative_int(str(parts[0]))
+                slot_index = non_negative_int(str(parts[1]))
+            except (TypeError, ValueError, argparse.ArgumentTypeError):
+                parser.error(
+                    "--api-session-clip-inspect indexes must be non-negative integers"
+                )
+            request_id = str(parts[2])
+            if not request_id:
+                parser.error(
+                    "--api-session-clip-inspect request_id must be non-empty"
+                )
+            if len(request_id.encode("utf-8")) > 128:
+                parser.error(
+                    "--api-session-clip-inspect request_id must be at most 128 UTF-8 bytes"
+                )
+            parsed.append((track_index, slot_index, request_id))
+        return tuple(parsed)
+
     def _parse_midi_cc(entries: Sequence[Sequence[str]]) -> Tuple[Tuple[int, int, int], ...]:
         parsed: List[Tuple[int, int, int]] = []
         for parts in entries:
@@ -874,6 +1288,9 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
     api_insert_devices = _parse_api_insert_device(ns.api_insert_device)
     api_insert_chains = _parse_api_insert_chain(ns.api_insert_chain)
     api_drum_chain_in_notes = _parse_api_drum_chain_in_note(ns.api_drum_chain_in_note)
+    api_session_clip_inspects = _parse_api_session_clip_inspect(
+        ns.api_session_clip_inspect
+    )
     midi_ccs = _parse_midi_cc(ns.midi_cc)
     cc64s = _parse_cc64(ns.cc64)
     expect_ack = bool(ns.ack or ns.listen)
@@ -932,6 +1349,7 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         api_insert_devices=api_insert_devices,
         api_insert_chains=api_insert_chains,
         api_drum_chain_in_notes=api_drum_chain_in_notes,
+        api_session_clip_inspects=api_session_clip_inspects,
         ack_mode=str(ns.ack_mode),
         ack_flush_interval=int(ns.ack_flush_interval),
         listen=bool(ns.listen),
@@ -1171,6 +1589,9 @@ def parse_ack_event(address: str, args: Sequence[OscArg]) -> AckEvent:
     elif event == "api_drum_chain_in_note" and len(args) >= 3:
         request_id = _optional_request_id(args, 3)
         payload = {"chain_path": args[1], "chain": _try_parse_json(args[2])}
+    elif event == "api_session_clip_inspect" and len(args) >= 3:
+        request_id = _optional_request_id(args, 2)
+        payload = {"fragment": _try_parse_json(args[1])}
     elif event == "api_event" and len(args) >= 3:
         event_payload = _try_parse_json(args[2])
         payload = {"observer_id": args[1], "event_payload": event_payload}
@@ -1332,6 +1753,48 @@ def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
         tuning = parsed.get("tuning") if isinstance(parsed, dict) else None
         return f"api_tuning_status -> {_short_repr(tuning if tuning else parsed)}{_req_suffix(request_id)}"
 
+    if event == "api_session_clip_inspect" and len(args) >= 3:
+        request_id = args[2]
+        parsed = _try_parse_json(args[1])
+        if not isinstance(parsed, dict):
+            return f"api_session_clip_inspect malformed{_req_suffix(request_id)}"
+        transfer = parsed.get("transfer")
+        data = parsed.get("data")
+        if not isinstance(transfer, dict) or not isinstance(data, dict):
+            return f"api_session_clip_inspect malformed{_req_suffix(request_id)}"
+        fragment_index = transfer.get("fragment_index")
+        fragment_count = transfer.get("fragment_count")
+        kind = transfer.get("fragment_kind", "?")
+        detail = ""
+        if kind == "complete":
+            detail = (
+                f" devices={data.get('device_count', '?')}"
+                f" notes={data.get('note_count', '?')}"
+            )
+        elif kind == "context":
+            summary = data.get("summary")
+            note_count = summary.get("note_count", "?") if isinstance(summary, dict) else "?"
+            detail = f" notes={note_count}"
+        elif kind == "device_page":
+            detail = (
+                f" devices={data.get('device_offset', '?')}+"
+                f"{data.get('device_count', '?')}/{data.get('device_total', '?')}"
+            )
+        elif kind == "note_page":
+            detail = (
+                f" notes={data.get('note_offset', '?')}+"
+                f"{data.get('note_count', '?')}/{data.get('note_total', '?')}"
+            )
+        index_text = (
+            int(fragment_index) + 1
+            if isinstance(fragment_index, int) and not isinstance(fragment_index, bool)
+            else "?"
+        )
+        return (
+            f"api_session_clip_inspect {kind} fragment={index_text}/{fragment_count}"
+            f"{detail}{_req_suffix(request_id)}"
+        )
+
     if event in {
         "api_device_list",
         "api_device_parameters",
@@ -1400,15 +1863,18 @@ def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
 
 
 def summarize_ack(address: str, args: Sequence[OscArg]) -> List[str]:
-    suffix = "" if not args else " " + " ".join(format_arg(a) for a in args)
-    lines = [f"ack:  {address}{suffix}"]
-
     if address == "/ack":
         summary = _rpc_ack_summary(args)
         if summary:
+            if args and args[0] == "api_session_clip_inspect":
+                return [f"ack:  {summary}"]
+            suffix = "" if not args else " " + " ".join(format_arg(a) for a in args)
+            lines = [f"ack:  {address}{suffix}"]
             lines.append(f"ack:  {summary}")
+            return lines
 
-    return lines
+    suffix = "" if not args else " " + " ".join(format_arg(a) for a in args)
+    return [f"ack:  {address}{suffix}"]
 
 
 def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
@@ -1494,6 +1960,13 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
             OscCommand(
                 "/api/drum_chain_in_note",
                 _with_request_id([chain_path, note], request_id),
+            )
+        )
+    for track_index, slot_index, request_id in cfg.api_session_clip_inspects:
+        commands.append(
+            OscCommand(
+                "/api/session_clip_inspect",
+                (track_index, slot_index, 1, request_id),
             )
         )
 
@@ -1658,6 +2131,56 @@ def wait_for_acks(
     return received
 
 
+def wait_for_session_clip_inspection_acks(
+    sock: socket.socket,
+    timeout_s: float,
+    request_id: str,
+) -> List[Tuple[str, List[OscArg]]]:
+    """Wait for a complete inspection, correlated error, or the full timeout."""
+    if timeout_s <= 0:
+        return []
+
+    deadline = time.monotonic() + timeout_s
+    received: List[Tuple[str, List[OscArg]]] = []
+    assembler = SessionClipInspectionAssembler()
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+
+        readable, _, _ = select.select([sock], [], [], remaining)
+        if not readable:
+            break
+
+        while True:
+            try:
+                packet, _addr = sock.recvfrom(65535)
+            except BlockingIOError:
+                break
+            except OSError:
+                return received
+
+            try:
+                address, args = decode_osc_message(packet)
+            except Exception as exc:  # noqa: BLE001 - best-effort debug output
+                received.append(("<unparsed>", [f"{exc}: {packet!r}"]))
+                continue
+
+            received.append((address, args))
+            event = parse_ack_event(address, args)
+            if event.is_error and event.request_id == request_id:
+                return received
+            if (
+                event.event == "api_session_clip_inspect"
+                and event.request_id == request_id
+            ):
+                if assembler.add_event(event) is not None:
+                    return received
+
+    return received
+
+
 def _drain_acks_nonblocking(sock: socket.socket) -> List[Tuple[str, List[OscArg]]]:
     drained: List[Tuple[str, List[OscArg]]] = []
     while True:
@@ -1683,6 +2206,34 @@ def _collect_and_print_acks(
 ) -> None:
     t0 = time.perf_counter()
     acks = wait_for_acks(ack_sock, timeout_s)
+    durations_ms.append((time.perf_counter() - t0) * 1000.0)
+    ack_counts.append(len(acks))
+
+    if not acks:
+        print(
+            "ack:  (none received; bridge may not be loaded yet)",
+            file=sys.stderr,
+        )
+        return
+
+    for address, args in acks:
+        for line in summarize_ack(address, args):
+            print(line)
+
+
+def _collect_and_print_session_clip_inspection_acks(
+    ack_sock: socket.socket,
+    timeout_s: float,
+    request_id: str,
+    durations_ms: List[float],
+    ack_counts: List[int],
+) -> None:
+    t0 = time.perf_counter()
+    acks = wait_for_session_clip_inspection_acks(
+        ack_sock,
+        timeout_s,
+        request_id,
+    )
     durations_ms.append((time.perf_counter() - t0) * 1000.0)
     ack_counts.append(len(acks))
 
@@ -1737,7 +2288,16 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
             print(f"sent: {describe_command(cmd)}")
 
             if ack_sock is not None:
-                if cfg.ack_mode == "per_command":
+                if cmd.address == "/api/session_clip_inspect":
+                    request_id = str(cmd.args[3])
+                    _collect_and_print_session_clip_inspection_acks(
+                        ack_sock,
+                        cfg.ack_timeout_s,
+                        request_id,
+                        ack_wait_durations_ms,
+                        ack_counts,
+                    )
+                elif cfg.ack_mode == "per_command":
                     _collect_and_print_acks(
                         ack_sock,
                         cfg.ack_timeout_s,

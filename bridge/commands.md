@@ -8,6 +8,8 @@ OSC packets emitted from `127.0.0.1:9001` at address `/ack`.
 Current v3 error ACKs always end with the reserved request-ID correlation
 trailer `request_correlation req:<request_id>`, or
 `request_correlation req:` when the command had no request ID.
+Protocol 3.1 session clip inspection ACKs are packet-bounded to 4096 encoded
+OSC bytes.
 
 ## Read Commands
 
@@ -24,6 +26,7 @@ trailer `request_correlation req:<request_id>`, or
 /api/device_list <track_ref|all> [request_id]
 /api/device_parameters <device_path> [request_id]
 /api/mixer_status <track_ref|master|return:N> [request_id]
+/api/session_clip_inspect <track_index> <slot_index> 1 <request_id>
 ```
 
 Examples:
@@ -33,6 +36,26 @@ Examples:
 /api/get live_set tempo req-tempo
 /api/children live_set tracks req-tracks
 /api/device_list all req-devices
+/api/session_clip_inspect 0 0 1 req-clip
+```
+
+`/api/session_clip_inspect` requires non-negative integer indexes, schema
+version `1`, and a non-empty request ID of at most 128 UTF-8 bytes. Success
+arrives as repeated:
+
+```text
+/ack api_session_clip_inspect <fragment_json> <request_id>
+```
+
+Small results use one `complete` fragment. Larger results use a `context`
+fragment plus adaptive `device_page` and `note_page` fragments. Fragment
+indexes and device/note offsets are zero-based and contiguous. The Python CLI
+waits for complete assembly, a correlated error, or the full ACK timeout:
+
+```bash
+python3 bridge/ableton_udp_bridge.py \
+  --ack --no-tempo --no-signature \
+  --api-session-clip-inspect 0 0 req-clip
 ```
 
 ## Observer Commands
@@ -161,3 +184,6 @@ Validation:
 
 For full ACK schemas, request ID behavior, LiveAPI constraints, and safety
 classes, read `PROTOCOL.md`.
+
+The legacy `/inspect_session_clip_notes <track_index> <slot_index>` command and
+its ACK format remain unchanged.

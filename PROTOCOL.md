@@ -4,7 +4,7 @@ This document defines the public OSC/UDP protocol for the Max for Live bridge. I
 
 Push control is out of scope for this protocol.
 
-Protocol status: v3 draft.
+Protocol status: v3.1 draft.
 
 ## Transport
 
@@ -23,6 +23,11 @@ The current bridge is local-first and does not authenticate OSC packets. Keep co
 Most `/api/*` and observer commands accept an optional trailing `request_id`. When supplied, successful ACKs echo that value as the final argument.
 
 Use request IDs for automation, batching, and retry logic. Object IDs from LiveAPI are dynamic, so clients should correlate their own requests by request ID and target path rather than caching LiveAPI IDs across sessions.
+
+`/api/session_clip_inspect` requires a non-empty request ID of at most 128
+UTF-8 bytes. Its repeated success fragments echo the request ID as the final
+ACK argument. Its errors use the same reserved correlation trailer as other v3
+errors.
 
 ## Core RPC Commands
 
@@ -153,6 +158,114 @@ Safety class: read.
 
 `/api/session_context` reports transport/session fields, track/scene counts, and selected track/scene/device when Live exposes them. `/api/theory_status` reports `root_note`, `scale_name`, `scale_intervals`, and `scale_mode`. `/api/tuning_status` reports `live_set tuning_system` data when the target Live version exposes that path.
 
+## Packet-Bounded Session MIDI Clip Inspection
+
+Protocol 3.1 adds a read-only, additive inspection endpoint:
+
+```text
+/api/session_clip_inspect <track_index> <slot_index> 1 <request_id>
+```
+
+Validation requires non-negative integer indexes, schema version exactly `1`,
+and a non-empty request ID no longer than 128 UTF-8 bytes.
+
+Successful requests emit one or more correlated ACKs:
+
+```text
+/ack api_session_clip_inspect <fragment_json> <request_id>
+```
+
+Every encoded OSC ACK packet is at most 4096 bytes. The bridge calculates the
+actual OSC byte size for `/ack` with three string arguments, including UTF-8
+bytes, NUL terminators, type tags, and OSC four-byte padding. A small
+inspection is emitted as one `complete` fragment. Larger inspections emit one
+`context` fragment followed by ordered `device_page` and `note_page`
+fragments. Page sizes adapt to the encoded packet size. A single item that
+cannot fit produces a correlated `api_session_clip_inspect_item_too_large`
+error.
+
+Every fragment contains:
+
+```json
+{
+  "schema": "codex-live-bridge.session-midi-clip-inspection",
+  "schema_version": 1,
+  "producer_version": "3.1.0",
+  "inspection_id": "session_clip_...",
+  "correlation": {
+    "request_id": "req-inspect",
+    "track_index": 0,
+    "slot_index": 0
+  },
+  "snapshot": {
+    "started_ms": 0,
+    "completed_ms": 0,
+    "atomic": false,
+    "consistent": true
+  },
+  "transfer": {
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "fragment_kind": "complete",
+    "is_last": true,
+    "packet_budget_bytes": 4096
+  },
+  "completeness": {
+    "track": "complete",
+    "clip": "complete",
+    "devices": "complete",
+    "notes": "complete",
+    "missing_fields": []
+  },
+  "data": {}
+}
+```
+
+Fragment indexes and page offsets are zero-based. Context data contains
+`context:"session"`, track identity (`index`, `path`, `id`, `name`), clip
+identity and timing (`slot_index`, `path`, `id`, `name`, `start_marker`,
+`end_marker`, `live_length`, `looping`, `loop_start`, `loop_end`), and summary
+fields (`note_count`, `pitch_min`, `pitch_max`). Empty clips use `null` pitch
+bounds.
+
+Device pages contain `device_offset`, `device_count`, `device_total`, and
+ordered device records. Each device record includes `index`, `path`, and `id`,
+plus `name`, `class_name`, and `type` when Live exposes them.
+
+Note pages contain `note_offset`, `note_count`, `note_total`, and ordered note
+records. The bridge preserves available `note_id`, `pitch`, `start_time`,
+`duration`, `velocity`, `mute`, `probability`, `velocity_deviation`, and
+`release_velocity` fields without synthesizing missing values. Empty MIDI
+clips are successful.
+
+Before emitting any success fragment, the bridge re-reads the clip ID. A
+changed ID produces only a correlated
+`api_session_clip_inspect_snapshot_changed` error. Other endpoint errors use
+the reserved correlation trailer and one of these codes:
+
+```text
+api_session_clip_inspect_validation_failed
+api_session_clip_inspect_not_found
+api_session_clip_inspect_not_midi
+api_session_clip_inspect_no_clip
+api_session_clip_inspect_read_failed
+api_session_clip_inspect_parse_failed
+api_session_clip_inspect_serialization_failed
+api_session_clip_inspect_item_too_large
+api_session_clip_inspect_snapshot_changed
+```
+
+The Python client exposes `SessionClipInspectionAssembler`. It keys assemblies
+by request ID and inspection ID, accepts out-of-order identical duplicates,
+and rejects conflicting duplicates, malformed fragments, mixed metadata,
+missing fragment indexes, inconsistent counts, and noncontiguous device or
+note offsets.
+
+The legacy `/inspect_session_clip_notes <track_index> <slot_index>` command and
+its single ACK remain unchanged for compatibility. Clients needing bounded
+packets, metadata, devices, request correlation, or complete Live 12 note
+fields should use `/api/session_clip_inspect`.
+
 ## Device, Parameter, And Mixer Wrappers
 
 ```text
@@ -268,4 +381,7 @@ The generic RPC layer can reach broad LiveAPI behavior. Public examples and auto
 
 ## Payload Guidance
 
-Keep command payloads small enough for local UDP transport. For large note sets or inventory reads, prefer chunked/batched commands with request IDs and explicit ACK handling.
+Keep command payloads small enough for local UDP transport. The 3.1 session
+clip inspector enforces a 4096-byte encoded ACK limit. Other large note sets or
+inventory reads should use chunked or batched commands with request IDs and
+explicit ACK handling.
