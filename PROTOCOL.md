@@ -18,6 +18,24 @@ The bridge should be loaded in Ableton Live through the shipped Max patch/device
 
 The current bridge is local-first and does not authenticate OSC packets. Keep command and ACK traffic bound to `127.0.0.1` unless a future release adds an authenticated transport.
 
+## Product Architecture Boundary
+
+This protocol owns the external and headless Ableton Live route. The bridge
+retains persistent observers, generic LiveAPI RPC, raw MIDI output, bounded
+writes, additive mutations, and compatibility with release versions of Live
+that support Max for Live.
+
+A separate Ableton Extension can provide native context actions, large
+contextual reads, modal UX, and future user-invoked undoable transforms. Both
+adapters may feed a shared domain core for canonical schema validation, note
+normalization, inspection, report formatting, and parity comparison. That
+shared core and the Extensions SDK are not part of this public wire protocol.
+
+The bridge emits raw, correlated Live facts. Clients own transfer assembly and
+domain interpretation. The public Python client provides strict V1 assembly;
+other clients must implement the same validation requirements before treating
+an inspection as complete.
+
 ## Request IDs
 
 Most `/api/*` and observer commands accept an optional trailing `request_id`. When supplied, successful ACKs echo that value as the final argument.
@@ -306,6 +324,13 @@ index diagnostics, and evicts completed or terminally failed states. Inspection
 ACK collection retains at most 1024 correlated fragments plus a small bounded
 allowance for unrelated traffic while continuing to wait for completion,
 correlated error, or timeout.
+
+The V1 bridge note schema is intentionally richer than the qualified
+Extensions SDK `1.0.0` response. The bridge preserves `note_id` and
+`release_velocity` when LiveAPI returns them; the qualified native SDK runtime
+omitted both fields. A cross-surface consumer must use deterministic ID-free
+matching and report release velocity as an SDK-side missing field rather than
+silently treating the two snapshots as exact parity.
 
 The legacy `/inspect_session_clip_notes <track_index> <slot_index>` command and
 its single ACK remain unchanged for compatibility. Clients needing bounded

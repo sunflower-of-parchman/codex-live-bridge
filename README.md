@@ -109,6 +109,31 @@ The generic RPC layer can reach broad LiveAPI behavior. Automation defaults and
 examples should favor read commands, bounded writes, explicit request IDs, and
 clear user approval for mutations.
 
+## Role In The Hybrid Architecture
+
+`codex-live-bridge` remains the public, standalone external automation surface.
+It does not require Ableton's Extensions SDK.
+
+The broader product architecture assigns responsibilities this way:
+
+- **Bridge:** external and headless automation, persistent observers, generic
+  LiveAPI RPC, raw MIDI output, and release-Live compatibility.
+- **Extension:** native context actions, large contextual clip reads, modal
+  user interface, and future user-invoked undoable transforms.
+- **Shared core:** canonical schema validation, note normalization, clip
+  inspection, report formatting, and parity comparison across adapters.
+
+No bridge capability is retired by this split. The Extension provides a native
+Beta-only workflow where it is stronger; the bridge continues to support local
+scripts, agents, persistent listeners, and Live versions that do not host
+Extensions.
+
+The protocol 3.1 session clip endpoint supplies the external adapter with
+correlated raw facts. Every request has a required request ID, every successful
+fragment echoes it, and every encoded response packet is capped at 4096 bytes.
+Product-specific interpretation can happen in a separate shared-core consumer
+without coupling this public bridge to the private Extensions SDK lab.
+
 ## Protocol Notes
 
 - Default host: `127.0.0.1`
@@ -126,13 +151,14 @@ Live 12.3 insertion limits, read `PROTOCOL.md`. For quick examples, read
 
 ```mermaid
 flowchart LR
-  U["User or Codex"] --> P["Python CLI"]
+  U["Local script, agent, or Codex"] --> P["Python or Node client"]
   P --> C["OSC commands :9000"]
   C --> B["LiveUdpBridge Max patch"]
   B --> L["LiveAPI"]
   L --> A["Ableton Live set"]
   A --> R["OSC ACKs and events :9001"]
   R --> P
+  P --> S["Optional shared inspection core"]
 ```
 
 ## Python CLI Examples
@@ -156,6 +182,19 @@ List tracks:
 python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
   --api-children live_set tracks req-tracks
 ```
+
+Inspect a session MIDI clip with required request correlation and
+packet-bounded fragments:
+
+```bash
+python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
+  --api-session-clip-inspect 0 0 req-clip
+```
+
+The endpoint preserves note IDs and release velocity when LiveAPI returns
+them. During separate Extensions SDK `1.0.0` qualification, the native SDK
+omitted those two fields. Cross-surface consumers must therefore treat note-ID
+matching as unavailable and release velocity as an explicit SDK-side gap.
 
 Listen for observer events:
 
@@ -217,6 +256,8 @@ learn a user profile or improve itself from behavior over time.
 The OSC bridge has no authentication. Keep it bound to loopback
 `127.0.0.1`, keep ports `9000` and `9001` off untrusted networks, and treat
 generic `/api/set` and `/api/call` commands as powerful local LiveAPI access.
+Only one ACK-listening client can bind the default `9001` port at a time, so
+run the Python and optional shared-core Node clients serially.
 
 ## Project Docs
 

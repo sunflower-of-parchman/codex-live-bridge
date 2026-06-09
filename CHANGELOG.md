@@ -14,6 +14,9 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
   encoded OSC packet budget.
 - Added Python CLI construction, concise fragment parsing, completion-aware
   ACK collection, and a public strict fragment assembler.
+- Documented the bridge's role in the hybrid Live architecture: external and
+  headless automation, observers, generic RPC, raw MIDI, and release-Live
+  compatibility remain public bridge responsibilities.
 
 ### Changed
 
@@ -29,6 +32,12 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bounded V1 inspection resources to 4096 notes, 256 devices, 1024 fragments,
   and 16 active Python assemblies, with bounded ACK retention and terminal
   state eviction.
+- Documented the adapter boundary for shared schema validation, note
+  normalization, inspection, reporting, and parity without adding an
+  Extensions SDK dependency to this repository.
+- Documented the qualified SDK note-ID and release-velocity gap for
+  cross-surface consumers. This records an SDK-side limitation and does not
+  weaken the bridge's nine-field V1 note contract.
 
 ### Fixed
 
