@@ -831,6 +831,138 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn('"api_session_clip_inspect": api_session_clip_inspect', js_source)
         self.assertNotIn("var target = this[targetName];", js_source)
 
+    def test_js_fallback_route_correlates_unhandled_wrapper_errors(self) -> None:
+        result = _run_bridge_js(
+            """
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+context.arrayfromargs = (args) => Array.from(args);
+
+context.API_FALLBACK_HANDLERS.api_session_clip_inspect = () => {
+  throw new Error("clip inspection failed");
+};
+context.messagename = "/api/session_clip_inspect";
+context.anything(2, 3, 1, "req-clip");
+
+context.API_FALLBACK_HANDLERS.api_session_context = () => {
+  throw new Error("session context failed");
+};
+context.messagename = "/api/session_context";
+context.anything("req-context");
+
+context.API_FALLBACK_HANDLERS.api_device_list = () => {
+  throw new Error("device list failed");
+};
+context.messagename = "/api/device_list";
+context.anything("all");
+context.anything("all", "req-device-list");
+
+return outputs.filter((args) => args[1] === "/ack");
+"""
+        )
+
+        self.assertEqual(
+            result,
+            [
+                [
+                    0,
+                    "/ack",
+                    "error",
+                    "api_session_clip_inspect_internal_error",
+                    "request_correlation",
+                    "req:req-clip",
+                ],
+                [
+                    0,
+                    "/ack",
+                    "error",
+                    "api_wrapper_internal_error",
+                    "api_session_context",
+                    "request_correlation",
+                    "req:req-context",
+                ],
+                [
+                    0,
+                    "/ack",
+                    "error",
+                    "api_wrapper_internal_error",
+                    "api_device_list",
+                    "request_correlation",
+                    "req:",
+                ],
+                [
+                    0,
+                    "/ack",
+                    "error",
+                    "api_wrapper_internal_error",
+                    "api_device_list",
+                    "request_correlation",
+                    "req:req-device-list",
+                ],
+            ],
+        )
+
+    def test_python_osc_decoder_rejects_malformed_strings_padding_and_trailing_bytes(
+        self,
+    ) -> None:
+        valid = bridge.encode_osc_message("/ack", ("ok",))
+        malformed = [
+            b"/ack",
+            b"/\xff\x00\x00,\x00\x00\x00",
+            b"/a\x00\x01,\x00\x00\x00",
+            valid + b"\x00\x00\x00\x00",
+        ]
+        for packet in malformed:
+            with self.subTest(packet=packet):
+                with self.assertRaises(ValueError):
+                    bridge.decode_osc_message(packet)
+
+    def test_python_osc_encoder_rejects_embedded_nul_bytes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "embedded NUL"):
+            bridge.encode_osc_message("/bad\x00address", ())
+        with self.assertRaisesRegex(ValueError, "embedded NUL"):
+            bridge.encode_osc_message("/ack", ("bad\x00argument",))
+
+    def test_session_clip_inspection_assembler_rejects_oversized_fragment_bytes(
+        self,
+    ) -> None:
+        fragment = _complete_inspection_fragment()
+        fragment["data"]["track"]["name"] = "x" * 5000
+        with self.assertRaisesRegex(
+            bridge.SessionClipInspectionAssemblyError,
+            "fragment bytes",
+        ):
+            bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+    def test_session_clip_inspection_assembler_caps_aggregate_retained_bytes(
+        self,
+    ) -> None:
+        assembler = bridge.SessionClipInspectionAssembler()
+        assembler.MAX_RETAINED_BYTES = 1000
+        first = _inspection_fragment(
+            index=0,
+            count=2,
+            kind="context",
+            request_id="req-retained-1",
+            inspection_id="inspection-retained-1",
+            data=_inspection_context_data(),
+        )
+        second = _inspection_fragment(
+            index=0,
+            count=2,
+            kind="context",
+            request_id="req-retained-2",
+            inspection_id="inspection-retained-2",
+            data=_inspection_context_data(),
+        )
+        self.assertIsNone(assembler.add_fragment(first))
+        with self.assertRaisesRegex(
+            bridge.SessionClipInspectionAssemblyError,
+            "retained bytes",
+        ):
+            assembler.add_fragment(second)
+        self.assertLessEqual(assembler._retained_bytes, 1000)
+
     def test_js_session_clip_inspect_validation_errors_are_correlated(self) -> None:
         result = _run_bridge_js(
             """
@@ -2860,6 +2992,41 @@ return cases.map((testCase) => {
         self.assertEqual(fake_sock.packet_index, 2)
         self.assertGreater(timeouts[1], 0.5)
 
+    def test_session_clip_inspect_rejects_oversized_packet_before_decoding(
+        self,
+    ) -> None:
+        fragment = _complete_inspection_fragment()
+        valid_packet = bridge.encode_osc_message(
+            "/ack",
+            (
+                "api_session_clip_inspect",
+                json.dumps(fragment),
+                "req-assembly",
+            ),
+        )
+        packets = [b"x" * 4097, valid_packet]
+
+        class _FakeSock:
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if not packets:
+                    raise BlockingIOError
+                return packets.pop(0), ("127.0.0.1", 9001)
+
+        fake_sock = _FakeSock()
+        with mock.patch(
+            "ableton_udp_bridge.select.select",
+            return_value=([fake_sock], [], []),
+        ):
+            acks = bridge.wait_for_session_clip_inspection_acks(
+                fake_sock,
+                timeout_s=1.0,
+                request_id="req-assembly",
+            )
+
+        self.assertEqual(acks[0][0], "<unparsed>")
+        self.assertIn("4097 bytes", str(acks[0][1][0]))
+        self.assertEqual(acks[-1][1][0], "api_session_clip_inspect")
+
     def test_session_clip_inspect_ack_collection_bounds_unrelated_packet_flood(self) -> None:
         unrelated = bridge.encode_osc_message("/ack", ("status",))
         complete = _complete_inspection_fragment()
@@ -3075,6 +3242,32 @@ return cases.map((testCase) => {
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][2], "req-send")
+
+    def test_stale_ack_drain_bounds_packets_and_rejects_oversized_datagrams(
+        self,
+    ) -> None:
+        valid = bridge.encode_osc_message("/ack", ("status",))
+        packets = [b"x" * 4097] + [valid] * bridge.ACK_DRAIN_MAX_PACKETS
+        receive_sizes: list[int] = []
+
+        class _FakeSock:
+            def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
+                receive_sizes.append(size)
+                if not packets:
+                    raise BlockingIOError
+                return packets.pop(0), ("127.0.0.1", 9001)
+
+        drained = bridge._drain_acks_nonblocking(_FakeSock())
+
+        self.assertEqual(len(drained), bridge.ACK_DRAIN_MAX_PACKETS)
+        self.assertEqual(len(packets), 1)
+        self.assertEqual(
+            receive_sizes,
+            [bridge.SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES + 1]
+            * bridge.ACK_DRAIN_MAX_PACKETS,
+        )
+        self.assertEqual(drained[0][0], "<unparsed>")
+        self.assertIn("4097 bytes", str(drained[0][1][0]))
 
     def test_send_commands_drains_stale_acks_before_each_send(self) -> None:
         cfg = bridge.parse_args(_base_args() + ["--status"])

@@ -207,6 +207,10 @@ fragments. Page sizes adapt to the encoded packet size. A single item that
 cannot fit produces a correlated `api_session_clip_inspect_item_too_large`
 error.
 
+Consumers reject larger inspection datagrams before OSC or JSON decoding,
+require strict OSC string termination, UTF-8, padding, and message length,
+and bound aggregate retained fragment bytes across concurrent assemblies.
+
 V1 resource limits are `MAX_NOTES=4096`, `MAX_DEVICES=256`, and
 `MAX_FRAGMENTS=1024`. The producer rejects an inventory above these limits
 before copying every item into fragments and enforces the fragment ceiling

@@ -2328,6 +2328,32 @@ var API_FALLBACK_HANDLERS = {
   "api_session_clip_inspect": api_session_clip_inspect,
 };
 
+var API_FALLBACK_REQUEST_ID_INDEXES = {
+  "api_session_context": 0,
+  "api_theory_status": 0,
+  "api_tuning_status": 0,
+  "api_device_list": 1,
+  "api_device_parameters": 1,
+  "api_parameter_set": 2,
+  "api_mixer_status": 1,
+  "api_insert_device": 3,
+  "api_insert_chain": 2,
+  "api_drum_chain_in_note": 2,
+  "api_session_clip_inspect": 3,
+};
+
+function fallbackRequestId(targetName, args) {
+  var requestIndex = API_FALLBACK_REQUEST_ID_INDEXES[targetName];
+  if (
+    requestIndex === undefined ||
+    requestIndex < 0 ||
+    requestIndex >= args.length
+  ) {
+    return "";
+  }
+  return args[requestIndex];
+}
+
 function anything() {
   var rawName = typeof messagename === "undefined" ? "" : String(messagename || "");
   if (!rawName || rawName.charAt(0) !== "/") {
@@ -2342,7 +2368,25 @@ function anything() {
     return;
   }
   var args = arrayfromargs(arguments);
-  target.apply(this, args);
+  try {
+    target.apply(this, args);
+  } catch (err) {
+    debug("Unhandled exception in " + rawName + ": " + err);
+    var requestId = fallbackRequestId(targetName, args);
+    if (targetName === "api_session_clip_inspect") {
+      sessionClipInspectionError(
+        "internal_error",
+        [],
+        requestId
+      );
+      return;
+    }
+    ackWithRequest(
+      "error",
+      ["api_wrapper_internal_error", targetName],
+      requestId
+    );
+  }
 }
 
 function clampMidiByte(value, fallback, contextName, label) {

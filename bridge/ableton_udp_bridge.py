@@ -29,11 +29,17 @@ SESSION_CLIP_INSPECTION_MAX_NOTES = 4096
 SESSION_CLIP_INSPECTION_MAX_DEVICES = 256
 SESSION_CLIP_INSPECTION_MAX_FRAGMENTS = 1024
 SESSION_CLIP_INSPECTION_MAX_ACTIVE_ASSEMBLIES = 16
+SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES = 4096
+SESSION_CLIP_INSPECTION_MAX_RETAINED_BYTES = (
+    SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES
+    * SESSION_CLIP_INSPECTION_MAX_FRAGMENTS
+)
 SESSION_CLIP_INSPECTION_MAX_MISSING_DIAGNOSTIC_INDEXES = 16
 SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS = 32
 SESSION_CLIP_INSPECTION_MAX_CORRELATED_ACKS = (
     SESSION_CLIP_INSPECTION_MAX_FRAGMENTS + 1
 )
+ACK_DRAIN_MAX_PACKETS = 32
 SESSION_CLIP_INSPECTION_MAX_PACKETS_PER_SELECT = 16
 
 OscArg = Union[int, float, str]
@@ -142,11 +148,12 @@ class SessionClipInspectionAssembler:
     SCHEMA = "codex-live-bridge.session-midi-clip-inspection"
     SCHEMA_VERSION = 1
     PRODUCER_VERSION = "3.1.0"
-    PACKET_BUDGET_BYTES = 4096
+    PACKET_BUDGET_BYTES = SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES
     MAX_NOTES = SESSION_CLIP_INSPECTION_MAX_NOTES
     MAX_DEVICES = SESSION_CLIP_INSPECTION_MAX_DEVICES
     MAX_FRAGMENTS = SESSION_CLIP_INSPECTION_MAX_FRAGMENTS
     MAX_ACTIVE_ASSEMBLIES = SESSION_CLIP_INSPECTION_MAX_ACTIVE_ASSEMBLIES
+    MAX_RETAINED_BYTES = SESSION_CLIP_INSPECTION_MAX_RETAINED_BYTES
     _FRAGMENT_KINDS = {"complete", "context", "device_page", "note_page"}
     _ROOT_KEYS = {
         "schema",
@@ -218,6 +225,7 @@ class SessionClipInspectionAssembler:
 
     def __init__(self) -> None:
         self._states: dict[tuple[str, str], dict[str, object]] = {}
+        self._retained_bytes = 0
 
     @staticmethod
     def _require_dict(value: object, label: str) -> dict[str, object]:
@@ -793,7 +801,15 @@ class SessionClipInspectionAssembler:
         try:
             return self._assemble_state(key, state)
         finally:
-            self._states.pop(key, None)
+            self._evict_state(key)
+
+    def _evict_state(self, key: tuple[str, str]) -> None:
+        state = self._states.pop(key, None)
+        if state is None:
+            return
+        retained_bytes = state.get("retained_bytes", 0)
+        if isinstance(retained_bytes, int):
+            self._retained_bytes = max(0, self._retained_bytes - retained_bytes)
 
     def add_event(self, event: AckEvent) -> dict[str, object] | None:
         if event.event != "api_session_clip_inspect":
@@ -816,6 +832,11 @@ class SessionClipInspectionAssembler:
                 metadata_key,
             ) = self._validate_fragment(fragment, request_id)
             canonical_fragment = self._canonical(value)
+            fragment_bytes = len(canonical_fragment.encode("utf-8"))
+            if fragment_bytes > self.PACKET_BUDGET_BYTES:
+                raise SessionClipInspectionAssemblyError(
+                    "resource limit exceeded: fragment bytes"
+                )
             state = self._states.get(key)
             if state is None:
                 if len(self._states) >= self.MAX_ACTIVE_ASSEMBLIES:
@@ -826,6 +847,7 @@ class SessionClipInspectionAssembler:
                     "metadata_key": metadata_key,
                     "fragment_count": fragment_count,
                     "fragments": {},
+                    "retained_bytes": 0,
                 }
                 self._states[key] = state
             elif (
@@ -845,13 +867,21 @@ class SessionClipInspectionAssembler:
                     )
                 return None
 
+            if self._retained_bytes + fragment_bytes > self.MAX_RETAINED_BYTES:
+                raise SessionClipInspectionAssemblyError(
+                    "resource limit exceeded: retained bytes"
+                )
             fragments[fragment_index] = (value, canonical_fragment)
+            state_retained_bytes = state.get("retained_bytes", 0)
+            assert isinstance(state_retained_bytes, int)
+            state["retained_bytes"] = state_retained_bytes + fragment_bytes
+            self._retained_bytes += fragment_bytes
             if len(fragments) == fragment_count:
                 return self._assemble_and_evict(key, state)
             return None
         except SessionClipInspectionAssemblyError:
             if candidate_key is not None:
-                self._states.pop(candidate_key, None)
+                self._evict_state(candidate_key)
             raise
 
     def assemble(self, request_id: str, inspection_id: str) -> dict[str, object]:
@@ -867,7 +897,7 @@ class SessionClipInspectionAssembler:
             fragments,
         )
         if missing_message is not None:
-            self._states.pop(key, None)
+            self._evict_state(key)
             raise SessionClipInspectionAssemblyError(missing_message)
         return self._assemble_and_evict(key, state)
 
@@ -1928,21 +1958,30 @@ def _pad4(length: int) -> int:
 
 
 def _encode_osc_string(value: str) -> bytes:
+    if "\x00" in value:
+        raise ValueError("OSC strings cannot contain embedded NUL bytes")
     raw = value.encode("utf-8") + b"\x00"
     raw += b"\x00" * _pad4(len(raw))
     return raw
 
 
 def _decode_osc_string(data: bytes, start: int) -> Tuple[str, int]:
+    if start < 0 or start >= len(data):
+        raise ValueError("OSC string is truncated")
     end = data.find(b"\x00", start)
     if end == -1:
-        # Some OSC senders appear to omit the trailing NUL on the final string.
-        # In that case, treat the remainder as the string and stop parsing.
-        text = data[start:].decode("utf-8", errors="replace")
-        return text, len(data)
-    text = data[start:end].decode("utf-8", errors="replace")
+        raise ValueError("OSC string is missing its NUL terminator")
+    try:
+        text = data[start:end].decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("OSC string is not valid UTF-8") from exc
     idx = end + 1
-    idx += _pad4(idx)
+    padded_idx = idx + _pad4(idx)
+    if padded_idx > len(data):
+        raise ValueError("OSC string padding is truncated")
+    if any(byte != 0 for byte in data[idx:padded_idx]):
+        raise ValueError("OSC string padding must be zero")
+    idx = padded_idx
     return text, idx
 
 
@@ -1978,6 +2017,8 @@ def decode_osc_message(data: bytes) -> Tuple[str, List[OscArg]]:
         raise ValueError("OSC bundles are not supported by this minimal decoder")
 
     address, idx = _decode_osc_string(data, 0)
+    if not address.startswith("/"):
+        raise ValueError(f"OSC address must start with '/': {address}")
     type_tags, idx = _decode_osc_string(data, idx)
 
     if not type_tags.startswith(","):
@@ -2003,6 +2044,8 @@ def decode_osc_message(data: bytes) -> Tuple[str, List[OscArg]]:
         else:
             raise ValueError(f"Unsupported OSC type tag: {tag}")
 
+    if idx != len(data):
+        raise ValueError("OSC message has trailing bytes")
     return address, args
 
 
@@ -2743,6 +2786,20 @@ def wait_for_session_clip_inspection_acks(
             if time.monotonic() >= deadline:
                 return received
 
+            if len(packet) > SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES:
+                if unrelated_ack_count < SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS:
+                    received.append(
+                        (
+                            "<unparsed>",
+                            [
+                                "OSC packet exceeds session clip inspection "
+                                f"budget: {len(packet)} bytes"
+                            ],
+                        )
+                    )
+                    unrelated_ack_count += 1
+                continue
+
             try:
                 address, args = decode_osc_message(packet)
             except Exception as exc:  # noqa: BLE001 - best-effort debug output
@@ -2779,13 +2836,27 @@ def wait_for_session_clip_inspection_acks(
 
 def _drain_acks_nonblocking(sock: socket.socket) -> List[Tuple[str, List[OscArg]]]:
     drained: List[Tuple[str, List[OscArg]]] = []
-    while True:
+    for _packet_index in range(ACK_DRAIN_MAX_PACKETS):
         try:
-            packet, _addr = sock.recvfrom(65535)
+            packet, _addr = sock.recvfrom(
+                SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES + 1
+            )
         except BlockingIOError:
             break
         except OSError:
             break
+        if len(packet) > SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES:
+            drained.append(
+                (
+                    "<unparsed>",
+                    [
+                        "OSC packet exceeds "
+                        f"{SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES}-byte "
+                        f"budget: {len(packet)} bytes"
+                    ],
+                )
+            )
+            continue
         try:
             address, args = decode_osc_message(packet)
             drained.append((address, args))

@@ -57,6 +57,12 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
   ACKs safely.
 - Made helper failures terminal so request-aware status wrappers and batch
   track mutations do not emit completion ACKs after an error.
+- Made unmatched wrapper exceptions emit correlated internal-error ACKs
+  instead of leaving clients to time out.
+- Made fallback error correlation follow each wrapper's actual optional
+  request-ID position.
+- Hardened inspection clients with strict OSC decoding, a 4096-byte inbound
+  datagram limit, and aggregate fragment-retention bounds.
 
 ## [3.0.0] - 2026-06-03
 
