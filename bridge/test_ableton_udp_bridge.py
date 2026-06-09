@@ -241,14 +241,18 @@ def _inspection_context_data(
     }
 
 
-def _inspection_device(index: int = 0) -> dict[str, object]:
+def _inspection_device(
+    index: int = 0,
+    *,
+    device_type: int | None = None,
+) -> dict[str, object]:
     return {
         "index": index,
         "path": f"live_set tracks 2 devices {index}",
         "id": 400 + index,
         "name": f"Device {index}",
         "class_name": None,
-        "type": None,
+        "type": device_type,
     }
 
 
@@ -907,7 +911,7 @@ return outputs.filter((args) => args[1] === "/ack");
                 {
                     "name": "Operator",
                     "class_name": "Operator",
-                    "type": "instrument",
+                    "type": 1,
                 },
                 {"name": "Optional Fields Device"},
             ],
@@ -951,7 +955,7 @@ return outputs.filter((args) => args[1] === "/ack");
                 "id": 400,
                 "name": "Operator",
                 "class_name": "Operator",
-                "type": "instrument",
+                "type": 1,
             },
         )
         self.assertEqual(
@@ -966,6 +970,22 @@ return outputs.filter((args) => args[1] === "/ack");
             },
         )
         self.assertEqual(data["notes"], [{key: note[key] for key in note if key != "ignored"}])
+
+    def test_js_session_clip_inspect_preserves_device_type_enum_or_null(self) -> None:
+        raw_types: list[object] = [0, 1, 2, 4, None, 3, True, "1", 1.5]
+        outputs = _run_session_clip_inspect_js(
+            notes=[],
+            devices=[
+                {} if raw_type is None else {"type": raw_type}
+                for raw_type in raw_types
+            ],
+        )
+        fragment = json.loads(str(outputs[0][3]))
+
+        self.assertEqual(
+            [device["type"] for device in fragment["data"]["devices"]],
+            [0, 1, 2, 4, None, None, None, None, None],
+        )
 
     def test_js_session_clip_inspect_rejects_incomplete_or_invalid_extended_notes(self) -> None:
         canonical = _inspection_note()
@@ -1037,7 +1057,7 @@ return outputs.filter((args) => args[1] === "/ack");
             {
                 "name": f"Device {index} " + ("D" * 140),
                 "class_name": None if index % 2 else "MockDevice",
-                "type": None if index % 3 else "instrument",
+                "type": [0, 1, 2, 4, None][index % 5],
             }
             for index in range(30)
         ]
@@ -1077,6 +1097,10 @@ return outputs.filter((args) => args[1] === "/ack");
         self.assertIsNotNone(assembled)
         assert assembled is not None
         self.assertEqual(assembled["devices"][1]["class_name"], None)
+        self.assertEqual(
+            [device["type"] for device in assembled["devices"][:5]],
+            [0, 1, 2, 4, None],
+        )
         self.assertEqual(assembled["notes"], notes)
 
     def test_js_session_clip_inspect_pages_large_payloads_with_bounded_packets(self) -> None:
@@ -1084,7 +1108,7 @@ return outputs.filter((args) => args[1] === "/ack");
             {
                 "name": f"Device {index} " + ("D" * 140),
                 "class_name": "MockDevice",
-                "type": "instrument",
+                "type": 1,
             }
             for index in range(30)
         ]
@@ -1598,13 +1622,33 @@ return outputs.filter((args) => args[1] === "/ack");
             {**_inspection_device(), "index": True},
             {**_inspection_device(), "name": 42},
             {**_inspection_device(), "class_name": 42},
-            {**_inspection_device(), "type": 1},
+            {**_inspection_device(), "type": True},
+            {**_inspection_device(), "type": "1"},
+            {**_inspection_device(), "type": 3},
+            {**_inspection_device(), "type": -1},
+            {**_inspection_device(), "type": 1.5},
         ]
         for device in invalid_devices:
             with self.subTest(device=device):
                 fragment = _complete_inspection_fragment(devices=[device])
                 with self.assertRaises(bridge.SessionClipInspectionAssemblyError):
                     bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+    def test_session_clip_inspection_assembler_accepts_device_type_enums_and_null(self) -> None:
+        devices = [
+            _inspection_device(index, device_type=device_type)
+            for index, device_type in enumerate((0, 1, 2, 4, None))
+        ]
+        fragment = _complete_inspection_fragment(devices=devices)
+
+        assembled = bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+        self.assertIsNotNone(assembled)
+        assert assembled is not None
+        self.assertEqual(
+            [device["type"] for device in assembled["devices"]],
+            [0, 1, 2, 4, None],
+        )
 
     def test_session_clip_inspection_assembler_rejects_invalid_note_facts(self) -> None:
         invalid_notes = [

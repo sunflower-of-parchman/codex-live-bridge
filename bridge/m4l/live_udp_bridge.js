@@ -1353,6 +1353,23 @@ function readNullableSessionClipInspectionTextProperty(api, property) {
   }
 }
 
+function readNullableSessionClipInspectionDeviceType(api) {
+  try {
+    var value = getScalar(api, "type");
+    if (
+      typeof value === "number" &&
+      isFinite(value) &&
+      Math.floor(value) === value &&
+      (value === 0 || value === 1 || value === 2 || value === 4)
+    ) {
+      return value;
+    }
+  } catch (err) {
+    // Device type is optional metadata.
+  }
+  return null;
+}
+
 function openSessionClipInspectionApi(path, target, requestId) {
   try {
     var api = new LiveAPI(null, path);
@@ -1974,7 +1991,7 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
         deviceApi,
         "class_name"
       ),
-      type: readNullableSessionClipInspectionTextProperty(deviceApi, "type"),
+      type: readNullableSessionClipInspectionDeviceType(deviceApi),
     };
     devices.push(device);
   }

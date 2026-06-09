@@ -51,9 +51,10 @@ Small results use one `complete` fragment. Larger results use a `context`
 fragment plus adaptive `device_page` and `note_page` fragments. Fragment
 indexes define the sequence: context, contiguous device pages, then contiguous
 note pages. Device metadata always includes nullable `name`, `class_name`, and
-`type`. Each note contains all nine extended-note fields. Success and error
-ACKs from this endpoint are at most 4096 encoded OSC bytes. The Python CLI
-waits for complete assembly, a correlated error, or the full ACK timeout:
+numeric Live `type` enum (`0`, `1`, `2`, or `4`). Each note contains all nine
+extended-note fields. Success and error ACKs from this endpoint are at most
+4096 encoded OSC bytes. The Python CLI waits for complete assembly, a
+correlated error, or the full ACK timeout:
 
 ```bash
 python3 bridge/ableton_udp_bridge.py \

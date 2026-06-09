@@ -26,6 +26,8 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserved Live device `type` as its numeric `0`/`1`/`2`/`4` enum and used
+  explicit `null` for unavailable or invalid values.
 - Aligned the JavaScript producer and Python assembler on note scalar types,
   nullable device/track/clip metadata, complete-fragment totals, and strict
   fragment ordering.

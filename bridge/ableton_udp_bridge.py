@@ -189,6 +189,7 @@ class SessionClipInspectionAssembler:
     }
     _NOTE_PAGE_KEYS = {"note_offset", "note_count", "note_total", "notes"}
     _DEVICE_KEYS = {"index", "path", "id", "name", "class_name", "type"}
+    _DEVICE_TYPES = {0, 1, 2, 4}
     _NOTE_KEYS = {
         "note_id",
         "pitch",
@@ -427,7 +428,15 @@ class SessionClipInspectionAssembler:
         self._require_non_negative_int(value["id"], "device.id")
         self._require_nullable_string(value["name"], "device.name")
         self._require_nullable_string(value["class_name"], "device.class_name")
-        self._require_nullable_string(value["type"], "device.type")
+        device_type = value["type"]
+        if device_type is not None and (
+            isinstance(device_type, bool)
+            or not isinstance(device_type, int)
+            or device_type not in self._DEVICE_TYPES
+        ):
+            raise SessionClipInspectionAssemblyError(
+                "malformed fragment: device.type"
+            )
 
     def _validate_note(self, note: object) -> None:
         value = self._require_dict(note, "note")

@@ -230,8 +230,10 @@ bounds. Track and clip `name` values are strings or explicit `null`.
 
 Device pages contain `device_offset`, `device_count`, `device_total`, and
 ordered device records. Every device record has exactly `index`, `path`, `id`,
-`name`, `class_name`, and `type`. The three metadata fields are strings or
-explicit `null`; they are never omitted.
+`name`, `class_name`, and `type`. `name` and `class_name` are strings or
+explicit `null`. `type` preserves Live's integer enum `0`, `1`, `2`, or `4`,
+or is explicit `null` when unavailable or invalid. These fields are never
+omitted.
 
 Note pages contain `note_offset`, `note_count`, `note_total`, and ordered note
 records. Every note has exactly `note_id`, `pitch`, `start_time`, `duration`,
