@@ -34,6 +34,7 @@ SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS = 32
 SESSION_CLIP_INSPECTION_MAX_CORRELATED_ACKS = (
     SESSION_CLIP_INSPECTION_MAX_FRAGMENTS + 1
 )
+SESSION_CLIP_INSPECTION_MAX_PACKETS_PER_SELECT = 16
 
 OscArg = Union[int, float, str]
 
@@ -2728,12 +2729,18 @@ def wait_for_session_clip_inspection_acks(
         if not readable:
             break
 
-        while True:
+        packets_processed = 0
+        while packets_processed < SESSION_CLIP_INSPECTION_MAX_PACKETS_PER_SELECT:
+            if time.monotonic() >= deadline:
+                return received
             try:
                 packet, _addr = sock.recvfrom(65535)
             except BlockingIOError:
                 break
             except OSError:
+                return received
+            packets_processed += 1
+            if time.monotonic() >= deadline:
                 return received
 
             try:

@@ -2898,6 +2898,139 @@ return cases.map((testCase) => {
         )
         self.assertEqual(acks[-1][1][0], "api_session_clip_inspect")
 
+    def test_session_clip_inspect_ack_collection_enforces_deadline_during_continuous_recv(self) -> None:
+        unrelated = bridge.encode_osc_message("/ack", ("status",))
+        clock = {"now": 0.0}
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.recv_calls = 0
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                self.recv_calls += 1
+                clock["now"] += 0.01
+                if self.recv_calls > 100:
+                    raise BlockingIOError
+                return unrelated, ("127.0.0.1", 9001)
+
+        fake_sock = _FakeSock()
+        with (
+            mock.patch(
+                "ableton_udp_bridge.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ),
+            mock.patch(
+                "ableton_udp_bridge.select.select",
+                return_value=([fake_sock], [], []),
+            ),
+        ):
+            acks = bridge.wait_for_session_clip_inspection_acks(
+                fake_sock,
+                timeout_s=0.05,
+                request_id="req-deadline",
+            )
+
+        self.assertLessEqual(clock["now"], 0.07)
+        self.assertLessEqual(fake_sock.recv_calls, 7)
+        self.assertLessEqual(
+            len(acks),
+            bridge.SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS,
+        )
+
+    def test_session_clip_inspect_ack_collection_completes_across_receive_batches(self) -> None:
+        fragments = [
+            _inspection_fragment(
+                index=0,
+                count=2,
+                kind="context",
+                request_id="req-batches",
+                inspection_id="inspection-batches",
+                data=_inspection_context_data(
+                    note_count=1,
+                    pitch_min=60,
+                    pitch_max=60,
+                ),
+            ),
+            _inspection_fragment(
+                index=1,
+                count=2,
+                kind="note_page",
+                request_id="req-batches",
+                inspection_id="inspection-batches",
+                data={
+                    "note_offset": 0,
+                    "note_count": 1,
+                    "note_total": 1,
+                    "notes": [_inspection_note()],
+                },
+            ),
+        ]
+        unrelated = bridge.encode_osc_message("/ack", ("status",))
+        packets = (
+            [unrelated] * 20
+            + [
+                bridge.encode_osc_message(
+                    "/ack",
+                    (
+                        "api_session_clip_inspect",
+                        json.dumps(fragments[0]),
+                        "req-batches",
+                    ),
+                )
+            ]
+            + [unrelated] * 20
+            + [
+                bridge.encode_osc_message(
+                    "/ack",
+                    (
+                        "api_session_clip_inspect",
+                        json.dumps(fragments[1]),
+                        "req-batches",
+                    ),
+                )
+            ]
+        )
+        select_calls = 0
+
+        class _FakeSock:
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if packets:
+                    return packets.pop(0), ("127.0.0.1", 9001)
+                raise BlockingIOError
+
+        fake_sock = _FakeSock()
+
+        def _fake_select(
+            _r: object,
+            _w: object,
+            _e: object,
+            _timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            nonlocal select_calls
+            select_calls += 1
+            return [fake_sock], [], []
+
+        with mock.patch(
+            "ableton_udp_bridge.select.select",
+            side_effect=_fake_select,
+        ):
+            acks = bridge.wait_for_session_clip_inspection_acks(
+                fake_sock,
+                timeout_s=1,
+                request_id="req-batches",
+            )
+
+        self.assertEqual(packets, [])
+        self.assertGreaterEqual(select_calls, 2)
+        self.assertEqual(
+            [
+                args[0]
+                for _address, args in acks
+                if args and args[0] == "api_session_clip_inspect"
+            ],
+            ["api_session_clip_inspect", "api_session_clip_inspect"],
+        )
+
     def test_send_commands_uses_completion_aware_collection_for_session_clip_inspect(self) -> None:
         cfg = bridge.parse_args(
             _base_args()
