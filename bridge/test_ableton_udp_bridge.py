@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import pathlib
@@ -71,6 +72,9 @@ def _run_session_clip_inspect_js(
     clip_ids: list[int] | None = None,
     track_name: str | None = "Inspection Track",
     clip_name: str | None = "Inspection Clip",
+    clip_values: dict[str, object] | None = None,
+    device_count: int | None = None,
+    max_fragments: int | None = None,
 ) -> list[list[object]]:
     fixture = {
         "notes": notes,
@@ -78,6 +82,17 @@ def _run_session_clip_inspect_js(
         "clip_ids": clip_ids or [303, 303],
         "track_name": track_name,
         "clip_name": clip_name,
+        "clip_values": clip_values
+        or {
+            "start_marker": 0,
+            "end_marker": 8,
+            "length": 8,
+            "looping": 1,
+            "loop_start": 0,
+            "loop_end": 8,
+        },
+        "device_count": device_count,
+        "max_fragments": max_fragments,
     }
     return _run_bridge_js(
         f"""
@@ -86,6 +101,9 @@ const outputs = [];
 let clipOpenCount = 0;
 context.outlet = (...args) => outputs.push(args);
 context.ensureInitialized = () => true;
+if (fixture.max_fragments !== null) {{
+  context.SESSION_CLIP_INSPECTION_MAX_FRAGMENTS = fixture.max_fragments;
+}}
 context.LiveAPI = function LiveAPI(_callback, rawPath) {{
   const path = String(rawPath);
   if (path === "live_set tracks 2") {{
@@ -99,7 +117,11 @@ context.LiveAPI = function LiveAPI(_callback, rawPath) {{
       }},
       getcount: (child) => {{
         if (child === "clip_slots") return 8;
-        if (child === "devices") return fixture.devices.length;
+        if (child === "devices") {{
+          return fixture.device_count === null
+            ? fixture.devices.length
+            : fixture.device_count;
+        }}
         throw new Error("unknown track child " + child);
       }},
     }};
@@ -121,15 +143,10 @@ context.LiveAPI = function LiveAPI(_callback, rawPath) {{
       id,
       path,
       get: (property) => {{
-        const values = {{
-          name: fixture.clip_name,
-          start_marker: 0,
-          end_marker: 8,
-          length: 8,
-          looping: 1,
-          loop_start: 0,
-          loop_end: 8,
-        }};
+        const values = Object.assign(
+          {{ name: fixture.clip_name }},
+          fixture.clip_values
+        );
         if (Object.prototype.hasOwnProperty.call(values, property)) return values[property];
         throw new Error("unknown clip property " + property);
       }},
@@ -987,6 +1004,170 @@ return outputs.filter((args) => args[1] === "/ack");
             [0, 1, 2, 4, None, None, None, None, None],
         )
 
+    def test_js_session_clip_inspect_negative_times_roundtrip_through_python(self) -> None:
+        note = _inspection_note(start_time=-3.5)
+        outputs = _run_session_clip_inspect_js(
+            notes=[note],
+            devices=[],
+            request_id="req-negative-times",
+            clip_values={
+                "start_marker": -4,
+                "end_marker": 4,
+                "length": 8,
+                "looping": 1,
+                "loop_start": -2,
+                "loop_end": 2,
+            },
+        )
+        assembler = bridge.SessionClipInspectionAssembler()
+        assembled = None
+        for output in outputs:
+            assembled = assembler.add_fragment(
+                json.loads(str(output[3])),
+                str(output[4]),
+            )
+
+        self.assertIsNotNone(assembled)
+        assert assembled is not None
+        self.assertEqual(assembled["clip"]["start_marker"], -4)
+        self.assertEqual(assembled["clip"]["end_marker"], 4)
+        self.assertEqual(assembled["clip"]["loop_start"], -2)
+        self.assertEqual(assembled["clip"]["loop_end"], 2)
+        self.assertEqual(assembled["notes"], [note])
+
+    def test_js_session_clip_inspect_rejects_invalid_clip_ranges(self) -> None:
+        cases = [
+            {
+                "start_marker": 2,
+                "end_marker": 1,
+                "length": 1,
+                "looping": 1,
+                "loop_start": 0,
+                "loop_end": 1,
+            },
+            {
+                "start_marker": 0,
+                "end_marker": math.inf,
+                "length": 1,
+                "looping": 1,
+                "loop_start": 0,
+                "loop_end": 1,
+            },
+            {
+                "start_marker": 0,
+                "end_marker": 1,
+                "length": -1,
+                "looping": 1,
+                "loop_start": 2,
+                "loop_end": 1,
+            },
+        ]
+
+        for clip_values in cases:
+            with self.subTest(clip_values=clip_values):
+                outputs = _run_session_clip_inspect_js(
+                    notes=[],
+                    devices=[],
+                    clip_values=clip_values,
+                )
+                self.assertEqual(len(outputs), 1)
+                self.assertEqual(
+                    outputs[0][3],
+                    "api_session_clip_inspect_parse_failed",
+                )
+
+    def test_js_session_clip_inspect_accepts_v1_inventory_boundaries(self) -> None:
+        notes = [
+            _inspection_note(
+                note_id=index,
+                pitch=36 + (index % 48),
+                start_time=index * 0.25,
+            )
+            for index in range(4096)
+        ]
+        devices = [{} for _ in range(256)]
+
+        outputs = _run_session_clip_inspect_js(
+            notes=notes,
+            devices=devices,
+            request_id="req-max-inventory",
+        )
+        fragments = [json.loads(str(output[3])) for output in outputs]
+
+        self.assertGreater(len(fragments), 1)
+        self.assertLessEqual(len(fragments), 1024)
+        self.assertTrue(all(output[2] == "api_session_clip_inspect" for output in outputs))
+        self.assertEqual(
+            sum(
+                fragment["data"].get("device_count", 0)
+                for fragment in fragments
+            ),
+            256,
+        )
+        self.assertEqual(
+            sum(
+                fragment["data"].get("note_count", 0)
+                for fragment in fragments
+            ),
+            4096,
+        )
+
+    def test_js_session_clip_inspect_rejects_over_limit_inventories(self) -> None:
+        cases = [
+            (
+                "devices",
+                _run_session_clip_inspect_js(
+                    notes=[],
+                    devices=[],
+                    device_count=257,
+                    request_id="req-too-many-devices",
+                ),
+            ),
+            (
+                "notes",
+                _run_session_clip_inspect_js(
+                    notes=[
+                        _inspection_note(note_id=index)
+                        for index in range(4097)
+                    ],
+                    devices=[],
+                    request_id="req-too-many-notes",
+                ),
+            ),
+        ]
+
+        for inventory_kind, outputs in cases:
+            with self.subTest(inventory_kind=inventory_kind):
+                self.assertEqual(len(outputs), 1)
+                self.assertEqual(
+                    outputs[0][3],
+                    "api_session_clip_inspect_limit_exceeded",
+                )
+                packet = bridge.encode_osc_message(
+                    "/ack",
+                    tuple(outputs[0][2:]),
+                )
+                self.assertLessEqual(len(packet), 4096)
+
+    def test_js_session_clip_inspect_enforces_fragment_limit_during_planning(self) -> None:
+        outputs = _run_session_clip_inspect_js(
+            notes=[],
+            devices=[
+                {"name": f"Device {index} " + ("X" * 1400)}
+                for index in range(3)
+            ],
+            request_id="req-fragment-limit",
+            max_fragments=2,
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(
+            outputs[0][3],
+            "api_session_clip_inspect_limit_exceeded",
+        )
+        packet = bridge.encode_osc_message("/ack", tuple(outputs[0][2:]))
+        self.assertLessEqual(len(packet), 4096)
+
     def test_js_session_clip_inspect_rejects_incomplete_or_invalid_extended_notes(self) -> None:
         canonical = _inspection_note()
         cases = [
@@ -1478,6 +1659,8 @@ return outputs.filter((args) => args[1] === "/ack");
         with self.assertRaisesRegex(bridge.SessionClipInspectionAssemblyError, "missing fragment indexes"):
             assembler.assemble("req-assembly", "inspection-1")
 
+        mixed_assembler = bridge.SessionClipInspectionAssembler()
+        mixed_assembler.add_fragment(context_fragment)
         mixed_count = _inspection_fragment(
             index=1,
             count=3,
@@ -1490,7 +1673,7 @@ return outputs.filter((args) => args[1] === "/ack");
             },
         )
         with self.assertRaisesRegex(bridge.SessionClipInspectionAssemblyError, "mixed metadata"):
-            assembler.add_fragment(mixed_count)
+            mixed_assembler.add_fragment(mixed_count)
 
     def test_session_clip_inspection_assembler_rejects_malformed_and_noncontiguous_pages(self) -> None:
         assembler = bridge.SessionClipInspectionAssembler()
@@ -1607,6 +1790,222 @@ return outputs.filter((args) => args[1] === "/ack");
             with self.subTest(label=label):
                 with self.assertRaises(bridge.SessionClipInspectionAssemblyError):
                     bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+    def test_session_clip_inspection_assembler_accepts_signed_ordered_clip_times(self) -> None:
+        fragment = _complete_inspection_fragment()
+        fragment["data"]["clip"].update(
+            {
+                "start_marker": -8,
+                "end_marker": -2,
+                "live_length": 6,
+                "loop_start": -7.5,
+                "loop_end": -2.5,
+            }
+        )
+
+        assembled = bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+        self.assertIsNotNone(assembled)
+        assert assembled is not None
+        self.assertEqual(assembled["clip"]["start_marker"], -8)
+        self.assertEqual(assembled["clip"]["loop_start"], -7.5)
+
+    def test_session_clip_inspection_assembler_rejects_invalid_clip_ranges(self) -> None:
+        mutations = [
+            ("start_marker", 2, "end_marker", 1),
+            ("loop_start", 2, "loop_end", 1),
+            ("start_marker", -1e308, "end_marker", 1e308),
+            ("loop_start", -1e308, "loop_end", 1e308),
+            ("live_length", math.inf, None, None),
+            ("live_length", -1, None, None),
+        ]
+
+        for first_field, first_value, second_field, second_value in mutations:
+            fragment = _complete_inspection_fragment()
+            fragment["data"]["clip"][first_field] = first_value
+            if second_field is not None:
+                fragment["data"]["clip"][second_field] = second_value
+            with self.subTest(
+                first_field=first_field,
+                first_value=first_value,
+                second_field=second_field,
+            ):
+                with self.assertRaises(bridge.SessionClipInspectionAssemblyError):
+                    bridge.SessionClipInspectionAssembler().add_fragment(fragment)
+
+    def test_session_clip_inspection_assembler_rejects_resource_counts_before_state(self) -> None:
+        cases: list[dict[str, object]] = []
+
+        billion_fragments = _inspection_fragment(
+            index=0,
+            count=1_000_000_000,
+            kind="context",
+            data=_inspection_context_data(),
+        )
+        cases.append(billion_fragments)
+
+        too_many_devices = _inspection_fragment(
+            index=1,
+            count=2,
+            kind="device_page",
+            data={
+                "device_offset": 0,
+                "device_count": 0,
+                "device_total": 257,
+                "devices": [],
+            },
+        )
+        cases.append(too_many_devices)
+
+        too_many_notes = _inspection_fragment(
+            index=1,
+            count=2,
+            kind="note_page",
+            data={
+                "note_offset": 0,
+                "note_count": 0,
+                "note_total": 4097,
+                "notes": [],
+            },
+        )
+        cases.append(too_many_notes)
+
+        too_many_summary_notes = _inspection_fragment(
+            index=0,
+            count=2,
+            kind="context",
+            data=_inspection_context_data(
+                note_count=4097,
+                pitch_min=0,
+                pitch_max=127,
+            ),
+        )
+        cases.append(too_many_summary_notes)
+
+        for fragment in cases:
+            assembler = bridge.SessionClipInspectionAssembler()
+            with self.subTest(fragment=fragment):
+                with self.assertRaisesRegex(
+                    bridge.SessionClipInspectionAssemblyError,
+                    "limit",
+                ):
+                    assembler.add_fragment(fragment)
+                self.assertEqual(len(assembler._states), 0)
+
+    def test_session_clip_inspection_assembler_accepts_resource_boundaries(self) -> None:
+        device_page = _inspection_fragment(
+            index=1,
+            count=2,
+            kind="device_page",
+            inspection_id="boundary-devices",
+            data={
+                "device_offset": 255,
+                "device_count": 1,
+                "device_total": 256,
+                "devices": [_inspection_device(255)],
+            },
+        )
+        note_page = _inspection_fragment(
+            index=1,
+            count=2,
+            kind="note_page",
+            inspection_id="boundary-notes",
+            data={
+                "note_offset": 4095,
+                "note_count": 1,
+                "note_total": 4096,
+                "notes": [_inspection_note(note_id=4095)],
+            },
+        )
+
+        self.assertIsNone(
+            bridge.SessionClipInspectionAssembler().add_fragment(device_page)
+        )
+        self.assertIsNone(
+            bridge.SessionClipInspectionAssembler().add_fragment(note_page)
+        )
+
+    def test_session_clip_inspection_assembler_caps_active_states_and_evicts_errors(self) -> None:
+        assembler = bridge.SessionClipInspectionAssembler()
+        fragments = [
+            _inspection_fragment(
+                index=0,
+                count=2,
+                kind="context",
+                request_id=f"req-active-{index}",
+                inspection_id=f"inspection-active-{index}",
+                data=_inspection_context_data(),
+            )
+            for index in range(17)
+        ]
+        for fragment in fragments[:16]:
+            self.assertIsNone(assembler.add_fragment(fragment))
+
+        self.assertEqual(len(assembler._states), 16)
+        with self.assertRaisesRegex(
+            bridge.SessionClipInspectionAssemblyError,
+            "active assembly limit",
+        ):
+            assembler.add_fragment(fragments[16])
+
+        conflicting = json.loads(json.dumps(fragments[0]))
+        conflicting["data"]["track"]["name"] = "Conflicting Track"
+        with self.assertRaisesRegex(
+            bridge.SessionClipInspectionAssemblyError,
+            "conflicting duplicate",
+        ):
+            assembler.add_fragment(conflicting)
+
+        self.assertEqual(len(assembler._states), 15)
+        self.assertIsNone(assembler.add_fragment(fragments[16]))
+        self.assertEqual(len(assembler._states), 16)
+
+    def test_session_clip_inspection_assembler_mismatched_outer_request_does_not_evict_state(self) -> None:
+        fragment = _inspection_fragment(
+            index=0,
+            count=2,
+            kind="context",
+            request_id="req-state",
+            inspection_id="inspection-state",
+            data=_inspection_context_data(),
+        )
+        assembler = bridge.SessionClipInspectionAssembler()
+        assembler.add_fragment(fragment)
+
+        with self.assertRaisesRegex(
+            bridge.SessionClipInspectionAssemblyError,
+            "mixed metadata",
+        ):
+            assembler.add_fragment(fragment, request_id="req-other")
+
+        self.assertEqual(len(assembler._states), 1)
+
+    def test_session_clip_inspection_assembler_evicts_completed_state(self) -> None:
+        assembler = bridge.SessionClipInspectionAssembler()
+
+        assembled = assembler.add_fragment(_complete_inspection_fragment())
+
+        self.assertIsNotNone(assembled)
+        self.assertEqual(len(assembler._states), 0)
+
+    def test_session_clip_inspection_assembler_bounds_missing_index_diagnostic(self) -> None:
+        fragment = _inspection_fragment(
+            index=0,
+            count=1024,
+            kind="context",
+            data=_inspection_context_data(),
+        )
+        assembler = bridge.SessionClipInspectionAssembler()
+        assembler.add_fragment(fragment)
+
+        with self.assertRaises(bridge.SessionClipInspectionAssemblyError) as raised:
+            assembler.assemble("req-assembly", "inspection-1")
+
+        message = str(raised.exception)
+        self.assertIn("missing fragment indexes", message)
+        self.assertIn("more", message)
+        self.assertLess(len(message), 256)
+        self.assertEqual(len(assembler._states), 0)
 
     def test_session_clip_inspection_assembler_rejects_invalid_device_facts(self) -> None:
         invalid_devices: list[object] = [
@@ -2327,6 +2726,67 @@ return cases.map((testCase) => {
         self.assertGreater(timeouts[0], 0.90)
         self.assertLessEqual(timeouts[1], 0.05 + 1e-6)
 
+    def test_timeout_parsers_reject_nonfinite_values(self) -> None:
+        for flag in ("--ack-timeout", "--listen-timeout"):
+            for value in ("nan", "inf", "-inf"):
+                with self.subTest(flag=flag, value=value):
+                    with (
+                        mock.patch("sys.stderr", new=io.StringIO()),
+                        self.assertRaises(SystemExit),
+                    ):
+                        bridge.parse_args(
+                            [
+                                f"{flag}={value}",
+                                "--no-tempo",
+                                "--no-signature",
+                            ]
+                        )
+
+        with (
+            mock.patch("sys.stderr", new=io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            bridge.parse_args(
+                [
+                    "--ack-timeout",
+                    "0",
+                    "--no-tempo",
+                    "--no-signature",
+                ]
+            )
+        self.assertEqual(
+            bridge.parse_args(
+                [
+                    "--listen-timeout",
+                    "0",
+                    "--no-tempo",
+                    "--no-signature",
+                ]
+            ).listen_timeout_s,
+            0,
+        )
+
+    def test_wait_functions_reject_nonfinite_timeouts(self) -> None:
+        sock = mock.Mock()
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(function="generic", value=value):
+                with self.assertRaises(ValueError):
+                    bridge.wait_for_acks(sock, timeout_s=value)
+            with self.subTest(function="inspection", value=value):
+                with self.assertRaises(ValueError):
+                    bridge.wait_for_session_clip_inspection_acks(
+                        sock,
+                        timeout_s=value,
+                        request_id="req-timeout",
+                    )
+
+        with self.assertRaises(ValueError):
+            bridge.wait_for_acks(
+                sock,
+                timeout_s=1,
+                quiet_window_s=math.nan,
+            )
+
     def test_session_clip_inspect_waits_for_assembly_instead_of_quiet_window(self) -> None:
         fragments = [
             _inspection_fragment(
@@ -2399,6 +2859,44 @@ return cases.map((testCase) => {
         self.assertEqual(len(acks), 2)
         self.assertEqual(fake_sock.packet_index, 2)
         self.assertGreater(timeouts[1], 0.5)
+
+    def test_session_clip_inspect_ack_collection_bounds_unrelated_packet_flood(self) -> None:
+        unrelated = bridge.encode_osc_message("/ack", ("status",))
+        complete = _complete_inspection_fragment()
+        complete["correlation"]["request_id"] = "req-flood"
+        success = bridge.encode_osc_message(
+            "/ack",
+            (
+                "api_session_clip_inspect",
+                json.dumps(complete),
+                "req-flood",
+            ),
+        )
+        packets = [unrelated] * 2000 + [success]
+
+        class _FakeSock:
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if packets:
+                    return packets.pop(0), ("127.0.0.1", 9001)
+                raise BlockingIOError
+
+        fake_sock = _FakeSock()
+        with mock.patch(
+            "ableton_udp_bridge.select.select",
+            return_value=([fake_sock], [], []),
+        ):
+            acks = bridge.wait_for_session_clip_inspection_acks(
+                fake_sock,
+                timeout_s=1,
+                request_id="req-flood",
+            )
+
+        self.assertEqual(packets, [])
+        self.assertLessEqual(
+            len(acks),
+            bridge.SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS + 1,
+        )
+        self.assertEqual(acks[-1][1][0], "api_session_clip_inspect")
 
     def test_send_commands_uses_completion_aware_collection_for_session_clip_inspect(self) -> None:
         cfg = bridge.parse_args(

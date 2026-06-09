@@ -166,6 +166,11 @@ Protocol 3.1 adds a read-only, additive inspection endpoint:
 /api/session_clip_inspect <track_index> <slot_index> 1 <request_id>
 ```
 
+The final protocol 3.1 implementation establishes V1 with schema version `1`
+and producer version `3.1.0`. The endpoint has no compatibility promise with
+unpublished development snapshots, including intermediate feature-branch
+commits, and does not accept them as alternate V1 shapes.
+
 Validation requires non-negative integer indexes, schema version exactly `1`,
 and a non-empty request ID no longer than 128 UTF-8 bytes.
 
@@ -183,6 +188,13 @@ inspection is emitted as one `complete` fragment. Larger inspections emit one
 fragments. Page sizes adapt to the encoded packet size. A single item that
 cannot fit produces a correlated `api_session_clip_inspect_item_too_large`
 error.
+
+V1 resource limits are `MAX_NOTES=4096`, `MAX_DEVICES=256`, and
+`MAX_FRAGMENTS=1024`. The producer rejects an inventory above these limits
+before copying every item into fragments and enforces the fragment ceiling
+during adaptive page planning. Limit failures emit a correlated
+`api_session_clip_inspect_limit_exceeded` error whose encoded packet remains
+within the 4096-byte budget.
 
 Every fragment contains:
 
@@ -227,6 +239,9 @@ identity and timing (`slot_index`, `path`, `id`, `name`, `start_marker`,
 `end_marker`, `live_length`, `looping`, `loop_start`, `loop_end`), and summary
 fields (`note_count`, `pitch_min`, `pitch_max`). Empty clips use `null` pitch
 bounds. Track and clip `name` values are strings or explicit `null`.
+`start_marker`, `end_marker`, `loop_start`, and `loop_end` are finite signed
+beat positions. Each start is less than or equal to its matching end, and the
+finite difference is representable. `live_length` is finite and non-negative.
 
 Device pages contain `device_offset`, `device_count`, `device_total`, and
 ordered device records. Every device record has exactly `index`, `path`, `id`,
@@ -277,6 +292,7 @@ api_session_clip_inspect_read_failed
 api_session_clip_inspect_parse_failed
 api_session_clip_inspect_serialization_failed
 api_session_clip_inspect_item_too_large
+api_session_clip_inspect_limit_exceeded
 api_session_clip_inspect_snapshot_changed
 ```
 
@@ -284,7 +300,12 @@ The Python client exposes `SessionClipInspectionAssembler`. It keys assemblies
 by request ID and inspection ID, accepts out-of-order identical duplicates,
 and rejects conflicting duplicates, malformed fragments, mixed metadata,
 missing fragment indexes, invalid fragment-kind ordering, inconsistent
-counts, and noncontiguous device or note offsets.
+counts, and noncontiguous device or note offsets. It applies the same fragment,
+device, and note limits, permits at most 16 active assemblies, caps missing
+index diagnostics, and evicts completed or terminally failed states. Inspection
+ACK collection retains at most 1024 correlated fragments plus a small bounded
+allowance for unrelated traffic while continuing to wait for completion,
+correlated error, or timeout.
 
 The legacy `/inspect_session_clip_notes <track_index> <slot_index>` command and
 its single ACK remain unchanged for compatibility. Clients needing bounded

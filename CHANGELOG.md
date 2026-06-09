@@ -20,14 +20,22 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented packet policy, fragment transfer semantics, correlated inspection
   errors, and byte-for-byte compatibility for legacy
   `/inspect_session_clip_notes` ACKs.
+- Established the final protocol 3.1 V1 contract at schema version `1` and
+  producer version `3.1.0`; unpublished development snapshots have no
+  wire-compatibility promise and are not parsed as alternate shapes.
 - Froze session clip inspection V1 around complete nine-field extended notes,
   explicit nullable text metadata, index-ordered device/note page phases, and
   bounded diagnostics for every endpoint error ACK.
+- Bounded V1 inspection resources to 4096 notes, 256 devices, 1024 fragments,
+  and 16 active Python assemblies, with bounded ACK retention and terminal
+  state eviction.
 
 ### Fixed
 
 - Preserved Live device `type` as its numeric `0`/`1`/`2`/`4` enum and used
   explicit `null` for unavailable or invalid values.
+- Preserved finite signed clip marker and loop positions while rejecting
+  reversed, nonfinite, or non-representable ranges.
 - Aligned the JavaScript producer and Python assembler on note scalar types,
   nullable device/track/clip metadata, complete-fragment totals, and strict
   fragment ordering.

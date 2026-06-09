@@ -25,6 +25,15 @@ from typing import Iterable, List, Sequence, Tuple, Union
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9000
 DEFAULT_ACK_PORT = 9001
+SESSION_CLIP_INSPECTION_MAX_NOTES = 4096
+SESSION_CLIP_INSPECTION_MAX_DEVICES = 256
+SESSION_CLIP_INSPECTION_MAX_FRAGMENTS = 1024
+SESSION_CLIP_INSPECTION_MAX_ACTIVE_ASSEMBLIES = 16
+SESSION_CLIP_INSPECTION_MAX_MISSING_DIAGNOSTIC_INDEXES = 16
+SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS = 32
+SESSION_CLIP_INSPECTION_MAX_CORRELATED_ACKS = (
+    SESSION_CLIP_INSPECTION_MAX_FRAGMENTS + 1
+)
 
 OscArg = Union[int, float, str]
 
@@ -133,6 +142,10 @@ class SessionClipInspectionAssembler:
     SCHEMA_VERSION = 1
     PRODUCER_VERSION = "3.1.0"
     PACKET_BUDGET_BYTES = 4096
+    MAX_NOTES = SESSION_CLIP_INSPECTION_MAX_NOTES
+    MAX_DEVICES = SESSION_CLIP_INSPECTION_MAX_DEVICES
+    MAX_FRAGMENTS = SESSION_CLIP_INSPECTION_MAX_FRAGMENTS
+    MAX_ACTIVE_ASSEMBLIES = SESSION_CLIP_INSPECTION_MAX_ACTIVE_ASSEMBLIES
     _FRAGMENT_KINDS = {"complete", "context", "device_page", "note_page"}
     _ROOT_KEYS = {
         "schema",
@@ -351,10 +364,10 @@ class SessionClipInspectionAssembler:
         self._require_non_negative_int(value["id"], "clip.id")
         self._require_nullable_string(value["name"], "clip.name")
         start_marker = self._require_finite_number(
-            value["start_marker"], "clip.start_marker", minimum=0
+            value["start_marker"], "clip.start_marker"
         )
         end_marker = self._require_finite_number(
-            value["end_marker"], "clip.end_marker", minimum=0
+            value["end_marker"], "clip.end_marker"
         )
         self._require_finite_number(
             value["live_length"], "clip.live_length", minimum=0
@@ -364,12 +377,17 @@ class SessionClipInspectionAssembler:
                 "malformed fragment: clip.looping"
             )
         loop_start = self._require_finite_number(
-            value["loop_start"], "clip.loop_start", minimum=0
+            value["loop_start"], "clip.loop_start"
         )
         loop_end = self._require_finite_number(
-            value["loop_end"], "clip.loop_end", minimum=0
+            value["loop_end"], "clip.loop_end"
         )
-        if end_marker < start_marker or loop_end < loop_start:
+        if (
+            end_marker < start_marker
+            or not math.isfinite(end_marker - start_marker)
+            or loop_end < loop_start
+            or not math.isfinite(loop_end - loop_start)
+        ):
             raise SessionClipInspectionAssemblyError(
                 "malformed fragment: clip ranges"
             )
@@ -383,6 +401,10 @@ class SessionClipInspectionAssembler:
         note_count = self._require_non_negative_int(
             value["note_count"], "summary.note_count"
         )
+        if note_count > self.MAX_NOTES:
+            raise SessionClipInspectionAssemblyError(
+                "resource limit exceeded: summary.note_count"
+            )
         pitch_min = value["pitch_min"]
         pitch_max = value["pitch_max"]
         if note_count == 0:
@@ -497,7 +519,16 @@ class SessionClipInspectionAssembler:
         offset = self._require_non_negative_int(data.get(offset_field), offset_field)
         count = self._require_non_negative_int(data.get(count_field), count_field)
         total = self._require_non_negative_int(data.get(total_field), total_field)
+        maximum = self.MAX_DEVICES if item_kind == "device" else self.MAX_NOTES
+        if count > maximum or total > maximum:
+            raise SessionClipInspectionAssemblyError(
+                f"resource limit exceeded: {item_kind} count"
+            )
         items = self._require_list(data.get(items_field), items_field)
+        if len(items) > maximum:
+            raise SessionClipInspectionAssemblyError(
+                f"resource limit exceeded: {items_field}"
+            )
         if count != len(items) or offset + count > total:
             raise SessionClipInspectionAssemblyError("inconsistent counts")
         for item_index, item in enumerate(items):
@@ -583,6 +614,10 @@ class SessionClipInspectionAssembler:
         fragment_count = self._require_non_negative_int(
             transfer.get("fragment_count"), "fragment_count"
         )
+        if fragment_count > self.MAX_FRAGMENTS:
+            raise SessionClipInspectionAssemblyError(
+                "resource limit exceeded: fragment_count"
+            )
         if fragment_count <= 0 or fragment_index >= fragment_count:
             raise SessionClipInspectionAssemblyError("inconsistent counts")
         fragment_kind = transfer.get("fragment_kind")
@@ -708,6 +743,57 @@ class SessionClipInspectionAssembler:
             self._canonical(metadata),
         )
 
+    @staticmethod
+    def _candidate_state_key(
+        fragment: object,
+        request_id: str | None,
+    ) -> tuple[str, str] | None:
+        if not isinstance(fragment, dict):
+            return None
+        inspection_id = fragment.get("inspection_id")
+        correlation = fragment.get("correlation")
+        if not isinstance(inspection_id, str) or not isinstance(correlation, dict):
+            return None
+        fragment_request_id = correlation.get("request_id")
+        if not isinstance(fragment_request_id, str):
+            return None
+        if request_id is not None and request_id != fragment_request_id:
+            return None
+        return (fragment_request_id, inspection_id)
+
+    @staticmethod
+    def _missing_fragment_message(
+        fragment_count: int,
+        fragments: dict[object, object],
+    ) -> str | None:
+        shown: list[int] = []
+        missing_count = 0
+        for index in range(fragment_count):
+            if index in fragments:
+                continue
+            missing_count += 1
+            if len(shown) < SESSION_CLIP_INSPECTION_MAX_MISSING_DIAGNOSTIC_INDEXES:
+                shown.append(index)
+        if missing_count == 0:
+            return None
+        message = "missing fragment indexes: " + ",".join(
+            str(index) for index in shown
+        )
+        omitted = missing_count - len(shown)
+        if omitted > 0:
+            message += f" ... (+{omitted} more)"
+        return message
+
+    def _assemble_and_evict(
+        self,
+        key: tuple[str, str],
+        state: dict[str, object],
+    ) -> dict[str, object]:
+        try:
+            return self._assemble_state(key, state)
+        finally:
+            self._states.pop(key, None)
+
     def add_event(self, event: AckEvent) -> dict[str, object] | None:
         if event.event != "api_session_clip_inspect":
             raise SessionClipInspectionAssemblyError("malformed fragment event")
@@ -718,46 +804,54 @@ class SessionClipInspectionAssembler:
         fragment: object,
         request_id: str | None = None,
     ) -> dict[str, object] | None:
-        (
-            value,
-            key,
-            fragment_index,
-            fragment_count,
-            _fragment_kind,
-            metadata_key,
-        ) = self._validate_fragment(fragment, request_id)
-        canonical_fragment = self._canonical(value)
-        state = self._states.get(key)
-        if state is None:
-            state = {
-                "metadata_key": metadata_key,
-                "fragment_count": fragment_count,
-                "fragments": {},
-            }
-            self._states[key] = state
-        elif (
-            state["metadata_key"] != metadata_key
-            or state["fragment_count"] != fragment_count
-        ):
-            raise SessionClipInspectionAssemblyError("mixed metadata")
+        candidate_key = self._candidate_state_key(fragment, request_id)
+        try:
+            (
+                value,
+                key,
+                fragment_index,
+                fragment_count,
+                _fragment_kind,
+                metadata_key,
+            ) = self._validate_fragment(fragment, request_id)
+            canonical_fragment = self._canonical(value)
+            state = self._states.get(key)
+            if state is None:
+                if len(self._states) >= self.MAX_ACTIVE_ASSEMBLIES:
+                    raise SessionClipInspectionAssemblyError(
+                        "active assembly limit exceeded"
+                    )
+                state = {
+                    "metadata_key": metadata_key,
+                    "fragment_count": fragment_count,
+                    "fragments": {},
+                }
+                self._states[key] = state
+            elif (
+                state["metadata_key"] != metadata_key
+                or state["fragment_count"] != fragment_count
+            ):
+                raise SessionClipInspectionAssemblyError("mixed metadata")
 
-        fragments = state["fragments"]
-        assert isinstance(fragments, dict)
-        existing = fragments.get(fragment_index)
-        if existing is not None:
-            existing_fragment, existing_canonical = existing
-            if existing_canonical != canonical_fragment:
-                raise SessionClipInspectionAssemblyError(
-                    f"conflicting duplicate fragment index {fragment_index}"
-                )
+            fragments = state["fragments"]
+            assert isinstance(fragments, dict)
+            existing = fragments.get(fragment_index)
+            if existing is not None:
+                _existing_fragment, existing_canonical = existing
+                if existing_canonical != canonical_fragment:
+                    raise SessionClipInspectionAssemblyError(
+                        f"conflicting duplicate fragment index {fragment_index}"
+                    )
+                return None
+
+            fragments[fragment_index] = (value, canonical_fragment)
             if len(fragments) == fragment_count:
-                return self._assemble_state(key, state)
+                return self._assemble_and_evict(key, state)
             return None
-
-        fragments[fragment_index] = (value, canonical_fragment)
-        if len(fragments) == fragment_count:
-            return self._assemble_state(key, state)
-        return None
+        except SessionClipInspectionAssemblyError:
+            if candidate_key is not None:
+                self._states.pop(candidate_key, None)
+            raise
 
     def assemble(self, request_id: str, inspection_id: str) -> dict[str, object]:
         key = (request_id, inspection_id)
@@ -767,12 +861,14 @@ class SessionClipInspectionAssembler:
         fragment_count = int(state["fragment_count"])
         fragments = state["fragments"]
         assert isinstance(fragments, dict)
-        missing = [index for index in range(fragment_count) if index not in fragments]
-        if missing:
-            raise SessionClipInspectionAssemblyError(
-                "missing fragment indexes: " + ",".join(str(index) for index in missing)
-            )
-        return self._assemble_state(key, state)
+        missing_message = self._missing_fragment_message(
+            fragment_count,
+            fragments,
+        )
+        if missing_message is not None:
+            self._states.pop(key, None)
+            raise SessionClipInspectionAssemblyError(missing_message)
+        return self._assemble_and_evict(key, state)
 
     def _assemble_pages(
         self,
@@ -1037,15 +1133,15 @@ def positive_int(value: str) -> int:
 
 def positive_float(value: str) -> float:
     parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("value must be > 0")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be finite and > 0")
     return parsed
 
 
 def non_negative_float(value: str) -> float:
     parsed = float(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("value must be >= 0")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("value must be finite and >= 0")
     return parsed
 
 
@@ -1083,7 +1179,7 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
     )
     parser.add_argument(
         "--ack-timeout",
-        type=non_negative_float,
+        type=positive_float,
         default=0.6,
         help="How long to wait for acknowledgements after each send (seconds)",
     )
@@ -2549,17 +2645,29 @@ def open_ack_socket(cfg: BridgeConfig) -> socket.socket | None:
     return sock
 
 
+def _finite_wait_seconds(value: float, label: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{label} must be finite") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{label} must be finite")
+    return parsed
+
+
 def wait_for_acks(
     sock: socket.socket,
     timeout_s: float,
     quiet_window_s: float = 0.05,
 ) -> List[Tuple[str, List[OscArg]]]:
-    if timeout_s <= 0:
+    timeout = _finite_wait_seconds(timeout_s, "timeout_s")
+    quiet_window = _finite_wait_seconds(quiet_window_s, "quiet_window_s")
+    if timeout <= 0:
         return []
 
-    deadline = time.monotonic() + timeout_s
+    deadline = time.monotonic() + timeout
     received: List[Tuple[str, List[OscArg]]] = []
-    quiet_window = max(0.0, float(quiet_window_s))
+    quiet_window = max(0.0, quiet_window)
 
     while True:
         remaining = deadline - time.monotonic()
@@ -2601,12 +2709,15 @@ def wait_for_session_clip_inspection_acks(
     request_id: str,
 ) -> List[Tuple[str, List[OscArg]]]:
     """Wait for a complete inspection, correlated error, or the full timeout."""
-    if timeout_s <= 0:
+    timeout = _finite_wait_seconds(timeout_s, "timeout_s")
+    if timeout <= 0:
         return []
 
-    deadline = time.monotonic() + timeout_s
+    deadline = time.monotonic() + timeout
     received: List[Tuple[str, List[OscArg]]] = []
     assembler = SessionClipInspectionAssembler()
+    correlated_ack_count = 0
+    unrelated_ack_count = 0
 
     while True:
         remaining = deadline - time.monotonic()
@@ -2628,17 +2739,31 @@ def wait_for_session_clip_inspection_acks(
             try:
                 address, args = decode_osc_message(packet)
             except Exception as exc:  # noqa: BLE001 - best-effort debug output
-                received.append(("<unparsed>", [f"{exc}: {packet!r}"]))
+                if unrelated_ack_count < SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS:
+                    received.append(("<unparsed>", [f"{exc}: {packet!r}"]))
+                    unrelated_ack_count += 1
                 continue
 
-            received.append((address, args))
             event = parse_ack_event(address, args)
-            if event.is_error and event.request_id == request_id:
-                return received
-            if (
+            correlated_error = event.is_error and event.request_id == request_id
+            correlated_fragment = (
                 event.event == "api_session_clip_inspect"
                 and event.request_id == request_id
-            ):
+            )
+            if correlated_error or correlated_fragment:
+                if (
+                    correlated_ack_count
+                    < SESSION_CLIP_INSPECTION_MAX_CORRELATED_ACKS
+                ):
+                    received.append((address, args))
+                    correlated_ack_count += 1
+            elif unrelated_ack_count < SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS:
+                received.append((address, args))
+                unrelated_ack_count += 1
+
+            if correlated_error:
+                return received
+            if correlated_fragment:
                 if assembler.add_event(event) is not None:
                     return received
 
@@ -2823,10 +2948,16 @@ def listen_for_events(cfg: BridgeConfig) -> int:
         return -1
 
     max_events = max(0, int(cfg.listen_max_events))
+    listen_timeout = _finite_wait_seconds(
+        cfg.listen_timeout_s,
+        "listen_timeout_s",
+    )
+    if listen_timeout < 0:
+        raise ValueError("listen_timeout_s must be >= 0")
     deadline = (
         None
-        if cfg.listen_timeout_s <= 0
-        else time.monotonic() + float(cfg.listen_timeout_s)
+        if listen_timeout == 0
+        else time.monotonic() + listen_timeout
     )
     event_count = 0
     print(f"Listening: udp://{cfg.host}:{cfg.ack_port}")

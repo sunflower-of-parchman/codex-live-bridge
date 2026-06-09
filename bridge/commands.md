@@ -53,8 +53,10 @@ indexes define the sequence: context, contiguous device pages, then contiguous
 note pages. Device metadata always includes nullable `name`, `class_name`, and
 numeric Live `type` enum (`0`, `1`, `2`, or `4`). Each note contains all nine
 extended-note fields. Success and error ACKs from this endpoint are at most
-4096 encoded OSC bytes. The Python CLI waits for complete assembly, a
-correlated error, or the full ACK timeout:
+4096 encoded OSC bytes. V1 permits at most 4096 notes, 256 devices, and 1024
+fragments. Clip marker and loop positions may be negative finite beat values,
+with each start less than or equal to its matching end. The Python CLI waits
+for complete assembly, a correlated error, or the full ACK timeout:
 
 ```bash
 python3 bridge/ableton_udp_bridge.py \

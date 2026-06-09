@@ -15,6 +15,9 @@ var SESSION_CLIP_INSPECTION_SCHEMA = "codex-live-bridge.session-midi-clip-inspec
 var SESSION_CLIP_INSPECTION_SCHEMA_VERSION = 1;
 var SESSION_CLIP_INSPECTION_PRODUCER_VERSION = "3.1.0";
 var SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES = 4096;
+var SESSION_CLIP_INSPECTION_MAX_NOTES = 4096;
+var SESSION_CLIP_INSPECTION_MAX_DEVICES = 256;
+var SESSION_CLIP_INSPECTION_MAX_FRAGMENTS = 1024;
 var sessionClipInspectionCounter = 0;
 
 function debug(msg) {
@@ -1370,6 +1373,55 @@ function readNullableSessionClipInspectionDeviceType(api) {
   return null;
 }
 
+function validateSessionClipInspectionClipData(clipData, requestId) {
+  var positionFields = [
+    "start_marker",
+    "end_marker",
+    "loop_start",
+    "loop_end",
+  ];
+  for (var i = 0; i < positionFields.length; i += 1) {
+    var positionField = positionFields[i];
+    if (
+      typeof clipData[positionField] !== "number" ||
+      !isFinite(clipData[positionField])
+    ) {
+      sessionClipInspectionError(
+        "parse_failed",
+        ["clip_invalid_field", positionField],
+        requestId
+      );
+      return false;
+    }
+  }
+  if (
+    typeof clipData.live_length !== "number" ||
+    !isFinite(clipData.live_length) ||
+    clipData.live_length < 0
+  ) {
+    sessionClipInspectionError(
+      "parse_failed",
+      ["clip_invalid_field", "live_length"],
+      requestId
+    );
+    return false;
+  }
+  if (
+    clipData.start_marker > clipData.end_marker ||
+    !isFinite(clipData.end_marker - clipData.start_marker) ||
+    clipData.loop_start > clipData.loop_end ||
+    !isFinite(clipData.loop_end - clipData.loop_start)
+  ) {
+    sessionClipInspectionError(
+      "parse_failed",
+      ["clip_invalid_ranges"],
+      requestId
+    );
+    return false;
+  }
+  return true;
+}
+
 function openSessionClipInspectionApi(path, target, requestId) {
   try {
     var api = new LiveAPI(null, path);
@@ -1630,11 +1682,20 @@ function paginateSessionClipInspectionItems(
   totalField,
   itemsField,
   requestId,
-  maxFragmentCount
+  maxFragmentCount,
+  maxPages
 ) {
   var pages = [];
   var offset = 0;
   while (offset < items.length) {
+    if (pages.length >= maxPages) {
+      return {
+        ok: false,
+        error: "limit_exceeded",
+        details: ["fragments", maxFragmentCount],
+        pages: [],
+      };
+    }
     var pageItems = [];
     while (offset + pageItems.length < items.length) {
       var candidateItems = pageItems.concat([items[offset + pageItems.length]]);
@@ -1685,6 +1746,22 @@ function paginateSessionClipInspectionItems(
 }
 
 function buildSessionClipInspectionFragments(metadata, contextData, devices, notes, requestId) {
+  if (devices.length > SESSION_CLIP_INSPECTION_MAX_DEVICES) {
+    return {
+      ok: false,
+      error: "limit_exceeded",
+      details: ["devices", devices.length, SESSION_CLIP_INSPECTION_MAX_DEVICES],
+      fragments: [],
+    };
+  }
+  if (notes.length > SESSION_CLIP_INSPECTION_MAX_NOTES) {
+    return {
+      ok: false,
+      error: "limit_exceeded",
+      details: ["notes", notes.length, SESSION_CLIP_INSPECTION_MAX_NOTES],
+      fragments: [],
+    };
+  }
   var completeData = {
     context: contextData.context,
     track: contextData.track,
@@ -1715,7 +1792,7 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
     return { ok: true, fragments: [complete.json] };
   }
 
-  var maxFragmentCount = Math.max(1, 1 + devices.length + notes.length);
+  var maxFragmentCount = SESSION_CLIP_INSPECTION_MAX_FRAGMENTS;
   var contextMeasured = measureSessionClipInspectionFragment(
     metadata,
     Math.max(0, maxFragmentCount - 1),
@@ -1746,7 +1823,8 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
     "device_total",
     "devices",
     requestId,
-    maxFragmentCount
+    maxFragmentCount,
+    maxFragmentCount - 1
   );
   if (!devicePages.ok) {
     return {
@@ -1765,7 +1843,8 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
     "note_total",
     "notes",
     requestId,
-    maxFragmentCount
+    maxFragmentCount,
+    maxFragmentCount - 1 - devicePages.pages.length
   );
   if (!notePages.ok) {
     return {
@@ -1788,6 +1867,14 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
       })
     );
   var fragmentCount = pageSpecs.length;
+  if (fragmentCount > SESSION_CLIP_INSPECTION_MAX_FRAGMENTS) {
+    return {
+      ok: false,
+      error: "limit_exceeded",
+      details: ["fragments", fragmentCount, SESSION_CLIP_INSPECTION_MAX_FRAGMENTS],
+      fragments: [],
+    };
+  }
   var fragments = [];
   for (var i = 0; i < pageSpecs.length; i += 1) {
     var measured = measureSessionClipInspectionFragment(
@@ -1954,6 +2041,7 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     clipData[outputProperty] =
       outputProperty === "looping" ? !!Number(clipValue.value) : clipValue.value;
   }
+  if (!validateSessionClipInspectionClipData(clipData, requestText)) return;
 
   var deviceCount = 0;
   try {
@@ -1965,6 +2053,14 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   }
   if (!(isFinite(deviceCount) && deviceCount >= 0 && Math.floor(deviceCount) === deviceCount)) {
     sessionClipInspectionError("read_failed", ["track", "devices"], requestText);
+    return;
+  }
+  if (deviceCount > SESSION_CLIP_INSPECTION_MAX_DEVICES) {
+    sessionClipInspectionError(
+      "limit_exceeded",
+      ["devices", deviceCount, SESSION_CLIP_INSPECTION_MAX_DEVICES],
+      requestText
+    );
     return;
   }
   var devices = [];
@@ -2006,6 +2102,14 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   }
   var parsedNotes = parseSessionClipInspectionNotes(rawNotes, requestText);
   if (parsedNotes === null) return;
+  if (parsedNotes.length > SESSION_CLIP_INSPECTION_MAX_NOTES) {
+    sessionClipInspectionError(
+      "limit_exceeded",
+      ["notes", parsedNotes.length, SESSION_CLIP_INSPECTION_MAX_NOTES],
+      requestText
+    );
+    return;
+  }
   var notes = [];
   for (var noteIndex = 0; noteIndex < parsedNotes.length; noteIndex += 1) {
     var copiedNote = copySessionClipInspectionNote(
