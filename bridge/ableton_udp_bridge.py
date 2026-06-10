@@ -12,19 +12,54 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import select
 import socket
 import struct
 from statistics import mean
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, List, Sequence, Tuple, Union
 
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9000
 DEFAULT_ACK_PORT = 9001
+AUTH_TOKEN_ENV = "CODEX_LIVE_BRIDGE_TOKEN"
+AUTH_TOKEN_PLACEHOLDER = "CHANGE_ME_BEFORE_USE"
+MIN_AUTH_TOKEN_BYTES = 16
+MAX_AUTH_TOKEN_BYTES = 256
+MAX_TRACKS_PER_COMMAND = 32
+MAX_TRACK_TARGET = 256
+PROTECTED_OSC_ADDRESSES = frozenset(
+    {
+        "/tempo",
+        "/sig_num",
+        "/sig_den",
+        "/create_midi_track",
+        "/add_midi_tracks",
+        "/create_audio_track",
+        "/add_audio_tracks",
+        "/delete_audio_tracks",
+        "/delete_midi_tracks",
+        "/rename_track",
+        "/set_session_clip_notes",
+        "/append_session_clip_notes",
+        "/ensure_midi_tracks",
+        "/api/set",
+        "/api/call",
+        "/api_observe",
+        "/api_unobserve",
+        "/api_clear_observers",
+        "/api/parameter_set",
+        "/api/insert_device",
+        "/api/insert_chain",
+        "/api/drum_chain_in_note",
+        "/midi_cc",
+        "/cc64",
+    }
+)
 SESSION_CLIP_INSPECTION_MAX_NOTES = 4096
 SESSION_CLIP_INSPECTION_MAX_DEVICES = 256
 SESSION_CLIP_INSPECTION_MAX_FRAGMENTS = 1024
@@ -92,6 +127,7 @@ class BridgeConfig:
     api_calls: Tuple[Tuple[str, str, str, str | None], ...]
     api_children: Tuple[Tuple[str, str, str | None], ...]
     api_describes: Tuple[Tuple[str, str | None], ...]
+    auth_token: str | None = field(default=None, repr=False)
     api_observes: Tuple[Tuple[str, str, str, str | None], ...] = ()
     api_unobserves: Tuple[Tuple[str, str | None], ...] = ()
     api_observers: Tuple[str | None, ...] = ()
@@ -1190,12 +1226,50 @@ def midi_channel(value: str) -> int:
     return parsed
 
 
+def normalize_auth_token(value: str | None) -> str | None:
+    if value is None:
+        return None
+    token = str(value).strip()
+    byte_length = len(token.encode("utf-8"))
+    if (
+        token == AUTH_TOKEN_PLACEHOLDER
+        or byte_length < MIN_AUTH_TOKEN_BYTES
+        or byte_length > MAX_AUTH_TOKEN_BYTES
+    ):
+        raise ValueError(
+            f"auth token must be {MIN_AUTH_TOKEN_BYTES} to "
+            f"{MAX_AUTH_TOKEN_BYTES} UTF-8 bytes and must not be the placeholder"
+        )
+    return token
+
+
+def authenticated_args(
+    auth_token: str | None,
+    args: Sequence[OscArg] = (),
+) -> Tuple[OscArg, ...]:
+    token = normalize_auth_token(auth_token)
+    if token is None:
+        raise ValueError(
+            "Mutating commands require --auth-token or "
+            f"the {AUTH_TOKEN_ENV} environment variable"
+        )
+    return (token, *tuple(args))
+
+
 def parse_args(argv: Iterable[str]) -> BridgeConfig:
     parser = argparse.ArgumentParser(
         description="Send OSC UDP commands to a Max for Live Ableton bridge."
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help="UDP host")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="UDP port")
+    parser.add_argument(
+        "--auth-token",
+        default=os.environ.get(AUTH_TOKEN_ENV),
+        help=(
+            "Capability token for mutating commands "
+            f"(default: {AUTH_TOKEN_ENV} environment variable)"
+        ),
+    )
 
     parser.add_argument(
         "--ack",
@@ -1408,8 +1482,8 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
     parser.add_argument(
         "--tempo",
         type=positive_float,
-        default=120.0,
-        help="Tempo in BPM (omit with --no-tempo)",
+        default=None,
+        help="Set tempo in BPM",
     )
     parser.add_argument(
         "--no-tempo",
@@ -1419,14 +1493,14 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
     parser.add_argument(
         "--sig-num",
         type=positive_int,
-        default=4,
-        help="Time signature numerator (omit with --no-signature)",
+        default=None,
+        help="Set time signature numerator (default denominator: 4)",
     )
     parser.add_argument(
         "--sig-den",
         type=positive_int,
-        default=4,
-        help="Time signature denominator (omit with --no-signature)",
+        default=None,
+        help="Set time signature denominator (default numerator: 4)",
     )
     parser.add_argument(
         "--no-signature",
@@ -1606,8 +1680,16 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
     ns = parser.parse_args(list(argv))
 
     tempo: float | None = None if ns.no_tempo else ns.tempo
-    sig_num: int | None = None if ns.no_signature else ns.sig_num
-    sig_den: int | None = None if ns.no_signature else ns.sig_den
+    if ns.no_signature or (ns.sig_num is None and ns.sig_den is None):
+        sig_num: int | None = None
+        sig_den: int | None = None
+    else:
+        sig_num = 4 if ns.sig_num is None else ns.sig_num
+        sig_den = 4 if ns.sig_den is None else ns.sig_den
+    try:
+        auth_token = normalize_auth_token(ns.auth_token)
+    except ValueError as exc:
+        parser.error(str(exc))
     rename_track_index: int | None = ns.rename_track_index
     rename_track_name: str | None = (
         None if ns.rename_track_name is None else str(ns.rename_track_name)
@@ -1926,6 +2008,7 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         api_calls=api_calls,
         api_children=api_children,
         api_describes=api_describes,
+        auth_token=auth_token,
         api_observes=api_observes,
         api_unobserves=api_unobserves,
         api_observers=api_observers,
@@ -2058,7 +2141,10 @@ def format_arg(value: OscArg) -> str:
 def describe_command(cmd: OscCommand) -> str:
     if not cmd.args:
         return cmd.address
-    return cmd.address + " " + " ".join(format_arg(arg) for arg in cmd.args)
+    displayed_args = list(cmd.args)
+    if cmd.address in PROTECTED_OSC_ADDRESSES:
+        displayed_args[0] = "<redacted-auth-token>"
+    return cmd.address + " " + " ".join(format_arg(arg) for arg in displayed_args)
 
 
 def _try_parse_json(value: OscArg) -> object | None:
@@ -2484,6 +2570,25 @@ def summarize_ack(address: str, args: Sequence[OscArg]) -> List[str]:
 def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
     commands: List[OscCommand] = []
 
+    bounded_track_counts = {
+        "add_midi_tracks": cfg.add_midi_tracks,
+        "add_audio_tracks": cfg.add_audio_tracks,
+        "delete_midi_tracks": cfg.delete_midi_tracks,
+        "delete_audio_tracks": cfg.delete_audio_tracks,
+    }
+    for name, count in bounded_track_counts.items():
+        if count > MAX_TRACKS_PER_COMMAND:
+            raise ValueError(
+                f"{name} may not exceed {MAX_TRACKS_PER_COMMAND} per command"
+            )
+    if (
+        cfg.ensure_midi_tracks is not None
+        and cfg.ensure_midi_tracks > MAX_TRACK_TARGET
+    ):
+        raise ValueError(
+            f"ensure_midi_tracks target may not exceed {MAX_TRACK_TARGET}"
+        )
+
     if cfg.ping_first:
         commands.append(OscCommand("/ping"))
 
@@ -2492,6 +2597,15 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
             return tuple(args)
         return tuple(args + [request_id])
 
+    def _protected(
+        args: Sequence[OscArg],
+        request_id: str | None = None,
+    ) -> Tuple[OscArg, ...]:
+        return authenticated_args(
+            cfg.auth_token,
+            _with_request_id(list(args), request_id),
+        )
+
     # Additive LiveAPI RPC preflight surface.
     for request_id in cfg.api_pings:
         commands.append(OscCommand("/api/ping", _with_request_id([], request_id)))
@@ -2499,11 +2613,11 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
         commands.append(OscCommand("/api/get", _with_request_id([path, prop], request_id)))
     for path, prop, value_json, request_id in cfg.api_sets:
         commands.append(
-            OscCommand("/api/set", _with_request_id([path, prop, value_json], request_id))
+            OscCommand("/api/set", _protected([path, prop, value_json], request_id))
         )
     for path, method, args_json, request_id in cfg.api_calls:
         commands.append(
-            OscCommand("/api/call", _with_request_id([path, method, args_json], request_id))
+            OscCommand("/api/call", _protected([path, method, args_json], request_id))
         )
     for path, child_name, request_id in cfg.api_children:
         commands.append(
@@ -2515,17 +2629,17 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
         commands.append(
             OscCommand(
                 "/api_observe",
-                _with_request_id([path, property_name, options_json], request_id),
+                _protected([path, property_name, options_json], request_id),
             )
         )
     for observer_id, request_id in cfg.api_unobserves:
         commands.append(
-            OscCommand("/api_unobserve", _with_request_id([observer_id], request_id))
+            OscCommand("/api_unobserve", _protected([observer_id], request_id))
         )
     for request_id in cfg.api_observers:
         commands.append(OscCommand("/api_observers", _with_request_id([], request_id)))
     for request_id in cfg.api_clear_observers:
-        commands.append(OscCommand("/api_clear_observers", _with_request_id([], request_id)))
+        commands.append(OscCommand("/api_clear_observers", _protected([], request_id)))
     for request_id in cfg.api_session_contexts:
         commands.append(OscCommand("/api/session_context", _with_request_id([], request_id)))
     for request_id in cfg.api_theory_statuses:
@@ -2540,7 +2654,7 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
         commands.append(
             OscCommand(
                 "/api/parameter_set",
-                _with_request_id([parameter_path, value_json], request_id),
+                _protected([parameter_path, value_json], request_id),
             )
         )
     for track_ref, request_id in cfg.api_mixer_statuses:
@@ -2549,21 +2663,21 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
         commands.append(
             OscCommand(
                 "/api/insert_device",
-                _with_request_id([target_path, device_name, target_index], request_id),
+                _protected([target_path, device_name, target_index], request_id),
             )
         )
     for rack_path, target_index, request_id in cfg.api_insert_chains:
         commands.append(
             OscCommand(
                 "/api/insert_chain",
-                _with_request_id([rack_path, target_index], request_id),
+                _protected([rack_path, target_index], request_id),
             )
         )
     for chain_path, note, request_id in cfg.api_drum_chain_in_notes:
         commands.append(
             OscCommand(
                 "/api/drum_chain_in_note",
-                _with_request_id([chain_path, note], request_id),
+                _protected([chain_path, note], request_id),
             )
         )
     for track_index, slot_index, request_id in cfg.api_session_clip_inspects:
@@ -2578,32 +2692,66 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
         commands.append(OscCommand("/status"))
 
     if cfg.delete_audio_tracks > 0:
-        commands.append(OscCommand("/delete_audio_tracks", (cfg.delete_audio_tracks,)))
+        commands.append(
+            OscCommand(
+                "/delete_audio_tracks",
+                authenticated_args(cfg.auth_token, (cfg.delete_audio_tracks,)),
+            )
+        )
 
     if cfg.delete_midi_tracks > 0:
-        commands.append(OscCommand("/delete_midi_tracks", (cfg.delete_midi_tracks,)))
+        commands.append(
+            OscCommand(
+                "/delete_midi_tracks",
+                authenticated_args(cfg.auth_token, (cfg.delete_midi_tracks,)),
+            )
+        )
 
     if cfg.tempo is not None:
-        commands.append(OscCommand("/tempo", (cfg.tempo,)))
+        commands.append(
+            OscCommand("/tempo", authenticated_args(cfg.auth_token, (cfg.tempo,)))
+        )
 
     if cfg.sig_num is not None:
-        commands.append(OscCommand("/sig_num", (cfg.sig_num,)))
+        commands.append(
+            OscCommand("/sig_num", authenticated_args(cfg.auth_token, (cfg.sig_num,)))
+        )
 
     if cfg.sig_den is not None:
-        commands.append(OscCommand("/sig_den", (cfg.sig_den,)))
+        commands.append(
+            OscCommand("/sig_den", authenticated_args(cfg.auth_token, (cfg.sig_den,)))
+        )
 
     for _ in range(cfg.create_midi_tracks):
-        commands.append(OscCommand("/create_midi_track"))
+        commands.append(
+            OscCommand("/create_midi_track", authenticated_args(cfg.auth_token))
+        )
 
     if cfg.add_midi_tracks > 0:
-        commands.append(OscCommand("/add_midi_tracks", (cfg.add_midi_tracks, cfg.midi_name)))
+        commands.append(
+            OscCommand(
+                "/add_midi_tracks",
+                authenticated_args(
+                    cfg.auth_token,
+                    (cfg.add_midi_tracks, cfg.midi_name),
+                ),
+            )
+        )
 
     for _ in range(cfg.create_audio_tracks):
-        commands.append(OscCommand("/create_audio_track"))
+        commands.append(
+            OscCommand("/create_audio_track", authenticated_args(cfg.auth_token))
+        )
 
     if cfg.add_audio_tracks > 0:
         commands.append(
-            OscCommand("/add_audio_tracks", (cfg.add_audio_tracks, cfg.audio_prefix))
+            OscCommand(
+                "/add_audio_tracks",
+                authenticated_args(
+                    cfg.auth_token,
+                    (cfg.add_audio_tracks, cfg.audio_prefix),
+                ),
+            )
         )
 
     if (
@@ -2616,12 +2764,15 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
         commands.append(
             OscCommand(
                 "/set_session_clip_notes",
-                (
-                    cfg.session_clip_track_index,
-                    cfg.session_clip_slot_index,
-                    cfg.session_clip_length,
-                    cfg.session_clip_notes_json,
-                    clip_name,
+                authenticated_args(
+                    cfg.auth_token,
+                    (
+                        cfg.session_clip_track_index,
+                        cfg.session_clip_slot_index,
+                        cfg.session_clip_length,
+                        cfg.session_clip_notes_json,
+                        clip_name,
+                    ),
                 ),
             )
         )
@@ -2634,10 +2785,13 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
         commands.append(
             OscCommand(
                 "/append_session_clip_notes",
-                (
-                    cfg.append_session_clip_track_index,
-                    cfg.append_session_clip_slot_index,
-                    cfg.append_session_clip_notes_json,
+                authenticated_args(
+                    cfg.auth_token,
+                    (
+                        cfg.append_session_clip_track_index,
+                        cfg.append_session_clip_slot_index,
+                        cfg.append_session_clip_notes_json,
+                    ),
                 ),
             )
         )
@@ -2655,17 +2809,38 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
 
     if cfg.rename_track_index is not None and cfg.rename_track_name is not None:
         commands.append(
-            OscCommand("/rename_track", (cfg.rename_track_index, cfg.rename_track_name))
+            OscCommand(
+                "/rename_track",
+                authenticated_args(
+                    cfg.auth_token,
+                    (cfg.rename_track_index, cfg.rename_track_name),
+                ),
+            )
         )
 
     if cfg.ensure_midi_tracks is not None:
-        commands.append(OscCommand("/ensure_midi_tracks", (cfg.ensure_midi_tracks,)))
+        commands.append(
+            OscCommand(
+                "/ensure_midi_tracks",
+                authenticated_args(cfg.auth_token, (cfg.ensure_midi_tracks,)),
+            )
+        )
 
     for controller, value, channel in cfg.midi_ccs:
-        commands.append(OscCommand("/midi_cc", (controller, value, channel)))
+        commands.append(
+            OscCommand(
+                "/midi_cc",
+                authenticated_args(cfg.auth_token, (controller, value, channel)),
+            )
+        )
 
     for value, channel in cfg.cc64s:
-        commands.append(OscCommand("/cc64", (value, channel)))
+        commands.append(
+            OscCommand(
+                "/cc64",
+                authenticated_args(cfg.auth_token, (value, channel)),
+            )
+        )
 
     return commands
 
@@ -3081,13 +3256,12 @@ def listen_for_events(cfg: BridgeConfig) -> int:
 
 def main(argv: Iterable[str]) -> int:
     cfg = parse_args(argv)
-    commands = build_commands(cfg)
-
-    if not commands and not cfg.listen:
-        print("No commands to send. Use --help for options.", file=sys.stderr)
-        return 2
 
     try:
+        commands = build_commands(cfg)
+        if not commands and not cfg.listen:
+            print("No commands to send. Use --help for options.", file=sys.stderr)
+            return 2
         if commands:
             send_commands(cfg, commands)
         if cfg.listen:

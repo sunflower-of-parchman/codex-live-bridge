@@ -11,6 +11,13 @@ trailer `request_correlation req:<request_id>`, or
 Protocol 3.1 session clip inspection ACKs are packet-bounded to 4096 encoded
 OSC bytes.
 
+## Authentication
+
+Read commands remain tokenless. Every write, generic call, observer lifecycle
+change, insertion, track or clip mutation, and MIDI output command places
+`<auth_token>` first. The Python CLI injects it from `--auth-token` or
+`CODEX_LIVE_BRIDGE_TOKEN`.
+
 ## Read Commands
 
 ```text
@@ -67,16 +74,16 @@ python3 bridge/ableton_udp_bridge.py \
 ## Observer Commands
 
 ```text
-/api_observe <path> <property> [options_json] [request_id]
-/api_unobserve <observer_id> [request_id]
+/api_observe <auth_token> <path> <property> [options_json] [request_id]
+/api_unobserve <auth_token> <observer_id> [request_id]
 /api_observers [request_id]
-/api_clear_observers [request_id]
+/api_clear_observers <auth_token> [request_id]
 ```
 
 Example:
 
 ```text
-/api_observe live_set tempo {"observer_id":"obs-tempo","emit_initial":true,"min_interval_ms":100} req-observe
+/api_observe <auth_token> live_set tempo {"observer_id":"obs-tempo","emit_initial":true,"min_interval_ms":100} req-observe
 ```
 
 Observer events arrive as:
@@ -88,23 +95,23 @@ Observer events arrive as:
 ## Bounded Writes
 
 ```text
-/tempo <bpm>
-/sig_num <numerator>
-/sig_den <denominator>
-/rename_track <track_index> <name>
-/midi_cc <controller> <value> [channel]
-/cc64 <value> [channel]
-/api/set <path> <property> <value_json> [request_id]
-/api/parameter_set <parameter_path> <value_json> [request_id]
-/api/drum_chain_in_note <drum_chain_path> <note|-1> [request_id]
+/tempo <auth_token> <bpm>
+/sig_num <auth_token> <numerator>
+/sig_den <auth_token> <denominator>
+/rename_track <auth_token> <track_index> <name>
+/midi_cc <auth_token> <controller> <value> [channel]
+/cc64 <auth_token> <value> [channel]
+/api/set <auth_token> <path> <property> <value_json> [request_id]
+/api/parameter_set <auth_token> <parameter_path> <value_json> [request_id]
+/api/drum_chain_in_note <auth_token> <drum_chain_path> <note|-1> [request_id]
 ```
 
 Examples:
 
 ```text
-/tempo 120
-/rename_track 0 Lead
-/api/parameter_set "live_set tracks 0 devices 0 parameters 1" 0.5 req-param
+/tempo <auth_token> 120
+/rename_track <auth_token> 0 Lead
+/api/parameter_set <auth_token> "live_set tracks 0 devices 0 parameters 1" 0.5 req-param
 ```
 
 `/api/parameter_set` accepts numeric JSON numbers or numeric strings, checks
@@ -114,35 +121,39 @@ Examples:
 ## Additive Mutations
 
 ```text
-/create_midi_track
-/add_midi_tracks <count> [name]
-/create_audio_track
-/add_audio_tracks <count> [prefix]
-/ensure_midi_tracks <target_count>
-/append_session_clip_notes <track_index> <slot_index> <notes_json>
-/api/call <path> <method> <args_json> [request_id]
-/api/insert_device <track_or_chain_path> <native_device_name> <target_index_or_empty> [request_id]
-/api/insert_chain <rack_device_path> <target_index_or_empty> [request_id]
+/create_midi_track <auth_token>
+/add_midi_tracks <auth_token> <count> [name]
+/create_audio_track <auth_token>
+/add_audio_tracks <auth_token> <count> [prefix]
+/ensure_midi_tracks <auth_token> <target_count>
+/append_session_clip_notes <auth_token> <track_index> <slot_index> <notes_json>
+/api/call <auth_token> <path> <method> <args_json> [request_id]
+/api/insert_device <auth_token> <track_or_chain_path> <native_device_name> <target_index_or_empty> [request_id]
+/api/insert_chain <auth_token> <rack_device_path> <target_index_or_empty> [request_id]
 ```
 
 Examples:
 
 ```text
-/add_midi_tracks 2 Bridge
-/api/call live_set create_midi_track [-1] req-create
-/api/insert_device "live_set tracks 0" Operator "" req-operator
+/add_midi_tracks <auth_token> 2 Bridge
+/api/call <auth_token> live_set create_midi_track [-1] req-create
+/api/insert_device <auth_token> "live_set tracks 0" Operator "" req-operator
 ```
 
 Live 12.3 native insertion commands support native Live devices. Plug-ins and
 Max for Live devices are outside that insertion API. Optional insertion indexes
 must be non-negative integers when provided.
 
+Track create/delete batches are capped at `32` per command.
+`/ensure_midi_tracks` targets are capped at `256` and may create at most `32`
+tracks in one command.
+
 ## Destructive Mutations
 
 ```text
-/delete_audio_tracks <count>
-/delete_midi_tracks <count>
-/set_session_clip_notes <track_index> <slot_index> <length_beats> <notes_json> [clip_name]
+/delete_audio_tracks <auth_token> <count>
+/delete_midi_tracks <auth_token> <count>
+/set_session_clip_notes <auth_token> <track_index> <slot_index> <length_beats> <notes_json> [clip_name]
 ```
 
 `/delete_midi_tracks` protects track index `0`. `/set_session_clip_notes`

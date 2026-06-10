@@ -31,7 +31,7 @@
 					"numinlets" : 1,
 					"numoutlets" : 0,
 					"patching_rect" : [ 30.0, 44.0, 760.0, 21.0 ],
-					"text" : "Bootstrap this device fresh on the runtime bridge track. External script sends OSC messages like /tempo 120."
+					"text" : "Bootstrap this device fresh on the runtime bridge track. Protected OSC commands place the local token first."
 				}
 
 			}
@@ -79,7 +79,7 @@
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
 					"patching_rect" : [ 300.0, 90.0, 102.0, 23.0 ],
-					"text" : "udpreceive 9000"
+					"text" : "udpreceive 9000 @defer 1"
 				}
 
 			}
@@ -503,6 +503,41 @@
 				}
 
 			}
+, 			{
+				"box" : 				{
+					"id" : "obj-58",
+					"maxclass" : "newobj",
+					"numinlets" : 1,
+					"numoutlets" : 1,
+					"outlettype" : [ "" ],
+					"patching_rect" : [ 420.0, 90.0, 78.0, 23.0 ],
+					"text" : "qlim 10 @defer 1"
+				}
+
+			}
+, 			{
+				"box" : 				{
+					"id" : "obj-59",
+					"maxclass" : "message",
+					"numinlets" : 2,
+					"numoutlets" : 1,
+					"outlettype" : [ "" ],
+					"patching_rect" : [ 90.0, 154.0, 274.0, 23.0 ],
+					"text" : "set_auth_token CHANGE_ME_BEFORE_USE"
+				}
+
+			}
+, 			{
+				"box" : 				{
+					"id" : "obj-60",
+					"maxclass" : "comment",
+					"numinlets" : 1,
+					"numoutlets" : 0,
+					"patching_rect" : [ 90.0, 180.0, 430.0, 21.0 ],
+					"text" : "Replace with a unique local token before enabling write commands."
+				}
+
+			}
  ],
 		"lines" : [ 			{
 				"patchline" : 				{
@@ -730,7 +765,7 @@
 			}
 , 			{
 				"patchline" : 				{
-					"destination" : [ "obj-7", 0 ],
+					"destination" : [ "obj-58", 0 ],
 					"source" : [ "obj-6", 0 ]
 				}
 
@@ -949,6 +984,27 @@
 				"patchline" : 				{
 					"destination" : [ "obj-14", 0 ],
 					"source" : [ "obj-9", 0 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-7", 0 ],
+					"source" : [ "obj-58", 0 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-59", 0 ],
+					"source" : [ "obj-4", 0 ]
+				}
+
+			}
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-14", 0 ],
+					"source" : [ "obj-59", 0 ]
 				}
 
 			}

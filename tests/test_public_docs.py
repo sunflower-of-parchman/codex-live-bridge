@@ -65,6 +65,19 @@ class PublicDocsTests(unittest.TestCase):
         ):
             self.assertIn(phrase, text)
 
+    def test_public_docs_define_authenticated_mutation_boundary(self) -> None:
+        readme = README.read_text(encoding="utf-8")
+        protocol = PROTOCOL.read_text(encoding="utf-8")
+        security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+
+        self.assertIn("CODEX_LIVE_BRIDGE_TOKEN", readme)
+        self.assertIn("capability token", readme)
+        self.assertIn("/api/set <auth_token>", protocol)
+        self.assertIn("/api/call <auth_token>", protocol)
+        self.assertIn("Read-only commands remain tokenless", protocol)
+        self.assertIn("authenticated capability token", security)
+        self.assertNotIn("through unauthenticated OSC/UDP", security)
+
     def test_readme_code_paths_exist(self) -> None:
         text = README.read_text(encoding="utf-8")
         missing: list[str] = []

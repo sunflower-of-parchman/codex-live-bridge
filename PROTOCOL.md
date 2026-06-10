@@ -16,7 +16,26 @@ Protocol status: v3.1 draft.
 
 The bridge should be loaded in Ableton Live through the shipped Max patch/device. Clients send commands to the command port and listen for acknowledgements on the ACK port.
 
-The current bridge is local-first and does not authenticate OSC packets. Keep command and ACK traffic bound to `127.0.0.1` unless a future release adds an authenticated transport.
+The bridge is local-first. Keep command and ACK traffic bound to `127.0.0.1`;
+UDP does not encrypt the capability token or Live data.
+
+## Authentication
+
+Read-only commands remain tokenless. Mutating commands and observer lifecycle
+changes require a capability token as their first OSC argument.
+
+Configure the token locally by replacing `CHANGE_ME_BEFORE_USE` in the Max
+patch's `set_auth_token` message, then save and reload the device. Tokens must
+be 16 to 256 UTF-8 bytes. The placeholder is rejected and leaves mutations
+disabled.
+
+The Python CLI reads the same value from `--auth-token` or
+`CODEX_LIVE_BRIDGE_TOKEN`. Missing configuration returns
+`auth_not_configured`; a mismatch returns `unauthorized_command`. Neither error
+echoes the supplied token.
+
+The Max receiver defers UDP work to the low-priority queue and admits at most
+one datagram every 10 ms.
 
 ## Product Architecture Boundary
 
@@ -52,8 +71,8 @@ errors.
 ```text
 /api/ping [request_id]
 /api/get <path> <property> [request_id]
-/api/set <path> <property> <value_json> [request_id]
-/api/call <path> <method> <args_json> [request_id]
+/api/set <auth_token> <path> <property> <value_json> [request_id]
+/api/call <auth_token> <path> <method> <args_json> [request_id]
 /api/children <path> <child_name> [request_id]
 /api/describe <path> [request_id]
 ```
@@ -99,10 +118,10 @@ clients preserve older untagged ACK details, including details beginning with
 ## Observer Commands
 
 ```text
-/api_observe <path> <property> [options_json] [request_id]
-/api_unobserve <observer_id> [request_id]
+/api_observe <auth_token> <path> <property> [options_json] [request_id]
+/api_unobserve <auth_token> <observer_id> [request_id]
 /api_observers [request_id]
-/api_clear_observers [request_id]
+/api_clear_observers <auth_token> [request_id]
 ```
 
 `options_json` may include:
@@ -147,6 +166,10 @@ Observer payloads include the observer ID, requested path, current path, propert
 ```
 
 Clients should unobserve or clear observers before shutdown. The device enforces an observer quota and supports `min_interval_ms` / `throttle_ms` to reduce high-rate event streams. Mutations triggered by observer events should be queued back through the normal command path; do not mutate Live directly from an observer callback.
+
+Caller-supplied observer IDs must be 1 to 128 UTF-8 bytes, begin with an
+alphanumeric character, and contain only alphanumerics, `.`, `_`, `:`, or `-`.
+The IDs `__proto__`, `prototype`, and `constructor` are rejected.
 
 The Python CLI can stay open for observer events:
 
@@ -347,7 +370,7 @@ fields should use `/api/session_clip_inspect`.
 /api/device_list <track_ref|all> [request_id]
 /api/device_parameters <device_path> [request_id]
 /api/mixer_status <track_ref|master|return:N> [request_id]
-/api/parameter_set <parameter_path> <value_json> [request_id]
+/api/parameter_set <auth_token> <parameter_path> <value_json> [request_id]
 ```
 
 Successful ACKs:
@@ -369,9 +392,9 @@ Safety classes:
 ## Live 12.3 Native Insertion Wrappers
 
 ```text
-/api/insert_device <track_or_chain_path> <native_device_name> <target_index_or_empty> [request_id]
-/api/insert_chain <rack_device_path> <target_index_or_empty> [request_id]
-/api/drum_chain_in_note <drum_chain_path> <note|-1> [request_id]
+/api/insert_device <auth_token> <track_or_chain_path> <native_device_name> <target_index_or_empty> [request_id]
+/api/insert_chain <auth_token> <rack_device_path> <target_index_or_empty> [request_id]
+/api/drum_chain_in_note <auth_token> <drum_chain_path> <note|-1> [request_id]
 ```
 
 Successful ACKs:
@@ -395,6 +418,31 @@ These APIs are gated by LiveAPI capability checks when metadata is available. Op
 verified and `api_drum_chain_in_note_write_not_applied` when Live returns a
 different applied value. Live documents `-1` as the Drum Chain "All Notes"
 setting, but runtime support can vary by Live build and rack context.
+
+## Protected Core Commands
+
+```text
+/tempo <auth_token> <bpm>
+/sig_num <auth_token> <numerator>
+/sig_den <auth_token> <denominator>
+/create_midi_track <auth_token>
+/add_midi_tracks <auth_token> <count> [name]
+/create_audio_track <auth_token>
+/add_audio_tracks <auth_token> <count> [prefix]
+/delete_audio_tracks <auth_token> <count>
+/delete_midi_tracks <auth_token> <count>
+/rename_track <auth_token> <track_index> <name>
+/set_session_clip_notes <auth_token> <track_index> <slot_index> <length_beats> <notes_json> [clip_name]
+/append_session_clip_notes <auth_token> <track_index> <slot_index> <notes_json>
+/ensure_midi_tracks <auth_token> <target_count>
+/midi_cc <auth_token> <controller> <value> [channel]
+/cc64 <auth_token> <value> [channel]
+```
+
+Track create/delete batches are limited to `32` per command.
+`ensure_midi_tracks` accepts targets from `0` to `256` and creates at most
+`32` missing tracks per command. MIDI values remain bounded to their documented
+7-bit and channel ranges.
 
 ## Note Dictionary Schema
 

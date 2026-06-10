@@ -13,6 +13,9 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 import full_surface_smoke_test as smoke
 
 
+TEST_AUTH_TOKEN = "test-auth-token-0123456789"
+
+
 class FullSurfaceSmokeSafetyTests(unittest.TestCase):
     def test_requires_explicit_mutating_flag(self) -> None:
         self.assertTrue(hasattr(smoke, "parse_args"))
@@ -29,9 +32,15 @@ class FullSurfaceSmokeSafetyTests(unittest.TestCase):
 
     def test_main_runs_with_explicit_mutating_flag(self) -> None:
         with mock.patch.object(smoke, "run", return_value=0) as run:
-            exit_code = smoke.main([smoke.MUTATING_FLAG])
+            exit_code = smoke.main(
+                [
+                    smoke.MUTATING_FLAG,
+                    "--auth-token",
+                    TEST_AUTH_TOKEN,
+                ]
+            )
         self.assertEqual(exit_code, 0)
-        run.assert_called_once_with()
+        run.assert_called_once_with(TEST_AUTH_TOKEN)
 
     def test_new_track_index_requires_exactly_one_created_track(self) -> None:
         tracks_before = [{"index": 0}]

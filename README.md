@@ -73,7 +73,20 @@ live_udp_bridge.js]`:
 bridge/m4l/live_udp_bridge.js
 ```
 
-4. Verify the local bridge with a read-focused status command:
+4. Configure the local write token:
+
+```bash
+export CODEX_LIVE_BRIDGE_TOKEN="$(
+  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+)"
+```
+
+In Max, replace `CHANGE_ME_BEFORE_USE` in the
+`set_auth_token CHANGE_ME_BEFORE_USE` message, save the local device, and
+reload it. Use the same token in the environment. Keep real tokens out of the
+tracked `.maxpat` source.
+
+5. Verify the local bridge with a read-focused status command:
 
 ```bash
 python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
@@ -125,6 +138,11 @@ Safety classes are documented in `PROTOCOL.md`:
 The generic RPC layer can reach broad LiveAPI behavior. Automation defaults and
 examples should favor read commands, bounded writes, explicit request IDs, and
 clear user approval for mutations.
+
+Read-only commands are tokenless. Writes, generic calls, observer lifecycle
+changes, track and clip mutations, insertion, and MIDI output require the
+local capability token through `--auth-token` or
+`CODEX_LIVE_BRIDGE_TOKEN`.
 
 ## Role In The Hybrid Architecture
 
@@ -270,11 +288,12 @@ learn a user profile or improve itself from behavior over time.
 
 ## Security Boundary
 
-The OSC bridge has no authentication. Keep it bound to loopback
-`127.0.0.1`, keep ports `9000` and `9001` off untrusted networks, and treat
-generic `/api/set` and `/api/call` commands as powerful local LiveAPI access.
-Only one ACK-listening client can bind the default `9001` port at a time, so
-run the Python and optional shared-core Node clients serially.
+The OSC bridge uses a local capability token for writes and persistent control.
+Read-only inspection remains tokenless. UDP does not encrypt the token or Live
+data, so keep traffic on loopback `127.0.0.1` and keep ports `9000` and `9001`
+off untrusted networks. Treat generic `/api/set` and `/api/call` commands as
+powerful local LiveAPI access. Only one ACK-listening client can bind the
+default `9001` port at a time.
 
 ## Project Docs
 

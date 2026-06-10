@@ -20,6 +20,12 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Added a fail-closed local capability token for writes, generic LiveAPI calls,
+  observer lifecycle changes, insertion, track and clip mutations, and MIDI
+  output. Read-only inspection remains tokenless.
+- Moved UDP handling to Max's deferred queue, limited receiver admission to one
+  datagram per 10 ms, capped track batches at 32, and capped ensured MIDI track
+  targets at 256.
 - Documented packet policy, fragment transfer semantics, correlated inspection
   errors, and byte-for-byte compatibility for legacy
   `/inspect_session_clip_notes` ACKs.
@@ -63,6 +69,8 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
   request-ID position.
 - Hardened inspection clients with strict OSC decoding, a 4096-byte inbound
   datagram limit, and aggregate fragment-retention bounds.
+- Rejected prototype-sensitive observer IDs and moved observer storage to a
+  prototype-free registry.
 
 ## [3.0.0] - 2026-06-03
 

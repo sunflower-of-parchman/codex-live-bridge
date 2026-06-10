@@ -18,7 +18,16 @@ When a tagged release includes `LiveUdpBridge.zip`:
 1. Download and extract `LiveUdpBridge.zip`.
 2. Keep `LiveUdpBridge.amxd` and `live_udp_bridge.js` next to each other.
 3. Open Ableton Live and drag `LiveUdpBridge.amxd` onto a MIDI track.
-4. Verify the bridge from the repository root:
+4. Open the device with **Edit in Max** and replace
+   `CHANGE_ME_BEFORE_USE` in the `set_auth_token` message with a unique local
+   token of 16 to 256 UTF-8 bytes. Save and reload the device.
+5. Export the same token for the Python client:
+
+```bash
+export CODEX_LIVE_BRIDGE_TOKEN="<same-local-token>"
+```
+
+6. Verify the bridge from the repository root:
 
 ```bash
 python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
@@ -39,7 +48,8 @@ opened `.maxpat` file. To create a loadable device from the tracked source:
 5. Place the packaged `LiveUdpBridge.amxd` next to
    `bridge/m4l/live_udp_bridge.js`.
 6. Reload `LiveUdpBridge.amxd` on a MIDI track in Ableton Live.
-7. Run the status command shown above.
+7. Configure the local `set_auth_token` message as described above.
+8. Run the status command shown above.
 
 ## Source Editing
 
@@ -49,5 +59,10 @@ After editing `bridge/m4l/LiveUdpBridge.maxpat` or
 1. Package a fresh `LiveUdpBridge.amxd` from a Live-hosted Max MIDI Effect.
 2. Keep `live_udp_bridge.js` next to the packaged device.
 3. Reload the device in Ableton Live.
-4. Run the static checks from `README.md`.
-5. Run the read-focused status command before any mutating validation.
+4. Confirm the local token message still matches
+   `CODEX_LIVE_BRIDGE_TOKEN`.
+5. Run the static checks from `README.md`.
+6. Run the read-focused status command before any mutating validation.
+
+Keep real tokens in local packaged devices and environment state. Do not commit
+them to the tracked `.maxpat` source.

@@ -18,6 +18,9 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 import ableton_udp_bridge as bridge
 
 
+TEST_AUTH_TOKEN = "test-auth-token-0123456789"
+
+
 def _run_bridge_js(body: str) -> object:
     source_path = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js")
     harness = f"""
@@ -51,6 +54,8 @@ def _base_args() -> list[str]:
     # Disable all default mutations so tests focus on the API surface.
     return [
         "--ack",
+        "--auth-token",
+        TEST_AUTH_TOKEN,
         "--no-tempo",
         "--no-signature",
         "--create-midi-tracks",
@@ -336,6 +341,61 @@ class BridgeCliTests(unittest.TestCase):
     def test_parse_defaults_do_not_create_tracks(self) -> None:
         cfg = bridge.parse_args([])
         self.assertEqual(cfg.create_midi_tracks, 0)
+        self.assertIsNone(cfg.tempo)
+        self.assertIsNone(cfg.sig_num)
+        self.assertIsNone(cfg.sig_den)
+
+    def test_mutating_commands_require_auth_token(self) -> None:
+        cfg = bridge.parse_args(
+            [
+                "--no-tempo",
+                "--no-signature",
+                "--api-call",
+                "live_set",
+                "create_midi_track",
+                "[-1]",
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "CODEX_LIVE_BRIDGE_TOKEN"):
+            bridge.build_commands(cfg)
+
+    def test_read_only_commands_do_not_require_auth_token(self) -> None:
+        cfg = bridge.parse_args(
+            [
+                "--no-tempo",
+                "--no-signature",
+                "--api-get",
+                "live_set",
+                "tempo",
+                "req-read",
+            ]
+        )
+
+        command = next(
+            item for item in bridge.build_commands(cfg) if item.address == "/api/get"
+        )
+        self.assertEqual(command.args, ("live_set", "tempo", "req-read"))
+
+    def test_command_descriptions_redact_auth_tokens(self) -> None:
+        protected = bridge.OscCommand(
+            "/api/set",
+            (TEST_AUTH_TOKEN, "live_set", "tempo", "120", "req-set"),
+        )
+        read_only = bridge.OscCommand(
+            "/api/get",
+            ("live_set", "tempo", "req-get"),
+        )
+
+        protected_text = bridge.describe_command(protected)
+        self.assertIn("<redacted-auth-token>", protected_text)
+        self.assertNotIn(TEST_AUTH_TOKEN, protected_text)
+        self.assertEqual(
+            bridge.describe_command(read_only),
+            "/api/get live_set tempo req-get",
+        )
+        cfg = bridge.parse_args(_base_args())
+        self.assertNotIn(TEST_AUTH_TOKEN, repr(cfg))
 
     def test_bridge_config_accepts_legacy_kwargs_without_observer_fields(self) -> None:
         cfg = bridge.parse_args(_base_args())
@@ -375,6 +435,7 @@ class BridgeCliTests(unittest.TestCase):
 
         commands = bridge.build_commands(cfg)
         addresses = [cmd.address for cmd in commands]
+        api_call = next(cmd for cmd in commands if cmd.address == "/api/call")
 
         # /ping should still come first when --ack is enabled.
         self.assertEqual(addresses[0], "/ping")
@@ -385,6 +446,10 @@ class BridgeCliTests(unittest.TestCase):
         legacy_indices = [i for i, addr in enumerate(addresses) if addr.startswith("/tempo")]
         if legacy_indices:
             self.assertLess(max(api_indices), min(legacy_indices))
+        self.assertEqual(
+            api_call.args,
+            (TEST_AUTH_TOKEN, "live_set", "create_midi_track", "[-1]"),
+        )
 
     def test_parse_and_build_observer_commands(self) -> None:
         options_json = '{"observer_id":"obs-tempo","mode":1,"emit_initial":false}'
@@ -415,11 +480,26 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual(cfg.api_clear_observers, ("req-clear",))
 
         commands = bridge.build_commands(cfg)
-        addresses = [cmd.address for cmd in commands]
-        self.assertIn("/api_observe", addresses)
-        self.assertIn("/api_observers", addresses)
-        self.assertIn("/api_unobserve", addresses)
-        self.assertIn("/api_clear_observers", addresses)
+        by_address = {cmd.address: cmd.args for cmd in commands}
+        self.assertEqual(
+            by_address["/api_observe"],
+            (
+                TEST_AUTH_TOKEN,
+                "live_set",
+                "tempo",
+                options_json,
+                "req-observe",
+            ),
+        )
+        self.assertEqual(by_address["/api_observers"], ("req-list",))
+        self.assertEqual(
+            by_address["/api_unobserve"],
+            (TEST_AUTH_TOKEN, "obs-tempo", "req-unobserve"),
+        )
+        self.assertEqual(
+            by_address["/api_clear_observers"],
+            (TEST_AUTH_TOKEN, "req-clear"),
+        )
 
     def test_parse_and_build_session_clip_inspect_commands(self) -> None:
         cfg = bridge.parse_args(
@@ -681,7 +761,7 @@ class BridgeCliTests(unittest.TestCase):
         )
         self.assertEqual(
             by_address["/api/parameter_set"],
-            (parameter_path, "0.5", "req-set"),
+            (TEST_AUTH_TOKEN, parameter_path, "0.5", "req-set"),
         )
         self.assertEqual(by_address["/api/mixer_status"], ("0", "req-mix"))
 
@@ -710,15 +790,20 @@ class BridgeCliTests(unittest.TestCase):
 
         self.assertEqual(
             by_address["/api/insert_device"],
-            ("live_set tracks 0", "Operator", "", "req-device"),
+            (TEST_AUTH_TOKEN, "live_set tracks 0", "Operator", "", "req-device"),
         )
         self.assertEqual(
             by_address["/api/insert_chain"],
-            ("live_set tracks 0 devices 0", "", "req-chain"),
+            (TEST_AUTH_TOKEN, "live_set tracks 0 devices 0", "", "req-chain"),
         )
         self.assertEqual(
             by_address["/api/drum_chain_in_note"],
-            ("live_set tracks 0 devices 0 chains 0", 36, "req-note"),
+            (
+                TEST_AUTH_TOKEN,
+                "live_set tracks 0 devices 0 chains 0",
+                36,
+                "req-note",
+            ),
         )
 
     def test_rpc_ack_summary_api_event_non_dict_payload_does_not_crash(self) -> None:
@@ -810,6 +895,237 @@ class BridgeCliTests(unittest.TestCase):
                 and line.get("destination", [None])[0] == js_box["id"]
                 for line in patchlines
             )
+        )
+
+    def test_max_patch_defers_and_rate_limits_udp_work(self) -> None:
+        patch_source = json.loads(
+            pathlib.Path(__file__)
+            .with_name("m4l")
+            .joinpath("LiveUdpBridge.maxpat")
+            .read_text()
+        )
+        boxes = [item["box"] for item in patch_source["patcher"]["boxes"]]
+        patchlines = [item["patchline"] for item in patch_source["patcher"]["lines"]]
+        receiver = next(
+            box for box in boxes if str(box.get("text", "")).startswith("udpreceive 9000")
+        )
+        limiter = next(
+            box for box in boxes if box.get("text") == "qlim 10 @defer 1"
+        )
+        route_box = next(box for box in boxes if str(box.get("text", "")).startswith("route "))
+
+        self.assertIn("@defer 1", receiver["text"])
+        self.assertTrue(
+            any(
+                line.get("source") == [receiver["id"], 0]
+                and line.get("destination") == [limiter["id"], 0]
+                for line in patchlines
+            )
+        )
+        self.assertTrue(
+            any(
+                line.get("source") == [limiter["id"], 0]
+                and line.get("destination") == [route_box["id"], 0]
+                for line in patchlines
+            )
+        )
+
+    def test_max_patch_auth_token_is_local_and_fail_closed(self) -> None:
+        patch_source = json.loads(
+            pathlib.Path(__file__)
+            .with_name("m4l")
+            .joinpath("LiveUdpBridge.maxpat")
+            .read_text()
+        )
+        boxes = [item["box"] for item in patch_source["patcher"]["boxes"]]
+        patchlines = [item["patchline"] for item in patch_source["patcher"]["lines"]]
+        js_box = next(box for box in boxes if box.get("text") == "js live_udp_bridge.js")
+        defer_box = next(box for box in boxes if box.get("text") == "deferlow")
+        auth_box = next(
+            box
+            for box in boxes
+            if str(box.get("text", "")).startswith("set_auth_token ")
+        )
+
+        self.assertIn("CHANGE_ME_BEFORE_USE", auth_box["text"])
+        self.assertTrue(
+            any(
+                line.get("source") == [defer_box["id"], 0]
+                and line.get("destination") == [auth_box["id"], 0]
+                for line in patchlines
+            )
+        )
+        self.assertTrue(
+            any(
+                line.get("source") == [auth_box["id"], 0]
+                and line.get("destination") == [js_box["id"], 0]
+                for line in patchlines
+            )
+        )
+
+    def test_js_rejects_unauthenticated_mutations_before_liveapi_side_effects(self) -> None:
+        result = _run_bridge_js(
+            f"""
+const outputs = [];
+const sideEffects = [];
+context.outlet = (...args) => outputs.push(args);
+context.ensureInitialized = () => true;
+context.song = {{
+  call: (...args) => sideEffects.push(["song.call", ...args]),
+  set: (...args) => sideEffects.push(["song.set", ...args]),
+}};
+context.resolveApiOrError = () => ({{
+  path: "live_set",
+  id: 1,
+  set: (...args) => sideEffects.push(["api.set", ...args]),
+  call: (...args) => sideEffects.push(["api.call", ...args]),
+}});
+context.getApiCapabilities = () => ({{
+  hasPropertiesList: false,
+  hasFunctionsList: false,
+}});
+context.set_auth_token("test-auth-token-0123456789");
+context.api_set("wrong-token", "live_set", "tempo", "120", "req-set");
+context.api_call("wrong-token", "live_set", "create_midi_track", "[-1]", "req-call");
+context.delete_midi_tracks("wrong-token", 1);
+context.delete_audio_tracks("wrong-token", 1);
+context.set_session_clip_notes("wrong-token", 0, 0, 4, "{{\\"notes\\":[]}}", "Clip");
+context.midi_cc("wrong-token", 64, 127, 1, "req-cc");
+return {{ outputs, sideEffects }};
+"""
+        )
+
+        self.assertEqual(result["sideEffects"], [])
+        error_codes = [
+            item[3]
+            for item in result["outputs"]
+            if len(item) > 3 and item[1:3] == ["/ack", "error"]
+        ]
+        self.assertEqual(error_codes, ["unauthorized_command"] * 6)
+
+    def test_js_accepts_authorized_generic_property_write(self) -> None:
+        result = _run_bridge_js(
+            f"""
+const writes = [];
+context.ensureInitialized = () => true;
+context.resolveApiOrError = () => ({{
+  path: "live_set",
+  id: 1,
+  set: (...args) => writes.push(args),
+}});
+context.getApiCapabilities = () => ({{ hasPropertiesList: false }});
+context.ackWithRequest = () => {{}};
+context.set_auth_token({json.dumps(TEST_AUTH_TOKEN)});
+context.api_set(
+  "test-auth-token-0123456789",
+  "live_set",
+  "tempo",
+  "120",
+  "req-set"
+);
+return writes;
+"""
+        )
+
+        self.assertEqual(result, [["tempo", 120]])
+
+    def test_js_placeholder_token_keeps_mutations_disabled(self) -> None:
+        result = _run_bridge_js(
+            """
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+context.set_auth_token("CHANGE_ME_BEFORE_USE");
+context.api_set(
+  "CHANGE_ME_BEFORE_USE",
+  "live_set",
+  "tempo",
+  "120",
+  "req-set"
+);
+return outputs.filter((args) => args[1] === "/ack");
+"""
+        )
+
+        self.assertEqual(result[0][3], "auth_not_configured")
+        self.assertEqual(result[0][4], "api_set")
+
+    def test_js_bounds_track_creation_batches_and_targets(self) -> None:
+        result = _run_bridge_js(
+            f"""
+const errors = [];
+let trackCountReads = 0;
+context.ensureInitialized = () => true;
+context.ackWithRequest = (eventName, args) => {{
+  if (eventName === "error") errors.push(args);
+}};
+context.getTotalTracksOrError = () => {{
+  trackCountReads += 1;
+  return 1;
+}};
+context.set_auth_token({json.dumps(TEST_AUTH_TOKEN)});
+context.add_midi_tracks({json.dumps(TEST_AUTH_TOKEN)}, 33, "MIDI");
+context.add_audio_tracks({json.dumps(TEST_AUTH_TOKEN)}, Infinity, "Audio");
+context.ensure_midi_tracks({json.dumps(TEST_AUTH_TOKEN)}, 257);
+return {{ errors, trackCountReads }};
+"""
+        )
+
+        self.assertEqual(result["trackCountReads"], 0)
+        self.assertEqual(
+            [item[0] for item in result["errors"]],
+            [
+                "add_midi_tracks_count_out_of_range",
+                "add_audio_tracks_count_out_of_range",
+                "ensure_midi_tracks_target_out_of_range",
+            ],
+        )
+
+    def test_js_observer_registry_rejects_prototype_sensitive_ids(self) -> None:
+        result = _run_bridge_js(
+            f"""
+const errors = [];
+let liveApiOpens = 0;
+context.ensureInitialized = () => true;
+context.resolveApiOrError = () => ({{
+  path: "live_set",
+  id: 1,
+}});
+context.getApiCapabilities = () => ({{
+  hasPropertiesList: false,
+  hasChildrenList: false,
+}});
+context.LiveAPI = function LiveAPI() {{
+  liveApiOpens += 1;
+  return {{ path: "live_set", id: 1 }};
+}};
+context.ackWithRequest = (eventName, args) => {{
+  if (eventName === "error") errors.push(args);
+}};
+context.set_auth_token({json.dumps(TEST_AUTH_TOKEN)});
+for (const observerId of ["__proto__", "prototype", "constructor"]) {{
+  context.api_observe(
+    {json.dumps(TEST_AUTH_TOKEN)},
+    "live_set",
+    "tempo",
+    JSON.stringify({{ observer_id: observerId }}),
+    "req-observe"
+  );
+}}
+return {{
+  errors,
+  liveApiOpens,
+  prototypeIsNull: Object.getPrototypeOf(context.apiObservers) === null,
+  observerCount: Object.keys(context.apiObservers).length,
+}};
+"""
+        )
+
+        self.assertTrue(result["prototypeIsNull"])
+        self.assertEqual(result["liveApiOpens"], 0)
+        self.assertEqual(result["observerCount"], 0)
+        self.assertEqual(
+            [item[0] for item in result["errors"]],
+            ["api_invalid_observer_id"] * 3,
         )
 
     def test_js_wrappers_reject_ambiguous_write_values(self) -> None:
@@ -2475,6 +2791,7 @@ context.ackWithRequest = (eventName, args, requestId) => {
   outputs.push([eventName, ...args, requestId ?? null]);
 };
 context.ensureInitialized = () => true;
+context.set_auth_token("test-auth-token-0123456789");
 context.resolveApiOrError = () => ({
   path: "live_set tracks 0 clip_slots 0 clip",
   id: 8,
@@ -2486,6 +2803,7 @@ context.buildNotesDict = (_notes, _contextName, requestId) => {
   return null;
 };
 context.api_call(
+  "test-auth-token-0123456789",
   "live_set tracks 0 clip_slots 0 clip",
   "add_new_notes",
   '[{"notes":[{"pitch":-1}]}]',
@@ -2624,6 +2942,7 @@ return {
 function runWithTrackCounts(counts, call, options = {}) {
   const events = [];
   let index = 0;
+  context.set_auth_token("test-auth-token-0123456789");
   context.ensureInitialized = () => true;
   context.song = { call: options.songCall || (() => {}) };
   context.renameTrack = options.renameTrack || (() => true);
@@ -2637,29 +2956,29 @@ context.LiveAPI = function LiveAPI() { throw new Error("inspect failed"); };
 context.ack = (_address, eventName) => inspectionEvents.push(eventName);
 const inspectionResult = context.listTrackIndices(2, () => true, "delete_midi_tracks");
 return {
-  addMidiFinalCount: runWithTrackCounts([1, 1, 2, 0], () => context.add_midi_tracks(1, "MIDI")),
-  addAudioFinalCount: runWithTrackCounts([1, 1, 2, 0], () => context.add_audio_tracks(1, "Audio")),
+  addMidiFinalCount: runWithTrackCounts([1, 1, 2, 0], () => context.add_midi_tracks("test-auth-token-0123456789", 1, "MIDI")),
+  addAudioFinalCount: runWithTrackCounts([1, 1, 2, 0], () => context.add_audio_tracks("test-auth-token-0123456789", 1, "Audio")),
   deleteMidiFinalCount: (() => {
     context.listTrackIndices = () => [1];
-    return runWithTrackCounts([2, 0], () => context.delete_midi_tracks(1));
+    return runWithTrackCounts([2, 0], () => context.delete_midi_tracks("test-auth-token-0123456789", 1));
   })(),
   deleteAudioFinalCount: (() => {
     context.listTrackIndices = () => [1];
-    return runWithTrackCounts([2, 0], () => context.delete_audio_tracks(1));
+    return runWithTrackCounts([2, 0], () => context.delete_audio_tracks("test-auth-token-0123456789", 1));
   })(),
   addMidiCreate: runWithTrackCounts(
     [1, 1],
-    () => context.add_midi_tracks(1, "MIDI"),
+    () => context.add_midi_tracks("test-auth-token-0123456789", 1, "MIDI"),
     { songCall: () => { throw new Error("create failed"); } }
   ),
   addAudioCreate: runWithTrackCounts(
     [1, 1],
-    () => context.add_audio_tracks(1, "Audio"),
+    () => context.add_audio_tracks("test-auth-token-0123456789", 1, "Audio"),
     { songCall: () => { throw new Error("create failed"); } }
   ),
   addMidiRename: runWithTrackCounts(
     [1, 1, 2],
-    () => context.add_midi_tracks(1, "MIDI"),
+    () => context.add_midi_tracks("test-auth-token-0123456789", 1, "MIDI"),
     {
       renameTrack: () => {
         context.ack("ack", "error", "rename_track");
@@ -2669,7 +2988,7 @@ return {
   ),
   addAudioRename: runWithTrackCounts(
     [1, 1, 2],
-    () => context.add_audio_tracks(1, "Audio"),
+    () => context.add_audio_tracks("test-auth-token-0123456789", 1, "Audio"),
     {
       renameTrack: () => {
         context.ack("ack", "error", "rename_track");
@@ -2681,7 +3000,7 @@ return {
     context.listTrackIndices = () => [1];
     return runWithTrackCounts(
       [2],
-      () => context.delete_midi_tracks(1),
+      () => context.delete_midi_tracks("test-auth-token-0123456789", 1),
       { songCall: () => { throw new Error("delete failed"); } }
     );
   })(),
@@ -2689,7 +3008,7 @@ return {
     context.listTrackIndices = () => [1];
     return runWithTrackCounts(
       [2],
-      () => context.delete_audio_tracks(1),
+      () => context.delete_audio_tracks("test-auth-token-0123456789", 1),
       { songCall: () => { throw new Error("delete failed"); } }
     );
   })(),
@@ -2733,12 +3052,18 @@ return cases.map((testCase) => {
   const acks = [];
   const fakeApi = { path: "live_set tracks 0 devices 0 chains 0", id: 9, set: () => {} };
   context.ensureInitialized = () => true;
+  context.set_auth_token("test-auth-token-0123456789");
   context.resolveApiOrError = () => fakeApi;
   context.readApiPropertyBag = () => testCase.payload;
   context.ackWithRequest = (eventName, args, requestId) => {
     acks.push({ eventName, args, requestId: requestId ?? null });
   };
-  context.api_drum_chain_in_note(fakeApi.path, testCase.requested, "req-note");
+  context.api_drum_chain_in_note(
+    "test-auth-token-0123456789",
+    fakeApi.path,
+    testCase.requested,
+    "req-note"
+  );
   return acks[0];
 });
 """
@@ -2788,9 +3113,9 @@ return cases.map((testCase) => {
         midi_cmds = [cmd for cmd in commands if cmd.address in {"/midi_cc", "/cc64"}]
         self.assertEqual(len(midi_cmds), 2)
         self.assertEqual(midi_cmds[0].address, "/midi_cc")
-        self.assertEqual(midi_cmds[0].args, (64, 127, 2))
+        self.assertEqual(midi_cmds[0].args, (TEST_AUTH_TOKEN, 64, 127, 2))
         self.assertEqual(midi_cmds[1].address, "/cc64")
-        self.assertEqual(midi_cmds[1].args, (0, 1))
+        self.assertEqual(midi_cmds[1].args, (TEST_AUTH_TOKEN, 0, 1))
 
     def test_ack_summary_midi_cc(self) -> None:
         lines = bridge.summarize_ack("/ack", ["midi_cc", 64, 96, 1, "req-cc"])
