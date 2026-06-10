@@ -6,9 +6,11 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-06-10
+
 ### Added
 
-- Added the protocol 3.1 draft `/api/session_clip_inspect` read endpoint with
+- Added the protocol 3.1 `/api/session_clip_inspect` read endpoint with
   required request correlation, stable raw-facts metadata, adaptive device and
   note pages, empty-clip success, snapshot-change detection, and a 4096-byte
   encoded OSC packet budget.

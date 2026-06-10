@@ -4,7 +4,7 @@ This document defines the public OSC/UDP protocol for the Max for Live bridge. I
 
 Push control is out of scope for this protocol.
 
-Protocol status: v3.1 draft.
+Protocol status: v3.1.
 
 ## Transport
 
