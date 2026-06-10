@@ -14,6 +14,20 @@ with GPT-5.3-Codex.
 This project is independent and is not affiliated with or endorsed by OpenAI,
 Ableton, or Cycling '74. All trademarks belong to their respective owners.
 
+## How It Fits Together
+
+Two ways to work with Ableton Live use one shared inspection core.
+
+![Live Extension and LiveUdpBridge architecture](docs/assets/hybrid-architecture.svg)
+
+### Responsibilities
+
+| Surface | Responsibility |
+| --- | --- |
+| **Live Extension** | Clip actions, large clip reads, and reports inside Live |
+| **Shared inspection core** | Validate, analyze, report, and compare |
+| **LiveUdpBridge** | External control, observers, LiveAPI, MIDI, writes, and insertion |
+
 ## Requirements
 
 - Ableton Live with Max for Live support:
@@ -123,16 +137,16 @@ The broader product architecture assigns responsibilities this way:
 - **Shared core:** canonical schema validation, note normalization, clip
   inspection, report formatting, and parity comparison across adapters.
 
-No bridge capability is retired by this split. The Extension provides a native
-Beta-only workflow where it is stronger; the bridge continues to support local
-scripts, agents, persistent listeners, and Live versions that do not host
-Extensions.
+The bridge continues to provide the full external automation surface described
+in this repository. The Extension provides a native Beta workflow for
+contextual, user-invoked tools, while the bridge supports local scripts,
+agents, persistent listeners, and Live versions that do not host Extensions.
 
 The protocol 3.1 session clip endpoint supplies the external adapter with
 correlated raw facts. Every request has a required request ID, every successful
 fragment echoes it, and every encoded response packet is capped at 4096 bytes.
 Product-specific interpretation can happen in a separate shared-core consumer
-without coupling this public bridge to the private Extensions SDK lab.
+without adding an Extensions SDK dependency to the bridge.
 
 ## Protocol Notes
 

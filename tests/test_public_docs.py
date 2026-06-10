@@ -34,6 +34,18 @@ class PublicDocsTests(unittest.TestCase):
             self.assertIn(command, text)
         self.assertIn("--i-understand-this-mutates-live-set", text)
 
+    def test_readme_presents_the_hybrid_architecture_publicly(self) -> None:
+        text = README.read_text(encoding="utf-8")
+        asset = REPO_ROOT / "docs" / "assets" / "hybrid-architecture.svg"
+
+        self.assertTrue(asset.exists())
+        self.assertIn("docs/assets/hybrid-architecture.svg", text)
+        self.assertIn("Live Extension", text)
+        self.assertIn("Shared inspection core", text)
+        self.assertIn("LiveUdpBridge", text)
+        self.assertIn("full external automation surface", text)
+        self.assertNotIn("private Extensions SDK lab", text)
+
     def test_readme_declares_data_training_and_generation_boundary(self) -> None:
         text = README.read_text(encoding="utf-8")
         for phrase in (
