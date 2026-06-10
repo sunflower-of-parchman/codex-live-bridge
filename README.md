@@ -30,9 +30,12 @@ Two ways to work with Ableton Live use one shared inspection core.
 
 ## Requirements
 
-- Ableton Live with Max for Live support:
+- For LiveUdpBridge, release or Beta Ableton Live with Max for Live support:
   [Ableton Live](https://www.ableton.com/en/live/) and
   [Max for Live](https://www.ableton.com/en/live/max-for-live/)
+- For the Live Extension, Live 12 Suite Beta 12.4.5 or later:
+  [Extensions](https://www.ableton.com/en/live/extensions/) and
+  [join the Live Beta](https://www.ableton.com/en/beta/)
 - A local Codex surface:
   [Codex app](https://developers.openai.com/codex/app/),
   [Codex CLI](https://developers.openai.com/codex/cli/), or

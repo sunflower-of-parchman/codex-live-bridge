@@ -46,6 +46,14 @@ class PublicDocsTests(unittest.TestCase):
         self.assertIn("full external automation surface", text)
         self.assertNotIn("private Extensions SDK lab", text)
 
+    def test_readme_explains_live_compatibility(self) -> None:
+        text = README.read_text(encoding="utf-8")
+
+        self.assertIn("release or Beta Ableton Live with Max for Live", text)
+        self.assertIn("Live 12 Suite Beta 12.4.5 or later", text)
+        self.assertIn("https://www.ableton.com/en/live/extensions/", text)
+        self.assertIn("https://www.ableton.com/en/beta/", text)
+
     def test_readme_declares_data_training_and_generation_boundary(self) -> None:
         text = README.read_text(encoding="utf-8")
         for phrase in (
