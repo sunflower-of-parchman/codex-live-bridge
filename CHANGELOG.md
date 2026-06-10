@@ -4,6 +4,74 @@ All notable changes to this project are documented in this file.
 
 This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added the protocol 3.1 draft `/api/session_clip_inspect` read endpoint with
+  required request correlation, stable raw-facts metadata, adaptive device and
+  note pages, empty-clip success, snapshot-change detection, and a 4096-byte
+  encoded OSC packet budget.
+- Added Python CLI construction, concise fragment parsing, completion-aware
+  ACK collection, and a public strict fragment assembler.
+- Documented the bridge's role in the hybrid Live architecture: external and
+  headless automation, observers, generic RPC, raw MIDI, and release-Live
+  compatibility remain public bridge responsibilities.
+
+### Changed
+
+- Added a fail-closed local capability token for writes, generic LiveAPI calls,
+  observer lifecycle changes, insertion, track and clip mutations, and MIDI
+  output. Read-only inspection remains tokenless.
+- Moved UDP handling to Max's deferred queue, limited receiver admission to one
+  datagram per 10 ms, capped track batches at 32, and capped ensured MIDI track
+  targets at 256.
+- Documented packet policy, fragment transfer semantics, correlated inspection
+  errors, and byte-for-byte compatibility for legacy
+  `/inspect_session_clip_notes` ACKs.
+- Established the final protocol 3.1 V1 contract at schema version `1` and
+  producer version `3.1.0`; unpublished development snapshots have no
+  wire-compatibility promise and are not parsed as alternate shapes.
+- Froze session clip inspection V1 around complete nine-field extended notes,
+  explicit nullable text metadata, index-ordered device/note page phases, and
+  bounded diagnostics for every endpoint error ACK.
+- Bounded V1 inspection resources to 4096 notes, 256 devices, 1024 fragments,
+  and 16 active Python assemblies, with bounded ACK retention and terminal
+  state eviction.
+- Documented the adapter boundary for shared schema validation, note
+  normalization, inspection, reporting, and parity without adding an
+  Extensions SDK dependency to this repository.
+- Documented the qualified SDK note-ID and release-velocity gap for
+  cross-surface consumers. This records an SDK-side limitation and does not
+  weaken the bridge's nine-field V1 note contract.
+
+### Fixed
+
+- Preserved Live device `type` as its numeric `0`/`1`/`2`/`4` enum and used
+  explicit `null` for unavailable or invalid values.
+- Preserved finite signed clip marker and loop positions while rejecting
+  reversed, nonfinite, or non-representable ranges.
+- Aligned the JavaScript producer and Python assembler on note scalar types,
+  nullable device/track/clip metadata, complete-fragment totals, and strict
+  fragment ordering.
+- Corrected the note schema to accept documented negative
+  `velocity_deviation` values.
+- Made drum-chain note writes distinguish unreadable readback from a verified
+  unapplied write.
+- Made every error ACK end with an explicit reserved request-ID correlation
+  trailer so clients can preserve all error details and parse older untagged
+  ACKs safely.
+- Made helper failures terminal so request-aware status wrappers and batch
+  track mutations do not emit completion ACKs after an error.
+- Made unmatched wrapper exceptions emit correlated internal-error ACKs
+  instead of leaving clients to time out.
+- Made fallback error correlation follow each wrapper's actual optional
+  request-ID position.
+- Hardened inspection clients with strict OSC decoding, a 4096-byte inbound
+  datagram limit, and aggregate fragment-retention bounds.
+- Rejected prototype-sensitive observer IDs and moved observer storage to a
+  prototype-free registry.
+
 ## [3.0.0] - 2026-06-03
 
 ### Added

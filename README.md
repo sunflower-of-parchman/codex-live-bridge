@@ -14,11 +14,28 @@ with GPT-5.3-Codex.
 This project is independent and is not affiliated with or endorsed by OpenAI,
 Ableton, or Cycling '74. All trademarks belong to their respective owners.
 
+## How It Fits Together
+
+Two ways to work with Ableton Live use one shared inspection core.
+
+![Live Extension and LiveUdpBridge architecture](docs/assets/hybrid-architecture.svg)
+
+### Responsibilities
+
+| Surface | Responsibility |
+| --- | --- |
+| **Live Extension** | Clip actions, large clip reads, and reports inside Live |
+| **Shared inspection core** | Validate, analyze, report, and compare |
+| **LiveUdpBridge** | External control, observers, LiveAPI, MIDI, writes, and insertion |
+
 ## Requirements
 
-- Ableton Live with Max for Live support:
+- For LiveUdpBridge, release or Beta Ableton Live with Max for Live support:
   [Ableton Live](https://www.ableton.com/en/live/) and
   [Max for Live](https://www.ableton.com/en/live/max-for-live/)
+- For the Live Extension, Live 12 Suite Beta 12.4.5 or later:
+  [Extensions](https://www.ableton.com/en/live/extensions/) and
+  [join the Live Beta](https://www.ableton.com/en/beta/)
 - A local Codex surface:
   [Codex app](https://developers.openai.com/codex/app/),
   [Codex CLI](https://developers.openai.com/codex/cli/), or
@@ -56,7 +73,20 @@ live_udp_bridge.js]`:
 bridge/m4l/live_udp_bridge.js
 ```
 
-4. Verify the local bridge with a read-focused status command:
+4. Configure the local write token:
+
+```bash
+export CODEX_LIVE_BRIDGE_TOKEN="$(
+  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+)"
+```
+
+In Max, replace `CHANGE_ME_BEFORE_USE` in the
+`set_auth_token CHANGE_ME_BEFORE_USE` message, save the local device, and
+reload it. Use the same token in the environment. Keep real tokens out of the
+tracked `.maxpat` source.
+
+5. Verify the local bridge with a read-focused status command:
 
 ```bash
 python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
@@ -109,6 +139,36 @@ The generic RPC layer can reach broad LiveAPI behavior. Automation defaults and
 examples should favor read commands, bounded writes, explicit request IDs, and
 clear user approval for mutations.
 
+Read-only commands are tokenless. Writes, generic calls, observer lifecycle
+changes, track and clip mutations, insertion, and MIDI output require the
+local capability token through `--auth-token` or
+`CODEX_LIVE_BRIDGE_TOKEN`.
+
+## Role In The Hybrid Architecture
+
+`codex-live-bridge` remains the public, standalone external automation surface.
+It does not require Ableton's Extensions SDK.
+
+The broader product architecture assigns responsibilities this way:
+
+- **Bridge:** external and headless automation, persistent observers, generic
+  LiveAPI RPC, raw MIDI output, and release-Live compatibility.
+- **Extension:** native context actions, large contextual clip reads, modal
+  user interface, and future user-invoked undoable transforms.
+- **Shared core:** canonical schema validation, note normalization, clip
+  inspection, report formatting, and parity comparison across adapters.
+
+The bridge continues to provide the full external automation surface described
+in this repository. The Extension provides a native Beta workflow for
+contextual, user-invoked tools, while the bridge supports local scripts,
+agents, persistent listeners, and Live versions that do not host Extensions.
+
+The protocol 3.1 session clip endpoint supplies the external adapter with
+correlated raw facts. Every request has a required request ID, every successful
+fragment echoes it, and every encoded response packet is capped at 4096 bytes.
+Product-specific interpretation can happen in a separate shared-core consumer
+without adding an Extensions SDK dependency to the bridge.
+
 ## Protocol Notes
 
 - Default host: `127.0.0.1`
@@ -126,13 +186,14 @@ Live 12.3 insertion limits, read `PROTOCOL.md`. For quick examples, read
 
 ```mermaid
 flowchart LR
-  U["User or Codex"] --> P["Python CLI"]
+  U["Local script, agent, or Codex"] --> P["Python or Node client"]
   P --> C["OSC commands :9000"]
   C --> B["LiveUdpBridge Max patch"]
   B --> L["LiveAPI"]
   L --> A["Ableton Live set"]
   A --> R["OSC ACKs and events :9001"]
   R --> P
+  P --> S["Optional shared inspection core"]
 ```
 
 ## Python CLI Examples
@@ -156,6 +217,19 @@ List tracks:
 python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
   --api-children live_set tracks req-tracks
 ```
+
+Inspect a session MIDI clip with required request correlation and
+packet-bounded fragments:
+
+```bash
+python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
+  --api-session-clip-inspect 0 0 req-clip
+```
+
+The endpoint preserves note IDs and release velocity when LiveAPI returns
+them. During separate Extensions SDK `1.0.0` qualification, the native SDK
+omitted those two fields. Cross-surface consumers must therefore treat note-ID
+matching as unavailable and release velocity as an explicit SDK-side gap.
 
 Listen for observer events:
 
@@ -214,9 +288,12 @@ learn a user profile or improve itself from behavior over time.
 
 ## Security Boundary
 
-The OSC bridge has no authentication. Keep it bound to loopback
-`127.0.0.1`, keep ports `9000` and `9001` off untrusted networks, and treat
-generic `/api/set` and `/api/call` commands as powerful local LiveAPI access.
+The OSC bridge uses a local capability token for writes and persistent control.
+Read-only inspection remains tokenless. UDP does not encrypt the token or Live
+data, so keep traffic on loopback `127.0.0.1` and keep ports `9000` and `9001`
+off untrusted networks. Treat generic `/api/set` and `/api/call` commands as
+powerful local LiveAPI access. Only one ACK-listening client can bind the
+default `9001` port at a time.
 
 ## Project Docs
 

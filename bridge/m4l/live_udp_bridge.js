@@ -7,9 +7,25 @@ outlets = 3; // 0 -> UDP ack/debug, 1 -> console/debug, 2 -> MIDI out
 
 var song = null;
 var initialized = false;
-var apiObservers = {};
+var apiObservers = Object.create(null);
 var apiObserverCounter = 0;
 var MAX_API_OBSERVERS = 32;
+var MAX_OBSERVER_ID_BYTES = 128;
+var bridgeAuthToken = "";
+var AUTH_TOKEN_PLACEHOLDER = "CHANGE_ME_BEFORE_USE";
+var MIN_AUTH_TOKEN_BYTES = 16;
+var MAX_AUTH_TOKEN_BYTES = 256;
+var MAX_TRACKS_PER_COMMAND = 32;
+var MAX_TRACK_TARGET = 256;
+var ERROR_CORRELATION_MARKER = "request_correlation";
+var SESSION_CLIP_INSPECTION_SCHEMA = "codex-live-bridge.session-midi-clip-inspection";
+var SESSION_CLIP_INSPECTION_SCHEMA_VERSION = 1;
+var SESSION_CLIP_INSPECTION_PRODUCER_VERSION = "3.1.0";
+var SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES = 4096;
+var SESSION_CLIP_INSPECTION_MAX_NOTES = 4096;
+var SESSION_CLIP_INSPECTION_MAX_DEVICES = 256;
+var SESSION_CLIP_INSPECTION_MAX_FRAGMENTS = 1024;
+var sessionClipInspectionCounter = 0;
 
 function debug(msg) {
   var text = "[live-bridge] " + msg;
@@ -32,14 +48,99 @@ function hasRequestId(requestId) {
 
 function ackWithRequest(eventName, argsArray, requestId) {
   var payload = ["ack", eventName].concat(argsArray || []);
-  if (hasRequestId(requestId)) {
+  if (eventName === "error") {
+    payload.push(ERROR_CORRELATION_MARKER);
+    payload.push("req:" + (hasRequestId(requestId) ? String(requestId) : ""));
+  } else if (hasRequestId(requestId)) {
     payload.push(String(requestId));
   }
-  ack.apply(this, payload);
+  emitAck(payload);
 }
 
 function nowMs() {
   return new Date().getTime();
+}
+
+function constantTimeStringEqual(leftValue, rightValue) {
+  var left = String(leftValue || "");
+  var right = String(rightValue || "");
+  var maxLength = Math.max(left.length, right.length);
+  var difference = left.length ^ right.length;
+  for (var i = 0; i < maxLength; i += 1) {
+    var leftCode = i < left.length ? left.charCodeAt(i) : 0;
+    var rightCode = i < right.length ? right.charCodeAt(i) : 0;
+    difference |= leftCode ^ rightCode;
+  }
+  return difference === 0;
+}
+
+function isValidAuthToken(token) {
+  var text = token === undefined || token === null ? "" : String(token).trim();
+  var byteLength = utf8ByteLength(text);
+  return (
+    text !== AUTH_TOKEN_PLACEHOLDER &&
+    byteLength >= MIN_AUTH_TOKEN_BYTES &&
+    byteLength <= MAX_AUTH_TOKEN_BYTES
+  );
+}
+
+function set_auth_token(token) {
+  var text = token === undefined || token === null ? "" : String(token).trim();
+  if (!isValidAuthToken(text)) {
+    bridgeAuthToken = "";
+    debug(
+      "Mutation authentication is disabled. Configure a unique " +
+        MIN_AUTH_TOKEN_BYTES +
+        "-to-" +
+        MAX_AUTH_TOKEN_BYTES +
+        "-byte token in the Max patch."
+    );
+    return;
+  }
+  bridgeAuthToken = text;
+  debug("Mutation authentication enabled.");
+}
+
+function requireMutationAuth(commandName, suppliedToken, requestId) {
+  var command = String(commandName || "mutation");
+  if (!isValidAuthToken(bridgeAuthToken)) {
+    ackWithRequest("error", ["auth_not_configured", command], requestId);
+    return false;
+  }
+  if (!constantTimeStringEqual(bridgeAuthToken, suppliedToken)) {
+    ackWithRequest("error", ["unauthorized_command", command], requestId);
+    return false;
+  }
+  return true;
+}
+
+function boundedInteger(value, minimum, maximum) {
+  var parsed = Number(value);
+  if (
+    !isFinite(parsed) ||
+    Math.floor(parsed) !== parsed ||
+    parsed < minimum ||
+    parsed > maximum
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+function isValidObserverId(observerId) {
+  var key = observerId === undefined || observerId === null
+    ? ""
+    : String(observerId).trim();
+  if (
+    key.length === 0 ||
+    utf8ByteLength(key) > MAX_OBSERVER_ID_BYTES ||
+    key === "__proto__" ||
+    key === "prototype" ||
+    key === "constructor"
+  ) {
+    return false;
+  }
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(key);
 }
 
 function newObserverId() {
@@ -62,6 +163,10 @@ function normalizeObserverCallbackArgs(rawArgs) {
   return rawArgs;
 }
 
+function hasObserverEntry(observerId) {
+  return Object.prototype.hasOwnProperty.call(apiObservers, String(observerId || ""));
+}
+
 function callbackArgsValue(args) {
   if (!args || !args.length) {
     return null;
@@ -74,7 +179,7 @@ function callbackArgsValue(args) {
 
 function clearObserverEntry(observerId) {
   var key = observerId === undefined || observerId === null ? "" : String(observerId).trim();
-  if (key.length === 0) {
+  if (key.length === 0 || !hasObserverEntry(key)) {
     return null;
   }
   var entry = apiObservers[key];
@@ -152,7 +257,11 @@ function buildObserverPayload(entry, callbackArgs) {
 }
 
 function emitObserverEvent(observerId, callbackArgs) {
-  var entry = apiObservers[String(observerId || "")];
+  var key = String(observerId || "");
+  if (!hasObserverEntry(key)) {
+    return;
+  }
+  var entry = apiObservers[key];
   if (!entry) {
     return;
   }
@@ -572,29 +681,29 @@ function getApiCapabilities(api) {
   return parseApiCapabilities(readApiInfoText(api));
 }
 
-function ensureInitialized() {
+function ensureInitialized(requestId) {
   var currentId = song ? Number(song.id) : 0;
   if (initialized && song && currentId > 0) {
     return true;
   }
-  init();
+  init(requestId);
   currentId = song ? Number(song.id) : 0;
   if (initialized && song && currentId > 0) {
     return true;
   }
   debug("LiveAPI not initialized yet or not attached to live_set.");
-  ack("ack", "error", "not_initialized");
+  ackWithRequest("error", ["not_initialized"], requestId);
   return false;
 }
 
-function init() {
+function init(requestId) {
   try {
     song = new LiveAPI(null, "live_set");
     var id = song ? Number(song.id) : 0;
     if (!(id > 0)) {
       initialized = false;
       debug("LiveAPI attached to live_set but id is invalid: " + id);
-      ack("ack", "error", "not_in_live_set", id);
+      ackWithRequest("error", ["not_in_live_set", id], requestId);
       return;
     }
     initialized = true;
@@ -617,12 +726,12 @@ function ping() {
 }
 
 function api_ping(requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   ackWithRequest("pong", [], requestId);
 }
 
 function api_get(path, property, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_get";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -651,8 +760,9 @@ function api_get(path, property, requestId) {
   ackWithRequest("api_get", [api.path, propName, valueJson], requestId);
 }
 
-function api_set(path, property, valueJson, requestId) {
-  if (!ensureInitialized()) return;
+function api_set(authToken, path, property, valueJson, requestId) {
+  if (!requireMutationAuth("api_set", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_set";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -691,8 +801,9 @@ function api_set(path, property, valueJson, requestId) {
   ackWithRequest("api_set", [api.path, propName, resultJson], requestId);
 }
 
-function api_call(path, method, argsJson, requestId) {
-  if (!ensureInitialized()) return;
+function api_call(authToken, path, method, argsJson, requestId) {
+  if (!requireMutationAuth("api_call", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_call";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -732,7 +843,7 @@ function api_call(path, method, argsJson, requestId) {
       ackWithRequest("error", ["api_add_new_notes_invalid_payload", api.path], requestId);
       return;
     }
-    builtPayload = buildNotesDict(notesList, contextName + "_add_new_notes");
+    builtPayload = buildNotesDict(notesList, contextName + "_add_new_notes", requestId);
     if (!builtPayload) {
       return;
     }
@@ -747,7 +858,7 @@ function api_call(path, method, argsJson, requestId) {
       ackWithRequest("error", ["api_" + methodName + "_invalid_payload", api.path], requestId);
       return;
     }
-    builtPayload = buildGenericDict(payload, contextName + "_" + methodName);
+    builtPayload = buildGenericDict(payload, contextName + "_" + methodName, requestId);
     if (!builtPayload) {
       return;
     }
@@ -773,7 +884,7 @@ function api_call(path, method, argsJson, requestId) {
 }
 
 function api_children(path, childName, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_children";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -829,7 +940,7 @@ function api_children(path, childName, requestId) {
 }
 
 function api_describe(path, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_describe";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -869,8 +980,13 @@ function api_describe(path, requestId) {
 }
 
 function api_session_context(requestId) {
-  if (!ensureInitialized()) return;
-  var totalTracks = getTotalTracksOrError("session_context");
+  if (!ensureInitialized(requestId)) return;
+  var totalTracks = getTotalTracksOrError("session_context", requestId);
+  if (totalTracks === 0) return;
+  var midiTracks = countMidiTracks(totalTracks, "session_context", requestId);
+  if (midiTracks === null) return;
+  var audioTracks = countAudioTracks(totalTracks, "session_context", requestId);
+  if (audioTracks === null) return;
   var payload = {
     generated_ms: nowMs(),
     song: readApiPropertyBag(song, [
@@ -891,8 +1007,8 @@ function api_session_context(requestId) {
     ]),
     counts: {
       tracks: totalTracks,
-      midi_tracks: totalTracks > 0 ? countMidiTracks(totalTracks) : 0,
-      audio_tracks: totalTracks > 0 ? countAudioTracks(totalTracks) : 0,
+      midi_tracks: midiTracks,
+      audio_tracks: audioTracks,
       return_tracks: 0,
       scenes: 0,
     },
@@ -914,7 +1030,7 @@ function api_session_context(requestId) {
 }
 
 function api_theory_status(requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var payload = {
     path: String(song.path || "live_set"),
     id: Number(song.id || 0),
@@ -929,7 +1045,7 @@ function api_theory_status(requestId) {
 }
 
 function api_tuning_status(requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var tuningApi = tryResolveApi("live_set tuning_system");
   var payload = {
     path: "live_set tuning_system",
@@ -950,11 +1066,12 @@ function api_tuning_status(requestId) {
 }
 
 function api_device_list(trackRef, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var target = trackRef === undefined || trackRef === null ? "all" : String(trackRef).trim();
   var payload = { target: target, tracks: [] };
   if (target.length === 0 || target === "all") {
-    var totalTracks = getTotalTracksOrError("device_list");
+    var totalTracks = getTotalTracksOrError("device_list", requestId);
+    if (totalTracks === 0) return;
     for (var i = 0; i < totalTracks; i += 1) {
       payload.tracks.push(describeDevicesForTrackPath("live_set tracks " + i));
     }
@@ -965,7 +1082,7 @@ function api_device_list(trackRef, requestId) {
 }
 
 function api_device_parameters(devicePath, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = devicePath === undefined || devicePath === null ? "" : String(devicePath).trim();
   if (pathText.length === 0) {
     ackWithRequest("error", ["api_missing_device_path"], requestId);
@@ -975,8 +1092,9 @@ function api_device_parameters(devicePath, requestId) {
   ackWithRequest("api_device_parameters", [pathText, safeJsonStringify(payload, "device_parameters")], requestId);
 }
 
-function api_parameter_set(parameterPath, valueJson, requestId) {
-  if (!ensureInitialized()) return;
+function api_parameter_set(authToken, parameterPath, valueJson, requestId) {
+  if (!requireMutationAuth("api_parameter_set", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = parameterPath === undefined || parameterPath === null ? "" : String(parameterPath).trim();
   if (pathText.length === 0) {
     ackWithRequest("error", ["api_missing_parameter_path"], requestId);
@@ -1030,7 +1148,7 @@ function api_parameter_set(parameterPath, valueJson, requestId) {
 }
 
 function api_mixer_status(trackRef, requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var trackPath = normalizeTrackPathReference(trackRef, "live_set tracks 0");
   var mixerPath = trackPath + " mixer_device";
   var mixerApi = tryResolveApi(mixerPath);
@@ -1062,8 +1180,9 @@ function api_mixer_status(trackRef, requestId) {
   ackWithRequest("api_mixer_status", [trackPath, safeJsonStringify(payload, "mixer_status")], requestId);
 }
 
-function api_insert_device(targetPath, deviceName, targetIndex, requestId) {
-  if (!ensureInitialized()) return;
+function api_insert_device(authToken, targetPath, deviceName, targetIndex, requestId) {
+  if (!requireMutationAuth("api_insert_device", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = targetPath === undefined || targetPath === null ? "" : String(targetPath).trim();
   var nameText = deviceName === undefined || deviceName === null ? "" : String(deviceName).trim();
   if (pathText.length === 0 || nameText.length === 0) {
@@ -1107,8 +1226,9 @@ function api_insert_device(targetPath, deviceName, targetIndex, requestId) {
   ackWithRequest("api_insert_device", [resolvedTargetPath, nameText, safeJsonStringify(payload, "insert_device")], requestId);
 }
 
-function api_insert_chain(rackPath, targetIndex, requestId) {
-  if (!ensureInitialized()) return;
+function api_insert_chain(authToken, rackPath, targetIndex, requestId) {
+  if (!requireMutationAuth("api_insert_chain", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = rackPath === undefined || rackPath === null ? "" : String(rackPath).trim();
   if (pathText.length === 0) {
     ackWithRequest("error", ["api_insert_chain_missing_path"], requestId);
@@ -1150,8 +1270,9 @@ function api_insert_chain(rackPath, targetIndex, requestId) {
   ackWithRequest("api_insert_chain", [resolvedRackPath, safeJsonStringify(payload, "insert_chain")], requestId);
 }
 
-function api_drum_chain_in_note(chainPath, noteValue, requestId) {
-  if (!ensureInitialized()) return;
+function api_drum_chain_in_note(authToken, chainPath, noteValue, requestId) {
+  if (!requireMutationAuth("api_drum_chain_in_note", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var pathText = chainPath === undefined || chainPath === null ? "" : String(chainPath).trim();
   var note = Number(noteValue);
   if (pathText.length === 0 || !isFinite(note) || Math.floor(note) !== note || note < -1 || note > 127) {
@@ -1169,13 +1290,1007 @@ function api_drum_chain_in_note(chainPath, noteValue, requestId) {
     return;
   }
   var payload = readApiPropertyBag(chainApi, ["in_note", "out_note", "choke_group", "name"]);
+  var hasAppliedNote = Object.prototype.hasOwnProperty.call(payload, "in_note");
+  var appliedNote = hasAppliedNote ? Number(payload.in_note) : NaN;
+  if (
+    !hasAppliedNote ||
+    payload.in_note === null ||
+    payload.in_note === undefined ||
+    String(payload.in_note).trim().length === 0 ||
+    (payload.errors && payload.errors.in_note) ||
+    !isFinite(appliedNote) ||
+    Math.floor(appliedNote) !== appliedNote
+  ) {
+    ackWithRequest(
+      "error",
+      ["api_drum_chain_in_note_readback_failed", resolvedChainPath, note],
+      requestId
+    );
+    return;
+  }
+  if (appliedNote !== note) {
+    ackWithRequest(
+      "error",
+      ["api_drum_chain_in_note_write_not_applied", resolvedChainPath, note, appliedNote],
+      requestId
+    );
+    return;
+  }
   payload.path = resolvedChainPath;
   payload.id = Number(chainApi.id || 0);
   ackWithRequest("api_drum_chain_in_note", [resolvedChainPath, safeJsonStringify(payload, "drum_chain_in_note")], requestId);
 }
 
-function api_observe(path, property, optionsJson, requestId) {
-  if (!ensureInitialized()) return;
+function utf8ByteLength(value) {
+  var text = String(value);
+  var length = 0;
+  for (var i = 0; i < text.length; i += 1) {
+    var code = text.charCodeAt(i);
+    if (code <= 0x7f) {
+      length += 1;
+    } else if (code <= 0x7ff) {
+      length += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      var next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 4;
+        i += 1;
+      } else {
+        length += 3;
+      }
+    } else {
+      length += 3;
+    }
+  }
+  return length;
+}
+
+function truncateUtf8ToByteLength(value, maxBytes) {
+  var text = String(value);
+  var bounded = "";
+  var length = 0;
+  for (var i = 0; i < text.length; i += 1) {
+    var code = text.charCodeAt(i);
+    var chunk = text.charAt(i);
+    var chunkLength = 0;
+    if (code <= 0x7f) {
+      chunkLength = 1;
+    } else if (code <= 0x7ff) {
+      chunkLength = 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      var next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        chunk += text.charAt(i + 1);
+        chunkLength = 4;
+        i += 1;
+      } else {
+        chunkLength = 3;
+      }
+    } else {
+      chunkLength = 3;
+    }
+    if (length + chunkLength > maxBytes) {
+      break;
+    }
+    bounded += chunk;
+    length += chunkLength;
+  }
+  return bounded;
+}
+
+function oscStringEncodedByteLength(value) {
+  var lengthWithNull = utf8ByteLength(value) + 1;
+  var remainder = lengthWithNull % 4;
+  return remainder === 0 ? lengthWithNull : lengthWithNull + (4 - remainder);
+}
+
+function sessionClipInspectionAckPacketByteLength(fragmentJson, requestId) {
+  return (
+    oscStringEncodedByteLength("/ack") +
+    oscStringEncodedByteLength(",sss") +
+    oscStringEncodedByteLength("api_session_clip_inspect") +
+    oscStringEncodedByteLength(fragmentJson) +
+    oscStringEncodedByteLength(requestId)
+  );
+}
+
+function sessionClipInspectionError(category, details, requestId) {
+  var boundedDetails = (details || []).map(function (detail) {
+    if (typeof detail === "number" && isFinite(detail)) {
+      return detail;
+    }
+    return truncateUtf8ToByteLength(
+      detail === undefined ? "undefined" : detail === null ? "null" : String(detail),
+      256
+    );
+  });
+  ackWithRequest(
+    "error",
+    ["api_session_clip_inspect_" + category].concat(boundedDetails),
+    truncateUtf8ToByteLength(
+      requestId === undefined || requestId === null ? "" : String(requestId),
+      128
+    )
+  );
+}
+
+function newSessionClipInspectionId() {
+  sessionClipInspectionCounter += 1;
+  return "session_clip_" + nowMs() + "_" + sessionClipInspectionCounter;
+}
+
+function isNonNegativeInteger(value) {
+  return (
+    typeof value === "number" &&
+    isFinite(value) &&
+    value >= 0 &&
+    Math.floor(value) === value
+  );
+}
+
+function readSessionClipInspectionProperty(api, property, target, requestId) {
+  try {
+    var value = getScalar(api, property);
+    if (value === undefined || value === null) {
+      sessionClipInspectionError("read_failed", [target, property], requestId);
+      return { ok: false, value: null };
+    }
+    return { ok: true, value: value };
+  } catch (err) {
+    debug(
+      "Session clip inspection failed to read " +
+        target +
+        "." +
+        property +
+        ": " +
+        err
+    );
+    sessionClipInspectionError("read_failed", [target, property], requestId);
+    return { ok: false, value: null };
+  }
+}
+
+function readNullableSessionClipInspectionTextProperty(api, property) {
+  try {
+    var value = getScalar(api, property);
+    return typeof value === "string" ? value : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function readNullableSessionClipInspectionDeviceType(api) {
+  try {
+    var value = getScalar(api, "type");
+    if (
+      typeof value === "number" &&
+      isFinite(value) &&
+      Math.floor(value) === value &&
+      (value === 0 || value === 1 || value === 2 || value === 4)
+    ) {
+      return value;
+    }
+  } catch (err) {
+    // Device type is optional metadata.
+  }
+  return null;
+}
+
+function validateSessionClipInspectionClipData(clipData, requestId) {
+  var positionFields = [
+    "start_marker",
+    "end_marker",
+    "loop_start",
+    "loop_end",
+  ];
+  for (var i = 0; i < positionFields.length; i += 1) {
+    var positionField = positionFields[i];
+    if (
+      typeof clipData[positionField] !== "number" ||
+      !isFinite(clipData[positionField])
+    ) {
+      sessionClipInspectionError(
+        "parse_failed",
+        ["clip_invalid_field", positionField],
+        requestId
+      );
+      return false;
+    }
+  }
+  if (
+    typeof clipData.live_length !== "number" ||
+    !isFinite(clipData.live_length) ||
+    clipData.live_length < 0
+  ) {
+    sessionClipInspectionError(
+      "parse_failed",
+      ["clip_invalid_field", "live_length"],
+      requestId
+    );
+    return false;
+  }
+  if (
+    clipData.start_marker > clipData.end_marker ||
+    !isFinite(clipData.end_marker - clipData.start_marker) ||
+    clipData.loop_start > clipData.loop_end ||
+    !isFinite(clipData.loop_end - clipData.loop_start)
+  ) {
+    sessionClipInspectionError(
+      "parse_failed",
+      ["clip_invalid_ranges"],
+      requestId
+    );
+    return false;
+  }
+  return true;
+}
+
+function openSessionClipInspectionApi(path, target, requestId) {
+  try {
+    var api = new LiveAPI(null, path);
+    if (!api || !(Number(api.id) > 0)) {
+      sessionClipInspectionError("not_found", [target, path], requestId);
+      return null;
+    }
+    return api;
+  } catch (err) {
+    debug("Session clip inspection could not resolve " + target + " at " + path + ": " + err);
+    sessionClipInspectionError("not_found", [target, path], requestId);
+    return null;
+  }
+}
+
+function parseSessionClipInspectionNotes(rawResult, requestId) {
+  var parsed = null;
+  if (rawResult && typeof rawResult === "object" && !Array.isArray(rawResult)) {
+    parsed = rawResult;
+  } else {
+    var rawText = Array.isArray(rawResult)
+      ? rawResult.join(" ")
+      : rawResult === undefined || rawResult === null
+        ? ""
+        : String(rawResult);
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (err) {
+      debug("Session clip inspection note JSON parse failed: " + err);
+      sessionClipInspectionError("parse_failed", ["notes"], requestId);
+      return null;
+    }
+  }
+  if (!parsed || !Array.isArray(parsed.notes)) {
+    sessionClipInspectionError("parse_failed", ["notes_shape"], requestId);
+    return null;
+  }
+  return parsed.notes;
+}
+
+function copySessionClipInspectionNote(note, index, requestId) {
+  if (!note || typeof note !== "object" || Array.isArray(note)) {
+    sessionClipInspectionError("parse_failed", ["note", index], requestId);
+    return null;
+  }
+  var fields = [
+    "note_id",
+    "pitch",
+    "start_time",
+    "duration",
+    "velocity",
+    "mute",
+    "probability",
+    "velocity_deviation",
+    "release_velocity",
+  ];
+  var copied = {};
+  for (var i = 0; i < fields.length; i += 1) {
+    var field = fields[i];
+    if (!Object.prototype.hasOwnProperty.call(note, field) || note[field] === undefined) {
+      sessionClipInspectionError(
+        "parse_failed",
+        ["note_missing_field", index, field],
+        requestId
+      );
+      return null;
+    }
+    copied[field] = note[field];
+  }
+
+  function isFiniteNumber(value) {
+    return typeof value === "number" && isFinite(value);
+  }
+
+  if (
+    !isFiniteNumber(copied.note_id) ||
+    copied.note_id < 0 ||
+    Math.floor(copied.note_id) !== copied.note_id
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "note_id"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.pitch) ||
+    copied.pitch < 0 ||
+    copied.pitch > 127 ||
+    Math.floor(copied.pitch) !== copied.pitch
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "pitch"], requestId);
+    return null;
+  }
+  if (!isFiniteNumber(copied.start_time)) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "start_time"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.duration) ||
+    copied.duration < 0 ||
+    !isFinite(copied.start_time + copied.duration)
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "duration"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.velocity) ||
+    copied.velocity < 0 ||
+    copied.velocity > 127
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "velocity"], requestId);
+    return null;
+  }
+  if (
+    typeof copied.mute !== "boolean" &&
+    !(
+      isFiniteNumber(copied.mute) &&
+      (copied.mute === 0 || copied.mute === 1)
+    )
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "mute"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.probability) ||
+    copied.probability < 0 ||
+    copied.probability > 1
+  ) {
+    sessionClipInspectionError("parse_failed", ["note_invalid_field", index, "probability"], requestId);
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.velocity_deviation) ||
+    copied.velocity_deviation < -127 ||
+    copied.velocity_deviation > 127
+  ) {
+    sessionClipInspectionError(
+      "parse_failed",
+      ["note_invalid_field", index, "velocity_deviation"],
+      requestId
+    );
+    return null;
+  }
+  if (
+    !isFiniteNumber(copied.release_velocity) ||
+    copied.release_velocity < 0 ||
+    copied.release_velocity > 127
+  ) {
+    sessionClipInspectionError(
+      "parse_failed",
+      ["note_invalid_field", index, "release_velocity"],
+      requestId
+    );
+    return null;
+  }
+  return copied;
+}
+
+function buildSessionClipInspectionSummary(notes) {
+  var pitchMin = null;
+  var pitchMax = null;
+  for (var i = 0; i < notes.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(notes[i], "pitch")) {
+      continue;
+    }
+    var pitch = Number(notes[i].pitch);
+    if (!isFinite(pitch)) {
+      continue;
+    }
+    if (pitchMin === null || pitch < pitchMin) pitchMin = pitch;
+    if (pitchMax === null || pitch > pitchMax) pitchMax = pitch;
+  }
+  return {
+    note_count: notes.length,
+    pitch_min: pitchMin,
+    pitch_max: pitchMax,
+  };
+}
+
+function makeSessionClipInspectionFragment(
+  metadata,
+  fragmentIndex,
+  fragmentCount,
+  fragmentKind,
+  isLast,
+  data
+) {
+  return {
+    schema: SESSION_CLIP_INSPECTION_SCHEMA,
+    schema_version: SESSION_CLIP_INSPECTION_SCHEMA_VERSION,
+    producer_version: SESSION_CLIP_INSPECTION_PRODUCER_VERSION,
+    inspection_id: metadata.inspection_id,
+    correlation: metadata.correlation,
+    snapshot: metadata.snapshot,
+    transfer: {
+      fragment_index: fragmentIndex,
+      fragment_count: fragmentCount,
+      fragment_kind: fragmentKind,
+      is_last: !!isLast,
+      packet_budget_bytes: SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES,
+    },
+    completeness: {
+      track: "complete",
+      clip: "complete",
+      devices: "complete",
+      notes: "complete",
+      missing_fields: [],
+    },
+    data: data,
+  };
+}
+
+function serializeSessionClipInspectionFragment(fragment) {
+  try {
+    var json = JSON.stringify(fragment);
+    if (typeof json !== "string") {
+      return { ok: false, json: "", packet_bytes: 0 };
+    }
+    return { ok: true, json: json, packet_bytes: 0 };
+  } catch (err) {
+    debug("Session clip inspection fragment serialization failed: " + err);
+    return { ok: false, json: "", packet_bytes: 0 };
+  }
+}
+
+function measureSessionClipInspectionFragment(
+  metadata,
+  fragmentIndex,
+  fragmentCount,
+  fragmentKind,
+  isLast,
+  data,
+  requestId
+) {
+  var fragment = makeSessionClipInspectionFragment(
+    metadata,
+    fragmentIndex,
+    fragmentCount,
+    fragmentKind,
+    isLast,
+    data
+  );
+  var serialized = serializeSessionClipInspectionFragment(fragment);
+  if (!serialized.ok) {
+    return serialized;
+  }
+  serialized.packet_bytes = sessionClipInspectionAckPacketByteLength(
+    serialized.json,
+    requestId
+  );
+  return serialized;
+}
+
+function paginateSessionClipInspectionItems(
+  metadata,
+  items,
+  fragmentKind,
+  offsetField,
+  countField,
+  totalField,
+  itemsField,
+  requestId,
+  maxFragmentCount,
+  maxPages
+) {
+  var pages = [];
+  var offset = 0;
+  while (offset < items.length) {
+    if (pages.length >= maxPages) {
+      return {
+        ok: false,
+        error: "limit_exceeded",
+        details: ["fragments", maxFragmentCount],
+        pages: [],
+      };
+    }
+    var pageItems = [];
+    while (offset + pageItems.length < items.length) {
+      var candidateItems = pageItems.concat([items[offset + pageItems.length]]);
+      var candidateData = {};
+      candidateData[offsetField] = offset;
+      candidateData[countField] = candidateItems.length;
+      candidateData[totalField] = items.length;
+      candidateData[itemsField] = candidateItems;
+      var measured = measureSessionClipInspectionFragment(
+        metadata,
+        Math.max(0, maxFragmentCount - 1),
+        maxFragmentCount,
+        fragmentKind,
+        false,
+        candidateData,
+        requestId
+      );
+      if (!measured.ok) {
+        return {
+          ok: false,
+          error: "serialization_failed",
+          details: [fragmentKind, offset + pageItems.length],
+          pages: [],
+        };
+      }
+      if (measured.packet_bytes > SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES) {
+        if (pageItems.length === 0) {
+          return {
+            ok: false,
+            error: "item_too_large",
+            details: [fragmentKind, offset, measured.packet_bytes],
+            pages: [],
+          };
+        }
+        break;
+      }
+      pageItems = candidateItems;
+    }
+    var pageData = {};
+    pageData[offsetField] = offset;
+    pageData[countField] = pageItems.length;
+    pageData[totalField] = items.length;
+    pageData[itemsField] = pageItems;
+    pages.push(pageData);
+    offset += pageItems.length;
+  }
+  return { ok: true, pages: pages };
+}
+
+function buildSessionClipInspectionFragments(metadata, contextData, devices, notes, requestId) {
+  if (devices.length > SESSION_CLIP_INSPECTION_MAX_DEVICES) {
+    return {
+      ok: false,
+      error: "limit_exceeded",
+      details: ["devices", devices.length, SESSION_CLIP_INSPECTION_MAX_DEVICES],
+      fragments: [],
+    };
+  }
+  if (notes.length > SESSION_CLIP_INSPECTION_MAX_NOTES) {
+    return {
+      ok: false,
+      error: "limit_exceeded",
+      details: ["notes", notes.length, SESSION_CLIP_INSPECTION_MAX_NOTES],
+      fragments: [],
+    };
+  }
+  var completeData = {
+    context: contextData.context,
+    track: contextData.track,
+    clip: contextData.clip,
+    summary: contextData.summary,
+    device_offset: 0,
+    device_count: devices.length,
+    device_total: devices.length,
+    devices: devices,
+    note_offset: 0,
+    note_count: notes.length,
+    note_total: notes.length,
+    notes: notes,
+  };
+  var complete = measureSessionClipInspectionFragment(
+    metadata,
+    0,
+    1,
+    "complete",
+    true,
+    completeData,
+    requestId
+  );
+  if (!complete.ok) {
+    return { ok: false, error: "serialization_failed", details: ["complete"], fragments: [] };
+  }
+  if (complete.packet_bytes <= SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES) {
+    return { ok: true, fragments: [complete.json] };
+  }
+
+  var maxFragmentCount = SESSION_CLIP_INSPECTION_MAX_FRAGMENTS;
+  var contextMeasured = measureSessionClipInspectionFragment(
+    metadata,
+    Math.max(0, maxFragmentCount - 1),
+    maxFragmentCount,
+    "context",
+    false,
+    contextData,
+    requestId
+  );
+  if (!contextMeasured.ok) {
+    return { ok: false, error: "serialization_failed", details: ["context"], fragments: [] };
+  }
+  if (contextMeasured.packet_bytes > SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES) {
+    return {
+      ok: false,
+      error: "item_too_large",
+      details: ["context", 0, contextMeasured.packet_bytes],
+      fragments: [],
+    };
+  }
+
+  var devicePages = paginateSessionClipInspectionItems(
+    metadata,
+    devices,
+    "device_page",
+    "device_offset",
+    "device_count",
+    "device_total",
+    "devices",
+    requestId,
+    maxFragmentCount,
+    maxFragmentCount - 1
+  );
+  if (!devicePages.ok) {
+    return {
+      ok: false,
+      error: devicePages.error,
+      details: devicePages.details,
+      fragments: [],
+    };
+  }
+  var notePages = paginateSessionClipInspectionItems(
+    metadata,
+    notes,
+    "note_page",
+    "note_offset",
+    "note_count",
+    "note_total",
+    "notes",
+    requestId,
+    maxFragmentCount,
+    maxFragmentCount - 1 - devicePages.pages.length
+  );
+  if (!notePages.ok) {
+    return {
+      ok: false,
+      error: notePages.error,
+      details: notePages.details,
+      fragments: [],
+    };
+  }
+
+  var pageSpecs = [{ kind: "context", data: contextData }]
+    .concat(
+      devicePages.pages.map(function (page) {
+        return { kind: "device_page", data: page };
+      })
+    )
+    .concat(
+      notePages.pages.map(function (page) {
+        return { kind: "note_page", data: page };
+      })
+    );
+  var fragmentCount = pageSpecs.length;
+  if (fragmentCount > SESSION_CLIP_INSPECTION_MAX_FRAGMENTS) {
+    return {
+      ok: false,
+      error: "limit_exceeded",
+      details: ["fragments", fragmentCount, SESSION_CLIP_INSPECTION_MAX_FRAGMENTS],
+      fragments: [],
+    };
+  }
+  var fragments = [];
+  for (var i = 0; i < pageSpecs.length; i += 1) {
+    var measured = measureSessionClipInspectionFragment(
+      metadata,
+      i,
+      fragmentCount,
+      pageSpecs[i].kind,
+      i === fragmentCount - 1,
+      pageSpecs[i].data,
+      requestId
+    );
+    if (!measured.ok) {
+      return {
+        ok: false,
+        error: "serialization_failed",
+        details: [pageSpecs[i].kind, i],
+        fragments: [],
+      };
+    }
+    if (measured.packet_bytes > SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES) {
+      return {
+        ok: false,
+        error: "item_too_large",
+        details: [pageSpecs[i].kind, i, measured.packet_bytes],
+        fragments: [],
+      };
+    }
+    fragments.push(measured.json);
+  }
+  return { ok: true, fragments: fragments };
+}
+
+function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestId) {
+  var requestText =
+    requestId === undefined || requestId === null ? "" : String(requestId);
+  if (requestText.length === 0) {
+    sessionClipInspectionError("validation_failed", ["request_id_required"], requestText);
+    return;
+  }
+  var requestByteLength = utf8ByteLength(requestText);
+  if (requestByteLength > 128) {
+    sessionClipInspectionError(
+      "validation_failed",
+      ["request_id_too_long", requestByteLength],
+      truncateUtf8ToByteLength(requestText, 128)
+    );
+    return;
+  }
+  if (!isNonNegativeInteger(trackIndex)) {
+    sessionClipInspectionError(
+      "validation_failed",
+      ["invalid_track_index", trackIndex],
+      requestText
+    );
+    return;
+  }
+  if (!isNonNegativeInteger(slotIndex)) {
+    sessionClipInspectionError(
+      "validation_failed",
+      ["invalid_slot_index", slotIndex],
+      requestText
+    );
+    return;
+  }
+  if (
+    typeof schemaVersion !== "number" ||
+    schemaVersion !== SESSION_CLIP_INSPECTION_SCHEMA_VERSION
+  ) {
+    sessionClipInspectionError(
+      "validation_failed",
+      ["unsupported_schema_version", schemaVersion],
+      requestText
+    );
+    return;
+  }
+  if (!ensureInitialized(requestText)) return;
+
+  var track = Number(trackIndex);
+  var slot = Number(slotIndex);
+  var startedMs = nowMs();
+  var trackPath = "live_set tracks " + track;
+  var trackApi = openSessionClipInspectionApi(trackPath, "track", requestText);
+  if (!trackApi) return;
+  trackPath = normalizeLiveApiPath(trackApi.path, trackPath);
+
+  var midiResult = readSessionClipInspectionProperty(
+    trackApi,
+    "has_midi_input",
+    "track",
+    requestText
+  );
+  if (!midiResult.ok) return;
+  if (Number(midiResult.value) !== 1) {
+    sessionClipInspectionError("not_midi", [track, trackPath], requestText);
+    return;
+  }
+  var trackName = readNullableSessionClipInspectionTextProperty(
+    trackApi,
+    "name"
+  );
+
+  var slotCount = 0;
+  try {
+    slotCount = Number(trackApi.getcount("clip_slots"));
+  } catch (errSlotCount) {
+    debug("Session clip inspection could not read clip slot count: " + errSlotCount);
+    sessionClipInspectionError("read_failed", ["track", "clip_slots"], requestText);
+    return;
+  }
+  if (!(isFinite(slotCount) && slotCount >= 0 && Math.floor(slotCount) === slotCount)) {
+    sessionClipInspectionError("read_failed", ["track", "clip_slots"], requestText);
+    return;
+  }
+  if (!(slot < slotCount)) {
+    sessionClipInspectionError("not_found", ["clip_slot", track, slot], requestText);
+    return;
+  }
+
+  var slotPath = trackPath + " clip_slots " + slot;
+  var slotApi = openSessionClipInspectionApi(slotPath, "clip_slot", requestText);
+  if (!slotApi) return;
+  var hasClip = readSessionClipInspectionProperty(
+    slotApi,
+    "has_clip",
+    "clip_slot",
+    requestText
+  );
+  if (!hasClip.ok) return;
+  if (Number(hasClip.value) !== 1) {
+    sessionClipInspectionError("no_clip", [track, slot], requestText);
+    return;
+  }
+
+  var clipPath = slotPath + " clip";
+  var clipApi = openSessionClipInspectionApi(clipPath, "clip", requestText);
+  if (!clipApi) return;
+  clipPath = normalizeLiveApiPath(clipApi.path, clipPath);
+  var initialClipId = Number(clipApi.id);
+
+  var clipPropertyMap = [
+    ["start_marker", "start_marker"],
+    ["end_marker", "end_marker"],
+    ["length", "live_length"],
+    ["looping", "looping"],
+    ["loop_start", "loop_start"],
+    ["loop_end", "loop_end"],
+  ];
+  var clipData = {
+    slot_index: slot,
+    path: clipPath,
+    id: initialClipId,
+    name: readNullableSessionClipInspectionTextProperty(clipApi, "name"),
+  };
+  for (var clipPropIndex = 0; clipPropIndex < clipPropertyMap.length; clipPropIndex += 1) {
+    var clipProperty = clipPropertyMap[clipPropIndex][0];
+    var outputProperty = clipPropertyMap[clipPropIndex][1];
+    var clipValue = readSessionClipInspectionProperty(
+      clipApi,
+      clipProperty,
+      "clip",
+      requestText
+    );
+    if (!clipValue.ok) return;
+    clipData[outputProperty] =
+      outputProperty === "looping" ? !!Number(clipValue.value) : clipValue.value;
+  }
+  if (!validateSessionClipInspectionClipData(clipData, requestText)) return;
+
+  var deviceCount = 0;
+  try {
+    deviceCount = Number(trackApi.getcount("devices"));
+  } catch (errDeviceCount) {
+    debug("Session clip inspection could not read device count: " + errDeviceCount);
+    sessionClipInspectionError("read_failed", ["track", "devices"], requestText);
+    return;
+  }
+  if (!(isFinite(deviceCount) && deviceCount >= 0 && Math.floor(deviceCount) === deviceCount)) {
+    sessionClipInspectionError("read_failed", ["track", "devices"], requestText);
+    return;
+  }
+  if (deviceCount > SESSION_CLIP_INSPECTION_MAX_DEVICES) {
+    sessionClipInspectionError(
+      "limit_exceeded",
+      ["devices", deviceCount, SESSION_CLIP_INSPECTION_MAX_DEVICES],
+      requestText
+    );
+    return;
+  }
+  var devices = [];
+  for (var deviceIndex = 0; deviceIndex < deviceCount; deviceIndex += 1) {
+    var devicePath = trackPath + " devices " + deviceIndex;
+    var deviceApi = null;
+    try {
+      deviceApi = new LiveAPI(null, devicePath);
+    } catch (errDevice) {
+      debug("Session clip inspection could not read device " + deviceIndex + ": " + errDevice);
+      sessionClipInspectionError("read_failed", ["device", deviceIndex], requestText);
+      return;
+    }
+    if (!deviceApi || !(Number(deviceApi.id) > 0)) {
+      sessionClipInspectionError("read_failed", ["device", deviceIndex], requestText);
+      return;
+    }
+    var device = {
+      index: deviceIndex,
+      path: normalizeLiveApiPath(deviceApi.path, devicePath),
+      id: Number(deviceApi.id),
+      name: readNullableSessionClipInspectionTextProperty(deviceApi, "name"),
+      class_name: readNullableSessionClipInspectionTextProperty(
+        deviceApi,
+        "class_name"
+      ),
+      type: readNullableSessionClipInspectionDeviceType(deviceApi),
+    };
+    devices.push(device);
+  }
+
+  var rawNotes = null;
+  try {
+    rawNotes = clipApi.call("get_all_notes_extended");
+  } catch (errNotes) {
+    debug("Session clip inspection note read failed: " + errNotes);
+    sessionClipInspectionError("read_failed", ["notes"], requestText);
+    return;
+  }
+  var parsedNotes = parseSessionClipInspectionNotes(rawNotes, requestText);
+  if (parsedNotes === null) return;
+  if (parsedNotes.length > SESSION_CLIP_INSPECTION_MAX_NOTES) {
+    sessionClipInspectionError(
+      "limit_exceeded",
+      ["notes", parsedNotes.length, SESSION_CLIP_INSPECTION_MAX_NOTES],
+      requestText
+    );
+    return;
+  }
+  var notes = [];
+  for (var noteIndex = 0; noteIndex < parsedNotes.length; noteIndex += 1) {
+    var copiedNote = copySessionClipInspectionNote(
+      parsedNotes[noteIndex],
+      noteIndex,
+      requestText
+    );
+    if (copiedNote === null) return;
+    notes.push(copiedNote);
+  }
+
+  var metadata = {
+    inspection_id: newSessionClipInspectionId(),
+    correlation: {
+      request_id: requestText,
+      track_index: track,
+      slot_index: slot,
+    },
+    snapshot: {
+      started_ms: startedMs,
+      completed_ms: nowMs(),
+      atomic: false,
+      consistent: true,
+    },
+  };
+  var contextData = {
+    context: "session",
+    track: {
+      index: track,
+      path: trackPath,
+      id: Number(trackApi.id),
+      name: trackName,
+    },
+    clip: clipData,
+    summary: buildSessionClipInspectionSummary(notes),
+  };
+  var built = buildSessionClipInspectionFragments(
+    metadata,
+    contextData,
+    devices,
+    notes,
+    requestText
+  );
+  if (!built.ok) {
+    sessionClipInspectionError(built.error, built.details, requestText);
+    return;
+  }
+
+  var finalClipApi = null;
+  try {
+    finalClipApi = new LiveAPI(null, clipPath);
+  } catch (errReread) {
+    debug("Session clip inspection clip id reread failed: " + errReread);
+    sessionClipInspectionError("read_failed", ["clip", "id_reread"], requestText);
+    return;
+  }
+  var finalClipId = finalClipApi ? Number(finalClipApi.id) : 0;
+  if (finalClipId !== initialClipId) {
+    sessionClipInspectionError(
+      "snapshot_changed",
+      [initialClipId, finalClipId],
+      requestText
+    );
+    return;
+  }
+
+  for (var fragmentIndex = 0; fragmentIndex < built.fragments.length; fragmentIndex += 1) {
+    ackWithRequest(
+      "api_session_clip_inspect",
+      [built.fragments[fragmentIndex]],
+      requestText
+    );
+  }
+}
+
+function api_observe(authToken, path, property, optionsJson, requestId) {
+  if (!requireMutationAuth("api_observe", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var contextName = "api_observe";
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
@@ -1210,6 +2325,10 @@ function api_observe(path, property, optionsJson, requestId) {
   if (observerId.length === 0) {
     observerId = newObserverId();
   }
+  if (!isValidObserverId(observerId)) {
+    ackWithRequest("error", ["api_invalid_observer_id", observerId], requestId);
+    return;
+  }
   var mode = normalizeObserverMode(parsedOptions.mode);
   var emitInitial = parsedOptions.emit_initial === false ? false : true;
   var minIntervalMs = Math.max(
@@ -1217,7 +2336,7 @@ function api_observe(path, property, optionsJson, requestId) {
     Math.floor(Number(parsedOptions.min_interval_ms || parsedOptions.throttle_ms || 0))
   );
 
-  if (!apiObservers[observerId] && Object.keys(apiObservers).length >= MAX_API_OBSERVERS) {
+  if (!hasObserverEntry(observerId) && Object.keys(apiObservers).length >= MAX_API_OBSERVERS) {
     ackWithRequest("error", ["api_observer_limit_reached", MAX_API_OBSERVERS], requestId);
     return;
   }
@@ -1262,8 +2381,9 @@ function api_observe(path, property, optionsJson, requestId) {
   ackWithRequest("api_observe", [observerId, normalizeLiveApiPath(observerApi.path, apiPath), propName, payloadJson], requestId);
 }
 
-function api_unobserve(observerId, requestId) {
-  if (!ensureInitialized()) return;
+function api_unobserve(authToken, observerId, requestId) {
+  if (!requireMutationAuth("api_unobserve", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var key = observerId === undefined || observerId === null ? "" : String(observerId).trim();
   if (key.length === 0) {
     ackWithRequest("error", ["api_missing_observer_id"], requestId);
@@ -1290,15 +2410,16 @@ function api_unobserve(observerId, requestId) {
   );
 }
 
-function api_clear_observers(requestId) {
-  if (!ensureInitialized()) return;
+function api_clear_observers(authToken, requestId) {
+  if (!requireMutationAuth("api_clear_observers", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var cleared = clearAllObserverEntries();
   var resultJson = safeJsonStringify({ cleared: Number(cleared || 0) }, "api_clear_observers");
   ackWithRequest("api_clear_observers", [resultJson], requestId);
 }
 
 function api_observers(requestId) {
-  if (!ensureInitialized()) return;
+  if (!ensureInitialized(requestId)) return;
   var payloadJson = safeJsonStringify(listObserverEntries(), "api_observers");
   ackWithRequest("api_observers", [payloadJson], requestId);
 }
@@ -1314,7 +2435,34 @@ var API_FALLBACK_HANDLERS = {
   "api_insert_device": api_insert_device,
   "api_insert_chain": api_insert_chain,
   "api_drum_chain_in_note": api_drum_chain_in_note,
+  "api_session_clip_inspect": api_session_clip_inspect,
 };
+
+var API_FALLBACK_REQUEST_ID_INDEXES = {
+  "api_session_context": 0,
+  "api_theory_status": 0,
+  "api_tuning_status": 0,
+  "api_device_list": 1,
+  "api_device_parameters": 1,
+  "api_parameter_set": 3,
+  "api_mixer_status": 1,
+  "api_insert_device": 4,
+  "api_insert_chain": 3,
+  "api_drum_chain_in_note": 3,
+  "api_session_clip_inspect": 3,
+};
+
+function fallbackRequestId(targetName, args) {
+  var requestIndex = API_FALLBACK_REQUEST_ID_INDEXES[targetName];
+  if (
+    requestIndex === undefined ||
+    requestIndex < 0 ||
+    requestIndex >= args.length
+  ) {
+    return "";
+  }
+  return args[requestIndex];
+}
 
 function anything() {
   var rawName = typeof messagename === "undefined" ? "" : String(messagename || "");
@@ -1330,7 +2478,25 @@ function anything() {
     return;
   }
   var args = arrayfromargs(arguments);
-  target.apply(this, args);
+  try {
+    target.apply(this, args);
+  } catch (err) {
+    debug("Unhandled exception in " + rawName + ": " + err);
+    var requestId = fallbackRequestId(targetName, args);
+    if (targetName === "api_session_clip_inspect") {
+      sessionClipInspectionError(
+        "internal_error",
+        [],
+        requestId
+      );
+      return;
+    }
+    ackWithRequest(
+      "error",
+      ["api_wrapper_internal_error", targetName],
+      requestId
+    );
+  }
 }
 
 function clampMidiByte(value, fallback, contextName, label) {
@@ -1365,19 +2531,22 @@ function emitMidiCc(controller, value, channel, contextName) {
   return { controller: ctrl, value: val, channel: ch, status: status };
 }
 
-function midi_cc(controller, value, channel, requestId) {
-  if (!ensureInitialized()) return;
+function midi_cc(authToken, controller, value, channel, requestId) {
+  if (!requireMutationAuth("midi_cc", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var result = emitMidiCc(controller, value, channel, "midi_cc");
   ackWithRequest("midi_cc", [result.controller, result.value, result.channel], requestId);
 }
 
-function cc64(value, channel, requestId) {
-  if (!ensureInitialized()) return;
+function cc64(authToken, value, channel, requestId) {
+  if (!requireMutationAuth("cc64", authToken, requestId)) return;
+  if (!ensureInitialized(requestId)) return;
   var result = emitMidiCc(64, value, channel, "cc64");
   ackWithRequest("cc64", [result.value, result.channel], requestId);
 }
 
-function tempo(bpm) {
+function tempo(authToken, bpm) {
+  if (!requireMutationAuth("tempo", authToken)) return;
   if (!ensureInitialized()) return;
   var value = Number(bpm);
   if (!(value > 0)) {
@@ -1388,7 +2557,8 @@ function tempo(bpm) {
   ack("ack", "tempo", value);
 }
 
-function sig_num(num) {
+function sig_num(authToken, num) {
+  if (!requireMutationAuth("sig_num", authToken)) return;
   if (!ensureInitialized()) return;
   var value = Math.floor(Number(num));
   if (!(value > 0)) {
@@ -1399,7 +2569,8 @@ function sig_num(num) {
   ack("ack", "sig_num", value);
 }
 
-function sig_den(den) {
+function sig_den(authToken, den) {
+  if (!requireMutationAuth("sig_den", authToken)) return;
   if (!ensureInitialized()) return;
   var value = Math.floor(Number(den));
   if (!(value > 0)) {
@@ -1410,7 +2581,8 @@ function sig_den(den) {
   ack("ack", "sig_den", value);
 }
 
-function create_midi_track() {
+function create_midi_track(authToken) {
+  if (!requireMutationAuth("create_midi_track", authToken)) return;
   if (!ensureInitialized()) return;
   song.call("create_midi_track", -1);
   ack("ack", "create_midi_track", -1);
@@ -1438,7 +2610,8 @@ function renameTrack(trackIndex, name) {
   }
 }
 
-function create_audio_track() {
+function create_audio_track(authToken) {
+  if (!requireMutationAuth("create_audio_track", authToken)) return;
   if (!ensureInitialized()) return;
   song.call("create_audio_track", -1);
   ack("ack", "create_audio_track", -1);
@@ -1466,7 +2639,7 @@ function listTrackIndices(totalTracks, predicate, contextName) {
     } catch (err) {
       debug("Failed to inspect track " + i + " in " + contextName + ": " + err);
       ack("ack", "error", "track_inspect_failed", contextName, i);
-      break;
+      return null;
     }
   }
   return indices;
@@ -1480,12 +2653,16 @@ function isMidiTrack(flags) {
   return flags.hasMidiInput === 1;
 }
 
-function add_midi_tracks(count, name) {
+function add_midi_tracks(authToken, count, name) {
+  if (!requireMutationAuth("add_midi_tracks", authToken)) return;
   if (!ensureInitialized()) return;
-  var targetCount = Math.floor(Number(count));
-  if (!(targetCount > 0)) {
-    debug("Ignoring invalid MIDI track count: " + count);
-    ack("ack", "error", "add_midi_tracks_invalid_count", count);
+  var targetCount = boundedInteger(count, 1, MAX_TRACKS_PER_COMMAND);
+  if (targetCount === null) {
+    debug("Ignoring out-of-range MIDI track count: " + count);
+    ackWithRequest(
+      "error",
+      ["add_midi_tracks_count_out_of_range", count, MAX_TRACKS_PER_COMMAND]
+    );
     return;
   }
 
@@ -1499,47 +2676,58 @@ function add_midi_tracks(count, name) {
 
   for (var i = 0; i < targetCount; i += 1) {
     var before = getTotalTracksOrError("add_midi_tracks_before");
-    if (before === 0) break;
-    song.call("create_midi_track", -1);
+    if (before === 0) return;
+    try {
+      song.call("create_midi_track", -1);
+    } catch (errCreate) {
+      debug("Failed to create MIDI track " + i + ": " + errCreate);
+      ack("ack", "error", "add_midi_tracks_create_failed", i);
+      return;
+    }
     var after = getTotalTracksOrError("add_midi_tracks_after");
-    if (after === 0) break;
+    if (after === 0) return;
 
     var newIndex = after - 1;
     if (newIndex < before) {
       newIndex = before;
     }
 
-    renameTrack(newIndex, trackName);
+    if (!renameTrack(newIndex, trackName)) return;
     created += 1;
     ack("ack", "midi_track_created", newIndex, trackName);
   }
 
   var finalTotal = getTotalTracksOrError("add_midi_tracks_final");
+  if (finalTotal === 0) return;
   ack("ack", "add_midi_tracks", targetCount, trackName, created, finalTotal);
 }
 
-function getTotalTracksOrError(contextName) {
+function getTotalTracksOrError(contextName, requestId) {
   var total = 0;
   try {
     total = song.getcount("tracks");
   } catch (err) {
     debug("Unable to read track count in " + contextName + ": " + err);
-    ack("ack", "error", "track_count_failed", contextName);
+    ackWithRequest("error", ["track_count_failed", contextName], requestId);
     return 0;
   }
   if (total === 0) {
     debug("Track count is 0 in " + contextName + ". Device may not be attached to the Live set.");
-    ack("ack", "error", "not_in_live_set", contextName);
+    ackWithRequest("error", ["not_in_live_set", contextName], requestId);
   }
   return total;
 }
 
-function add_audio_tracks(count, prefix) {
+function add_audio_tracks(authToken, count, prefix) {
+  if (!requireMutationAuth("add_audio_tracks", authToken)) return;
   if (!ensureInitialized()) return;
-  var targetCount = Math.floor(Number(count));
-  if (!(targetCount > 0)) {
-    debug("Ignoring invalid audio track count: " + count);
-    ack("ack", "error", "add_audio_tracks_invalid_count", count);
+  var targetCount = boundedInteger(count, 1, MAX_TRACKS_PER_COMMAND);
+  if (targetCount === null) {
+    debug("Ignoring out-of-range audio track count: " + count);
+    ackWithRequest(
+      "error",
+      ["add_audio_tracks_count_out_of_range", count, MAX_TRACKS_PER_COMMAND]
+    );
     return;
   }
 
@@ -1553,31 +2741,42 @@ function add_audio_tracks(count, prefix) {
 
   for (var i = 0; i < targetCount; i += 1) {
     var before = getTotalTracksOrError("add_audio_tracks_before");
-    if (before === 0) break;
-    song.call("create_audio_track", -1);
+    if (before === 0) return;
+    try {
+      song.call("create_audio_track", -1);
+    } catch (errCreate) {
+      debug("Failed to create audio track " + i + ": " + errCreate);
+      ack("ack", "error", "add_audio_tracks_create_failed", i);
+      return;
+    }
     var after = getTotalTracksOrError("add_audio_tracks_after");
-    if (after === 0) break;
+    if (after === 0) return;
     var newIndex = after - 1;
     if (newIndex < before) {
       newIndex = before;
     }
 
     var trackName = namePrefix + " " + pad2(i + 1);
-    renameTrack(newIndex, trackName);
+    if (!renameTrack(newIndex, trackName)) return;
     created += 1;
     ack("ack", "audio_track_created", newIndex, trackName);
   }
 
   var finalTotal = getTotalTracksOrError("add_audio_tracks_final");
+  if (finalTotal === 0) return;
   ack("ack", "add_audio_tracks", targetCount, namePrefix, created, finalTotal);
 }
 
-function delete_midi_tracks(count) {
+function delete_midi_tracks(authToken, count) {
+  if (!requireMutationAuth("delete_midi_tracks", authToken)) return;
   if (!ensureInitialized()) return;
-  var targetCount = Math.floor(Number(count));
-  if (!(targetCount > 0)) {
-    debug("Ignoring invalid MIDI delete count: " + count);
-    ack("ack", "error", "delete_midi_tracks_invalid_count", count);
+  var targetCount = boundedInteger(count, 1, MAX_TRACKS_PER_COMMAND);
+  if (targetCount === null) {
+    debug("Ignoring out-of-range MIDI delete count: " + count);
+    ackWithRequest(
+      "error",
+      ["delete_midi_tracks_count_out_of_range", count, MAX_TRACKS_PER_COMMAND]
+    );
     return;
   }
 
@@ -1587,6 +2786,7 @@ function delete_midi_tracks(count) {
   }
 
   var midiIndices = listTrackIndices(totalTracks, isMidiTrack, "delete_midi_tracks");
+  if (midiIndices === null) return;
   // Preserve track 0 as a stable default "do not delete" track.
   var deletableMidiIndices = midiIndices.filter(function (i) {
     return i > 0;
@@ -1612,15 +2812,17 @@ function delete_midi_tracks(count) {
     } catch (err) {
       debug("Failed to delete MIDI track " + index + ": " + err);
       ack("ack", "error", "midi_track_delete_failed", index);
-      break;
+      return;
     }
   }
 
   var finalTotal = getTotalTracksOrError("delete_midi_tracks_final");
+  if (finalTotal === 0) return;
   ack("ack", "delete_midi_tracks", targetCount, deleted, finalTotal);
 }
 
-function rename_track(trackIndex, name) {
+function rename_track(authToken, trackIndex, name) {
+  if (!requireMutationAuth("rename_track", authToken)) return;
   if (!ensureInitialized()) return;
   var index = Math.floor(Number(trackIndex));
   if (!(index >= 0)) {
@@ -1695,7 +2897,7 @@ function parseNotesJson(notesJson, contextName) {
   }
 }
 
-function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue, index, contextName, integerValue) {
+function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue, index, contextName, integerValue, requestId) {
   var raw = note[fieldName];
   if (raw === undefined || raw === null || String(raw).length === 0) {
     return true;
@@ -1703,7 +2905,7 @@ function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue,
 
   var value = Number(raw);
   if (!(isFinite(value) && value >= minValue && value <= maxValue)) {
-    ack("ack", "error", contextName + "_invalid_" + fieldName, index, raw);
+    ackWithRequest("error", [contextName + "_invalid_" + fieldName, index, raw], requestId);
     return false;
   }
 
@@ -1711,7 +2913,7 @@ function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue,
   return true;
 }
 
-function normalizeNote(note, index, contextName) {
+function normalizeNote(note, index, contextName, requestId) {
   var pitch = Math.floor(Number(note.pitch));
   var startTime = Number(note.start_time);
   var duration = Number(note.duration);
@@ -1722,15 +2924,15 @@ function normalizeNote(note, index, contextName) {
   var mute = Number(note.mute) ? 1 : 0;
 
   if (!(pitch >= 0 && pitch <= 127)) {
-    ack("ack", "error", contextName + "_invalid_pitch", index, note.pitch);
+    ackWithRequest("error", [contextName + "_invalid_pitch", index, note.pitch], requestId);
     return null;
   }
   if (!(startTime >= 0)) {
-    ack("ack", "error", contextName + "_invalid_start_time", index, note.start_time);
+    ackWithRequest("error", [contextName + "_invalid_start_time", index, note.start_time], requestId);
     return null;
   }
   if (!(duration > 0)) {
-    ack("ack", "error", contextName + "_invalid_duration", index, note.duration);
+    ackWithRequest("error", [contextName + "_invalid_duration", index, note.duration], requestId);
     return null;
   }
   if (!(velocity >= 0 && velocity <= 127)) {
@@ -1745,23 +2947,23 @@ function normalizeNote(note, index, contextName) {
     mute: mute,
   };
 
-  if (!copyOptionalNoteNumber(note, normalized, "probability", 0, 1, index, contextName, false)) {
+  if (!copyOptionalNoteNumber(note, normalized, "probability", 0, 1, index, contextName, false, requestId)) {
     return null;
   }
-  if (!copyOptionalNoteNumber(note, normalized, "velocity_deviation", 0, 127, index, contextName, false)) {
+  if (!copyOptionalNoteNumber(note, normalized, "velocity_deviation", -127, 127, index, contextName, false, requestId)) {
     return null;
   }
-  if (!copyOptionalNoteNumber(note, normalized, "release_velocity", 0, 127, index, contextName, true)) {
+  if (!copyOptionalNoteNumber(note, normalized, "release_velocity", 0, 127, index, contextName, true, requestId)) {
     return null;
   }
 
   return normalized;
 }
 
-function buildNotesDict(notes, contextName) {
+function buildNotesDict(notes, contextName, requestId) {
   var normalized = [];
   for (var i = 0; i < notes.length; i += 1) {
-    var norm = normalizeNote(notes[i], i, contextName);
+    var norm = normalizeNote(notes[i], i, contextName, requestId);
     if (!norm) {
       return null;
     }
@@ -1772,38 +2974,46 @@ function buildNotesDict(notes, contextName) {
   // In Max JS, arrays of dictionaries often need a wrapper key to be parsed
   // into a Dict that LiveAPI accepts as a dictionary argument.
   var wrapperName = "live_bridge_notes_wrapper_" + new Date().getTime();
-  var wrapper = new Dict(wrapperName);
-  wrapper.setparse("wrapper", JSON.stringify(notesData));
-  var notesDict = wrapper.get("wrapper");
-  if (!notesDict) {
-    ack("ack", "error", contextName + "_notes_dict_build_failed");
+  var wrapper = null;
+  var notesDict = null;
+  try {
+    wrapper = new Dict(wrapperName);
+    wrapper.setparse("wrapper", JSON.stringify(notesData));
+    notesDict = wrapper.get("wrapper");
+    if (!notesDict) {
+      throw new Error("Dict wrapper did not return a notes dictionary");
+    }
+  } catch (err) {
+    debug("Failed to build notes Dict for " + contextName + ": " + err);
+    ackWithRequest("error", [contextName + "_notes_dict_build_failed"], requestId);
     clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
   return { wrapper: wrapper, dict: notesDict, notes: normalized };
 }
 
-function buildGenericDict(payload, contextName) {
+function buildGenericDict(payload, contextName, requestId) {
   var wrapperName = "live_bridge_dict_wrapper_" + new Date().getTime();
-  var wrapper = new Dict(wrapperName);
+  var wrapper = null;
+  var parsedDict = null;
   try {
+    wrapper = new Dict(wrapperName);
     wrapper.setparse("wrapper", JSON.stringify(payload));
+    parsedDict = wrapper.get("wrapper");
+    if (!parsedDict) {
+      throw new Error("Dict wrapper did not return a dictionary");
+    }
   } catch (err) {
     debug("Failed to build Dict for " + contextName + ": " + err);
-    ack("ack", "error", contextName + "_dict_build_failed");
-    clearBuiltPayload({ wrapper: wrapper });
-    return null;
-  }
-  var parsedDict = wrapper.get("wrapper");
-  if (!parsedDict) {
-    ack("ack", "error", contextName + "_dict_build_failed");
+    ackWithRequest("error", [contextName + "_dict_build_failed"], requestId);
     clearBuiltPayload({ wrapper: wrapper });
     return null;
   }
   return { wrapper: wrapper, dict: parsedDict };
 }
 
-function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, clipName) {
+function set_session_clip_notes(authToken, trackIndex, slotIndex, lengthBeats, notesJson, clipName) {
+  if (!requireMutationAuth("set_session_clip_notes", authToken)) return;
   if (!ensureInitialized()) return;
   var startedMs = new Date().getTime();
 
@@ -1930,7 +3140,8 @@ function set_session_clip_notes(trackIndex, slotIndex, lengthBeats, notesJson, c
   );
 }
 
-function append_session_clip_notes(trackIndex, slotIndex, notesJson) {
+function append_session_clip_notes(authToken, trackIndex, slotIndex, notesJson) {
+  if (!requireMutationAuth("append_session_clip_notes", authToken)) return;
   if (!ensureInitialized()) return;
   var startedMs = new Date().getTime();
 
@@ -2093,19 +3304,26 @@ function inspect_session_clip_notes(trackIndex, slotIndex) {
   );
 }
 
-function countMidiTracks(totalTracks) {
+function countMidiTracks(totalTracks, contextName, requestId) {
   var midiCount = 0;
   for (var i = 0; i < totalTracks; i += 1) {
-    var track = new LiveAPI(null, "live_set tracks " + i);
-    var hasMidiInput = Number(getScalar(track, "has_midi_input"));
-    if (hasMidiInput === 1) {
-      midiCount += 1;
+    try {
+      var track = new LiveAPI(null, "live_set tracks " + i);
+      var hasMidiInput = Number(getScalar(track, "has_midi_input"));
+      if (hasMidiInput === 1) {
+        midiCount += 1;
+      }
+    } catch (err) {
+      var midiContext = String(contextName || "count_midi_tracks");
+      debug("Failed to inspect MIDI track " + i + " in " + midiContext + ": " + err);
+      ackWithRequest("error", ["count_midi_tracks_failed", midiContext, i], requestId);
+      return null;
     }
   }
   return midiCount;
 }
 
-function countAudioTracks(totalTracks) {
+function countAudioTracks(totalTracks, contextName, requestId) {
   var audioCount = 0;
   for (var i = 0; i < totalTracks; i += 1) {
     try {
@@ -2115,20 +3333,25 @@ function countAudioTracks(totalTracks) {
         audioCount += 1;
       }
     } catch (err) {
-      debug("Failed to inspect audio track " + i + ": " + err);
-      ack("ack", "error", "count_audio_tracks_failed", i);
-      return audioCount;
+      var audioContext = String(contextName || "count_audio_tracks");
+      debug("Failed to inspect audio track " + i + " in " + audioContext + ": " + err);
+      ackWithRequest("error", ["count_audio_tracks_failed", audioContext, i], requestId);
+      return null;
     }
   }
   return audioCount;
 }
 
-function delete_audio_tracks(count) {
+function delete_audio_tracks(authToken, count) {
+  if (!requireMutationAuth("delete_audio_tracks", authToken)) return;
   if (!ensureInitialized()) return;
-  var targetCount = Math.floor(Number(count));
-  if (!(targetCount > 0)) {
-    debug("Ignoring invalid delete audio track count: " + count);
-    ack("ack", "error", "delete_audio_tracks_invalid_count", count);
+  var targetCount = boundedInteger(count, 1, MAX_TRACKS_PER_COMMAND);
+  if (targetCount === null) {
+    debug("Ignoring out-of-range audio delete count: " + count);
+    ackWithRequest(
+      "error",
+      ["delete_audio_tracks_count_out_of_range", count, MAX_TRACKS_PER_COMMAND]
+    );
     return;
   }
 
@@ -2138,6 +3361,7 @@ function delete_audio_tracks(count) {
   }
 
   var audioIndices = listTrackIndices(totalTracks, isAudioOnlyTrack, "delete_audio_tracks");
+  if (audioIndices === null) return;
   if (audioIndices.length === 0) {
     debug("No audio tracks found to delete.");
     ack("ack", "error", "no_audio_tracks");
@@ -2155,33 +3379,43 @@ function delete_audio_tracks(count) {
     } catch (err) {
       debug("Failed to delete audio track " + trackIndex + ": " + err);
       ack("ack", "error", "delete_audio_track_failed", trackIndex);
+      return;
     }
   }
 
   var finalTotal = getTotalTracksOrError("delete_audio_tracks_final");
+  if (finalTotal === 0) return;
   ack("ack", "delete_audio_tracks", targetCount, deleted, finalTotal);
 }
 
 function status() {
   if (!ensureInitialized()) return;
   var totalTracks = getTotalTracksOrError("status");
+  if (totalTracks === 0) return;
   var returnTracks = 0;
   try {
     returnTracks = song.getcount("return_tracks");
   } catch (err) {
     debug("Unable to read return track count: " + err);
   }
-  var midiTracks = totalTracks > 0 ? countMidiTracks(totalTracks) : 0;
-  var audioTracks = totalTracks > 0 ? countAudioTracks(totalTracks) : 0;
+  var midiTracks = countMidiTracks(totalTracks, "status");
+  if (midiTracks === null) return;
+  var audioTracks = countAudioTracks(totalTracks, "status");
+  if (audioTracks === null) return;
   var id = song ? Number(song.id) : 0;
   ack("ack", "status", totalTracks, midiTracks, audioTracks, returnTracks, song.path, id);
 }
 
-function ensure_midi_tracks(targetCount) {
+function ensure_midi_tracks(authToken, targetCount) {
+  if (!requireMutationAuth("ensure_midi_tracks", authToken)) return;
   if (!ensureInitialized()) return;
-  var target = Math.floor(Number(targetCount));
-  if (!(target >= 0)) {
-    debug("Ignoring invalid target track count: " + targetCount);
+  var target = boundedInteger(targetCount, 0, MAX_TRACK_TARGET);
+  if (target === null) {
+    debug("Ignoring out-of-range target track count: " + targetCount);
+    ackWithRequest(
+      "error",
+      ["ensure_midi_tracks_target_out_of_range", targetCount, MAX_TRACK_TARGET]
+    );
     return;
   }
 
@@ -2190,10 +3424,22 @@ function ensure_midi_tracks(targetCount) {
     return;
   }
 
-  var currentMidiTracks = countMidiTracks(totalTracks);
+  var currentMidiTracks = countMidiTracks(totalTracks, "ensure_midi_tracks");
+  if (currentMidiTracks === null) return;
   var missing = target - currentMidiTracks;
   if (missing <= 0) {
     ack("ack", "ensure_midi_tracks", target, currentMidiTracks, 0, totalTracks);
+    return;
+  }
+  if (missing > MAX_TRACKS_PER_COMMAND) {
+    ackWithRequest(
+      "error",
+      [
+        "ensure_midi_tracks_batch_too_large",
+        missing,
+        MAX_TRACKS_PER_COMMAND,
+      ]
+    );
     return;
   }
 
@@ -2203,14 +3449,22 @@ function ensure_midi_tracks(targetCount) {
   ack("ack", "ensure_midi_tracks", target, currentMidiTracks, missing, totalTracks);
 }
 
-function ack() {
+function emitAck(args) {
   // Emit OSC-friendly messages via udpsend. We use a leading slash address.
   // Example: /ack tempo 120
-  var args = Array.prototype.slice.call(arguments);
   if (args.length === 0) return;
 
   var address = "/" + String(args[0]);
   var rest = args.slice(1);
   var message = [0, address].concat(rest);
   outlet.apply(this, message);
+}
+
+function ack() {
+  var args = Array.prototype.slice.call(arguments);
+  if (args[0] === "ack" && args[1] === "error") {
+    args.push(ERROR_CORRELATION_MARKER);
+    args.push("req:");
+  }
+  emitAck(args);
 }

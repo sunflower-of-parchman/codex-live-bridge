@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import sys
 from dataclasses import dataclass
@@ -134,7 +135,7 @@ def _build_notes() -> Tuple[List[dict], float]:
     return notes, length_beats
 
 
-def run() -> int:
+def run(auth_token: str) -> int:
     cfg = bridge.BridgeConfig(
         host=HOST,
         port=PORT,
@@ -175,6 +176,7 @@ def run() -> int:
         api_calls=(),
         api_children=(),
         api_describes=(),
+        auth_token=auth_token,
         delay_ms=0,
         dry_run=False,
     )
@@ -213,7 +215,10 @@ def run() -> int:
         # Create a new MIDI track using the generic RPC surface.
         create_track = bridge.OscCommand(
             "/api/call",
-            ("live_set", "create_midi_track", json.dumps([-1])),
+            bridge.authenticated_args(
+                auth_token,
+                ("live_set", "create_midi_track", json.dumps([-1])),
+            ),
         )
         print(f"sent: {bridge.describe_command(create_track)}")
         _print_acks(_send_and_collect_acks(sock, ack_sock, create_track))
@@ -237,7 +242,10 @@ def run() -> int:
         track_path = f"live_set tracks {new_track_index}"
         set_name = bridge.OscCommand(
             "/api/set",
-            (track_path, "name", json.dumps("Full Surface Smoke")),
+            bridge.authenticated_args(
+                auth_token,
+                (track_path, "name", json.dumps("Full Surface Smoke")),
+            ),
         )
         print(f"sent: {bridge.describe_command(set_name)}")
         _print_acks(_send_and_collect_acks(sock, ack_sock, set_name))
@@ -247,7 +255,13 @@ def run() -> int:
             ("signature_numerator", 5),
             ("signature_denominator", 4),
         ):
-            cmd = bridge.OscCommand("/api/set", ("live_set", prop, json.dumps(value)))
+            cmd = bridge.OscCommand(
+                "/api/set",
+                bridge.authenticated_args(
+                    auth_token,
+                    ("live_set", prop, json.dumps(value)),
+                ),
+            )
             print(f"sent: {bridge.describe_command(cmd)}")
             _print_acks(_send_and_collect_acks(sock, ack_sock, cmd))
 
@@ -255,7 +269,16 @@ def run() -> int:
         notes_json = json.dumps({"notes": notes}, separators=(",", ":"))
         set_clip = bridge.OscCommand(
             "/set_session_clip_notes",
-            (new_track_index, 0, clip_length, notes_json, "Full Surface Smoke"),
+            bridge.authenticated_args(
+                auth_token,
+                (
+                    new_track_index,
+                    0,
+                    clip_length,
+                    notes_json,
+                    "Full Surface Smoke",
+                ),
+            ),
         )
         print(
             "sent: /set_session_clip_notes "
@@ -299,15 +322,31 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         required=True,
         help="Required confirmation that this smoke test mutates the active Live set.",
     )
+    parser.add_argument(
+        "--auth-token",
+        default=os.environ.get(bridge.AUTH_TOKEN_ENV),
+        required=os.environ.get(bridge.AUTH_TOKEN_ENV) is None,
+        help=(
+            "Capability token configured in the Max device "
+            f"(default: {bridge.AUTH_TOKEN_ENV} environment variable)"
+        ),
+    )
     return parser.parse_args(list(argv))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
-        parse_args(sys.argv[1:] if argv is None else argv)
+        ns = parse_args(sys.argv[1:] if argv is None else argv)
+        auth_token = bridge.normalize_auth_token(ns.auth_token)
     except SystemExit as exc:
         return int(exc.code or 0)
-    return run()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if auth_token is None:
+        print("error: auth token is required", file=sys.stderr)
+        return 2
+    return run(auth_token)
 
 
 if __name__ == "__main__":

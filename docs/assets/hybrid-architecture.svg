@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="680" viewBox="0 0 1440 680" role="img" aria-labelledby="title desc">
+  <title id="title">Live Extension and LiveUdpBridge architecture</title>
+  <desc id="desc">The Live Extension and LiveUdpBridge work with Ableton Live and use one shared inspection core.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#d2dae3"/>
+    </marker>
+    <style>
+      .lato { font-family: Lato, Arial, sans-serif; }
+      .label { font-size: 13px; font-weight: 400; letter-spacing: 2px; }
+      .heading { font-size: 38px; font-weight: 300; }
+      .name { font-size: 25px; font-weight: 300; }
+      .body { font-size: 17px; font-weight: 300; }
+      .small { font-size: 14px; font-weight: 300; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="680" rx="12" fill="#08090b"/>
+
+  <text x="64" y="62" class="lato label" fill="#d2dae3">CODEX + ABLETON LIVE</text>
+  <text x="64" y="111" class="lato heading" fill="#fffdfc">Two ways to work with Live</text>
+  <text x="64" y="143" class="lato body" fill="#d2dae3">One shared inspection core</text>
+  <path d="M64 172H1376" stroke="#393d3f" stroke-width="1"/>
+
+  <rect x="64" y="198" width="350" height="300" rx="10" fill="#111215" stroke="#393d3f"/>
+  <text x="92" y="252" class="lato label" fill="#d2dae3">IN LIVE</text>
+  <text x="92" y="302" class="lato name" fill="#fffdfc">Live Extension</text>
+  <text x="92" y="346" class="lato body" fill="#d2dae3">Clip context actions</text>
+  <text x="92" y="378" class="lato body" fill="#d2dae3">Session and Arrangement clips</text>
+  <text x="92" y="410" class="lato body" fill="#d2dae3">Large clip reads</text>
+  <text x="92" y="442" class="lato body" fill="#d2dae3">Clip and note reports</text>
+  <text x="92" y="474" class="lato body" fill="#d2dae3">Native report window</text>
+
+  <rect x="545" y="214" width="350" height="268" rx="10" fill="#0f1012" stroke="#fffdfc"/>
+  <text x="573" y="252" class="lato label" fill="#d2dae3">SHARED</text>
+  <text x="573" y="302" class="lato name" fill="#fffdfc">Inspection Core</text>
+  <text x="573" y="346" class="lato body" fill="#d2dae3">Validate clip and note data</text>
+  <text x="573" y="378" class="lato body" fill="#d2dae3">Normalize notes</text>
+  <text x="573" y="410" class="lato body" fill="#d2dae3">Analyze clips and loops</text>
+  <text x="573" y="442" class="lato body" fill="#d2dae3">Format reports and compare results</text>
+
+  <rect x="1026" y="198" width="350" height="300" rx="10" fill="#111215" stroke="#393d3f"/>
+  <text x="1054" y="252" class="lato label" fill="#d2dae3">CODEX · CLI · SCRIPTS</text>
+  <text x="1054" y="302" class="lato name" fill="#fffdfc">LiveUdpBridge</text>
+  <text x="1054" y="346" class="lato body" fill="#d2dae3">Read and write Live state</text>
+  <text x="1054" y="378" class="lato body" fill="#d2dae3">LiveAPI calls</text>
+  <text x="1054" y="410" class="lato body" fill="#d2dae3">Observers and events</text>
+  <text x="1054" y="442" class="lato body" fill="#d2dae3">MIDI and CC</text>
+  <text x="1054" y="474" class="lato body" fill="#d2dae3">Tracks, clips, devices, and chains</text>
+
+  <path d="M414 348H545" stroke="#d2dae3" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M1026 348H895" stroke="#d2dae3" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <path d="M239 498V546H568" fill="none" stroke="#393d3f" stroke-width="1.5"/>
+  <path d="M1201 498V546H872" fill="none" stroke="#393d3f" stroke-width="1.5"/>
+
+  <rect x="568" y="518" width="304" height="78" rx="10" fill="#111215" stroke="#393d3f"/>
+  <text x="720" y="566" text-anchor="middle" class="lato name" fill="#fffdfc">Ableton Live</text>
+</svg>

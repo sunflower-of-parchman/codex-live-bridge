@@ -10,6 +10,10 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "README.md"
+PROTOCOL = REPO_ROOT / "PROTOCOL.md"
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
+PYTHON_CLIENT = REPO_ROOT / "bridge" / "ableton_udp_bridge.py"
+JS_PRODUCER = REPO_ROOT / "bridge" / "m4l" / "live_udp_bridge.js"
 
 
 class PublicDocsTests(unittest.TestCase):
@@ -30,6 +34,26 @@ class PublicDocsTests(unittest.TestCase):
             self.assertIn(command, text)
         self.assertIn("--i-understand-this-mutates-live-set", text)
 
+    def test_readme_presents_the_hybrid_architecture_publicly(self) -> None:
+        text = README.read_text(encoding="utf-8")
+        asset = REPO_ROOT / "docs" / "assets" / "hybrid-architecture.svg"
+
+        self.assertTrue(asset.exists())
+        self.assertIn("docs/assets/hybrid-architecture.svg", text)
+        self.assertIn("Live Extension", text)
+        self.assertIn("Shared inspection core", text)
+        self.assertIn("LiveUdpBridge", text)
+        self.assertIn("full external automation surface", text)
+        self.assertNotIn("private Extensions SDK lab", text)
+
+    def test_readme_explains_live_compatibility(self) -> None:
+        text = README.read_text(encoding="utf-8")
+
+        self.assertIn("release or Beta Ableton Live with Max for Live", text)
+        self.assertIn("Live 12 Suite Beta 12.4.5 or later", text)
+        self.assertIn("https://www.ableton.com/en/live/extensions/", text)
+        self.assertIn("https://www.ableton.com/en/beta/", text)
+
     def test_readme_declares_data_training_and_generation_boundary(self) -> None:
         text = README.read_text(encoding="utf-8")
         for phrase in (
@@ -40,6 +64,19 @@ class PublicDocsTests(unittest.TestCase):
             "User intent stays user-authored",
         ):
             self.assertIn(phrase, text)
+
+    def test_public_docs_define_authenticated_mutation_boundary(self) -> None:
+        readme = README.read_text(encoding="utf-8")
+        protocol = PROTOCOL.read_text(encoding="utf-8")
+        security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+
+        self.assertIn("CODEX_LIVE_BRIDGE_TOKEN", readme)
+        self.assertIn("capability token", readme)
+        self.assertIn("/api/set <auth_token>", protocol)
+        self.assertIn("/api/call <auth_token>", protocol)
+        self.assertIn("Read-only commands remain tokenless", protocol)
+        self.assertIn("authenticated capability token", security)
+        self.assertNotIn("through unauthenticated OSC/UDP", security)
 
     def test_readme_code_paths_exist(self) -> None:
         text = README.read_text(encoding="utf-8")
@@ -85,6 +122,31 @@ class PublicDocsTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('python3 -m unittest discover -s tests -p "test_*.py"', ci_text)
+
+    def test_session_clip_inspection_v1_constants_and_docs_stay_aligned(self) -> None:
+        protocol = PROTOCOL.read_text(encoding="utf-8")
+        changelog = CHANGELOG.read_text(encoding="utf-8")
+        python_source = PYTHON_CLIENT.read_text(encoding="utf-8")
+        js_source = JS_PRODUCER.read_text(encoding="utf-8")
+
+        for source in (python_source, js_source):
+            self.assertRegex(source, r"SCHEMA_VERSION\s*=\s*1")
+            self.assertRegex(source, r'PRODUCER_VERSION\s*=\s*"3\.1\.0"')
+            self.assertRegex(source, r"MAX_NOTES\s*=\s*4096")
+            self.assertRegex(source, r"MAX_DEVICES\s*=\s*256")
+            self.assertRegex(source, r"MAX_FRAGMENTS\s*=\s*1024")
+
+        for text in (protocol, changelog):
+            self.assertIn("schema version `1`", text)
+            self.assertIn("producer version `3.1.0`", text)
+            self.assertIn("unpublished development snapshots", text)
+
+        for limit in (
+            "`MAX_NOTES=4096`",
+            "`MAX_DEVICES=256`",
+            "`MAX_FRAGMENTS=1024`",
+        ):
+            self.assertIn(limit, protocol)
 
 
 if __name__ == "__main__":
