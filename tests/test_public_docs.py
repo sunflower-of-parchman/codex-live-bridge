@@ -46,6 +46,16 @@ class PublicDocsTests(unittest.TestCase):
         self.assertIn("full external automation surface", text)
         self.assertNotIn("private Extensions SDK lab", text)
 
+    def test_public_docs_identify_release_3_1(self) -> None:
+        readme = README.read_text(encoding="utf-8")
+        changelog = CHANGELOG.read_text(encoding="utf-8")
+        protocol = PROTOCOL.read_text(encoding="utf-8")
+
+        self.assertIn("Current release: [3.1.0]", readme)
+        self.assertIn("## [3.1.0] - 2026-06-10", changelog)
+        self.assertIn("Protocol status: v3.1.", protocol)
+        self.assertNotIn("Protocol status: v3.1 draft.", protocol)
+
     def test_readme_explains_live_compatibility(self) -> None:
         text = README.read_text(encoding="utf-8")
 

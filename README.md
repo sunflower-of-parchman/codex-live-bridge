@@ -1,5 +1,7 @@
 # codex-live-bridge
 
+Current release: [3.1.0](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/tag/codex-live-bridge-v3.1.0)
+
 `codex-live-bridge` is a local-first Max for Live OSC/UDP bridge for
 controlling Ableton Live through LiveAPI from local scripts and Codex.
 
