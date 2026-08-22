@@ -6,6 +6,8 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-08-22
+
 ### Security
 
 - Replaced the Max command listener with a dependency-free Node-for-Max

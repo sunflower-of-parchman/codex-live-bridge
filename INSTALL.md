@@ -1,7 +1,7 @@
 # Installation
 
-`codex-live-bridge` tracks the editable Max patch and two JavaScript runtime
-files. Ableton Live loads an exported Max for Live device alongside both files:
+The 3.1.1 release includes LiveUdpBridge.zip with the Max for Live device and
+its two JavaScript runtime files:
 
 ```text
 LiveUdpBridge.amxd
@@ -9,17 +9,14 @@ live_udp_bridge.js
 osc_loopback_receiver.js
 ```
 
-Keep `bridge/m4l/LiveUdpBridge.maxpat` as the source of truth. Generate packaged
-`.amxd` files from a Live-hosted Max MIDI Effect during an explicit release
-pass.
+The repository also includes `bridge/m4l/LiveUdpBridge.maxpat`, the editable
+source for the device. Follow [Package From Source](#package-from-source) if
+you need to build your own copy.
 
 ## Use a Release Device
 
-The current release contains source code only. Start with
-[Package From Source](#package-from-source) below. If a future tagged release
-includes `LiveUdpBridge.zip`:
-
-1. Download and extract `LiveUdpBridge.zip`.
+1. Download and extract
+   [LiveUdpBridge.zip](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/download/codex-live-bridge-v3.1.1/LiveUdpBridge.zip).
 2. Keep `LiveUdpBridge.amxd`, `live_udp_bridge.js`, and
    `osc_loopback_receiver.js` next to each other.
 3. Open Ableton Live and drag `LiveUdpBridge.amxd` onto a MIDI track.

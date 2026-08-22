@@ -55,12 +55,14 @@ class PublicDocsTests(unittest.TestCase):
         self.assertNotIn("Live Extension", image)
         self.assertNotIn("Shared inspection core", image)
 
-    def test_public_docs_identify_release_3_1(self) -> None:
+    def test_public_docs_identify_release_3_1_1(self) -> None:
         readme = README.read_text(encoding="utf-8")
         changelog = CHANGELOG.read_text(encoding="utf-8")
         protocol = PROTOCOL.read_text(encoding="utf-8")
 
-        self.assertIn("Current release: [3.1.0]", readme)
+        self.assertIn("Current release: [3.1.1]", readme)
+        self.assertIn("releases/tag/codex-live-bridge-v3.1.1", readme)
+        self.assertIn("## [3.1.1] - 2026-08-22", changelog)
         self.assertIn("## [3.1.0] - 2026-06-10", changelog)
         self.assertIn("Protocol status: v3.1.", protocol)
         self.assertNotIn("Protocol status: v3.1 draft.", protocol)
@@ -129,14 +131,21 @@ class PublicDocsTests(unittest.TestCase):
                 missing.append(candidate)
         self.assertEqual(missing, [])
 
-    def test_readme_links_source_device_installation(self) -> None:
+    def test_readme_links_packaged_device_and_source_installation(self) -> None:
         text = README.read_text(encoding="utf-8")
         install_text = (REPO_ROOT / "INSTALL.md").read_text(encoding="utf-8")
+        download_url = (
+            "https://github.com/sunflower-of-parchman/codex-live-bridge/"
+            "releases/download/codex-live-bridge-v3.1.1/LiveUdpBridge.zip"
+        )
 
         self.assertIn("INSTALL.md", text)
-        self.assertIn("current 3.1.0 release contains source code only", text)
-        self.assertRegex(text, r"does not include a\s+LiveUdpBridge\.zip download")
+        self.assertIn("3.1.1 release includes the device", text)
+        self.assertIn(download_url, text)
+        self.assertIn(download_url, install_text)
+        self.assertIn("build the device from", text)
         self.assertIn("LiveUdpBridge.zip", text)
+        self.assertNotIn("source code only", text)
         self.assertRegex(
             text,
             r"LiveUdpBridge\.amxd\s+live_udp_bridge\.js\s+osc_loopback_receiver\.js",
@@ -166,7 +175,12 @@ class PublicDocsTests(unittest.TestCase):
     def test_installation_starts_with_read_only_access(self) -> None:
         text = (REPO_ROOT / "INSTALL.md").read_text(encoding="utf-8")
 
-        self.assertIn("current release contains source code only", text)
+        self.assertIn("3.1.1 release includes LiveUdpBridge.zip", text)
+        self.assertLess(
+            text.index("## Use a Release Device"),
+            text.index("## Package From Source"),
+        )
+        self.assertNotIn("source code only", text)
         self.assertRegex(
             text,
             r"LiveUdpBridge\.amxd\s+live_udp_bridge\.js\s+osc_loopback_receiver\.js",

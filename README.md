@@ -1,6 +1,6 @@
 # codex-live-bridge
 
-Current release: [3.1.0](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/tag/codex-live-bridge-v3.1.0)
+Current release: [3.1.1](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/tag/codex-live-bridge-v3.1.1)
 
 `codex-live-bridge` is a Max for Live OSC/UDP bridge for Ableton Live. It lets
 codex and local scripts inspect a Live set through LiveAPI. A local capability
@@ -61,7 +61,11 @@ node --check bridge/m4l/live_udp_bridge.js
 node --check bridge/m4l/osc_loopback_receiver.js
 ```
 
-2. Package the Max for Live device from source:
+2. Download and extract the packaged Max for Live device:
+
+[Download LiveUdpBridge.zip](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/download/codex-live-bridge-v3.1.1/LiveUdpBridge.zip)
+
+The 3.1.1 release includes the device and both JavaScript runtime files:
 
 ```text
 LiveUdpBridge.amxd
@@ -69,20 +73,13 @@ live_udp_bridge.js
 osc_loopback_receiver.js
 ```
 
-The current 3.1.0 release contains source code only. It does not include a
-LiveUdpBridge.zip download or a packaged device. Follow `INSTALL.md` to create
-`LiveUdpBridge.amxd` from `bridge/m4l/LiveUdpBridge.maxpat` in a Live-hosted
-Max MIDI Effect.
+You can also build the device from `bridge/m4l/LiveUdpBridge.maxpat` in a
+Live-hosted Max MIDI Effect. Follow `INSTALL.md` for the source-build steps.
 
-3. Keep both JavaScript runtime files next to the exported device, then load
-the device onto a MIDI track. Max resolves the LiveAPI router through
+3. Keep both JavaScript runtime files next to the device, then load it onto a
+MIDI track. Max resolves the LiveAPI router through
 `[js live_udp_bridge.js]`. Node for Max runs the loopback-only command
-receiver:
-
-```text
-bridge/m4l/live_udp_bridge.js
-bridge/m4l/osc_loopback_receiver.js
-```
+receiver.
 
 4. Verify the bridge with a read-only status command:
 
