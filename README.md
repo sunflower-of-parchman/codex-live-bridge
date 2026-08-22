@@ -56,6 +56,7 @@ cd codex-live-bridge
 python3 -m unittest discover -s bridge -p "test_*.py"
 python3 -m unittest discover -s tests -p "test_*.py"
 node --check bridge/m4l/live_udp_bridge.js
+node --check bridge/m4l/osc_loopback_receiver.js
 ```
 
 2. Export or obtain the loadable Max for Live device:
@@ -69,11 +70,13 @@ Follow `INSTALL.md` to package `LiveUdpBridge.amxd` from the tracked
 packaged device and adjacent JavaScript router as a `LiveUdpBridge.zip`
 download.
 
-3. Keep the JavaScript router next to the exported device so Max resolves `[js
-live_udp_bridge.js]`:
+3. Keep both JavaScript runtime files next to the exported device. Max resolves
+the LiveAPI router through `[js live_udp_bridge.js]`. Node for Max runs the
+loopback-only command receiver:
 
 ```text
 bridge/m4l/live_udp_bridge.js
+bridge/m4l/osc_loopback_receiver.js
 ```
 
 4. Configure the local write token:
@@ -109,6 +112,8 @@ devices are release artifacts saved from a Live-hosted Max MIDI Effect.
 
 - `bridge/m4l/LiveUdpBridge.maxpat`: editable Max for Live patch source
 - `bridge/m4l/live_udp_bridge.js`: LiveAPI command router loaded by the patch
+- `bridge/m4l/osc_loopback_receiver.js`: dependency-free Node-for-Max receiver
+  bound explicitly to `127.0.0.1:9000`
 - `bridge/ableton_udp_bridge.py`: Python OSC client/CLI with ACK and listen modes
 - `bridge/full_surface_smoke_test.py`: opt-in mutating smoke test for disposable sets
 - `bridge/commands.md`: command cheat sheet
@@ -255,7 +260,7 @@ meter. Use it only when those changes are acceptable.
 If you modify `bridge/m4l/live_udp_bridge.js` or
 `bridge/m4l/LiveUdpBridge.maxpat`:
 
-1. Keep the JS file next to the patch, or update the Max `[js ...]` object.
+1. Keep both JS files next to the patch, or update the Max runtime objects.
 2. Reload the device in Ableton Live.
 3. Save packaged `.amxd` artifacts from a Live-hosted Max MIDI Effect only
    during an explicit release pass.
@@ -266,6 +271,7 @@ Local validation:
 python3 -m unittest discover -s bridge -p "test_*.py"
 python3 -m unittest discover -s tests -p "test_*.py"
 node --check bridge/m4l/live_udp_bridge.js
+node --check bridge/m4l/osc_loopback_receiver.js
 python3 -m json.tool bridge/m4l/LiveUdpBridge.maxpat >/dev/null
 bash .github/scripts/audit_public_hygiene.sh
 ```
@@ -292,9 +298,10 @@ learn a user profile or improve itself from behavior over time.
 ## Security Boundary
 
 The OSC bridge uses a local capability token for writes and persistent control.
-Read-only inspection remains tokenless. UDP does not encrypt the token or Live
-data, so keep traffic on loopback `127.0.0.1` and keep ports `9000` and `9001`
-off untrusted networks. Treat generic `/api/set` and `/api/call` commands as
+Read-only inspection remains tokenless. The shipped command receiver binds
+explicitly to `127.0.0.1:9000`, and the Python client rejects non-loopback
+targets. UDP does not encrypt the token or Live data. Keep port `9001` off
+untrusted networks. Treat generic `/api/set` and `/api/call` commands as
 powerful local LiveAPI access. Only one ACK-listening client can bind the
 default `9001` port at a time.
 

@@ -2,14 +2,15 @@
 """
 External controller for the Ableton Live UDP bridge.
 
-This script sends OSC (Open Sound Control) messages to a Max for Live device
-that listens on UDP port 9000 via `udpreceive 9000`. OSC encoding is
+This script sends OSC (Open Sound Control) messages to a Max for Live device.
+Its Node-for-Max receiver listens on loopback UDP port 9000. OSC encoding is
 implemented using only the Python standard library.
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import math
 import os
@@ -76,6 +77,12 @@ SESSION_CLIP_INSPECTION_MAX_CORRELATED_ACKS = (
 )
 ACK_DRAIN_MAX_PACKETS = 32
 SESSION_CLIP_INSPECTION_MAX_PACKETS_PER_SELECT = 16
+ACK_PACKET_BUDGET_BYTES = 65_507
+ACK_WAIT_MAX_PACKETS = 256
+ACK_WAIT_MAX_RETAINED_ACKS = 64
+ACK_WAIT_MAX_RETAINED_BYTES = 64 * 1024
+ACK_MAX_PACKETS_PER_SELECT = 16
+ACK_MAX_DIAGNOSTIC_CHARS = 256
 
 OscArg = Union[int, float, str]
 
@@ -172,6 +179,10 @@ class AckEvent:
     request_id: str | None
     payload: dict[str, object]
     is_error: bool = False
+
+
+class BridgeAcknowledgementError(RuntimeError):
+    """Raised when a requested bridge acknowledgement cannot be verified."""
 
 
 class SessionClipInspectionAssemblyError(ValueError):
@@ -1243,6 +1254,23 @@ def normalize_auth_token(value: str | None) -> str | None:
     return token
 
 
+def loopback_host(value: str) -> str:
+    host = str(value).strip()
+    if host.lower() == "localhost":
+        return DEFAULT_HOST
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "host must be an IPv4 loopback address or localhost"
+        ) from exc
+    if address.version != 4 or not address.is_loopback:
+        raise argparse.ArgumentTypeError(
+            "host must be an IPv4 loopback address or localhost"
+        )
+    return host
+
+
 def authenticated_args(
     auth_token: str | None,
     args: Sequence[OscArg] = (),
@@ -1260,7 +1288,12 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
     parser = argparse.ArgumentParser(
         description="Send OSC UDP commands to a Max for Live Ableton bridge."
     )
-    parser.add_argument("--host", default=DEFAULT_HOST, help="UDP host")
+    parser.add_argument(
+        "--host",
+        type=loopback_host,
+        default=DEFAULT_HOST,
+        help="Loopback UDP host (default: 127.0.0.1)",
+    )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="UDP port")
     parser.add_argument(
         "--auth-token",
@@ -2191,7 +2224,9 @@ def parse_ack_event(address: str, args: Sequence[OscArg]) -> AckEvent:
     payload: dict[str, object] = {"args": list(args)}
     is_error = event == "error"
 
-    if event == "midi_cc" and len(args) >= 4:
+    if event == "pong":
+        request_id = _optional_request_id(args, 1)
+    elif event == "midi_cc" and len(args) >= 4:
         request_id = _optional_request_id(args, 4)
         payload = {"controller": args[1], "value": args[2], "channel": args[3]}
     elif event == "cc64" and len(args) >= 3:
@@ -2874,10 +2909,35 @@ def _finite_wait_seconds(value: float, label: str) -> float:
     return parsed
 
 
+def _bounded_packet_diagnostic(exc: Exception, packet: bytes) -> str:
+    sample = repr(packet[:64])
+    suffix = "" if len(packet) <= 64 else f"... ({len(packet)} bytes total)"
+    diagnostic = f"{exc}: {sample}{suffix}"
+    if len(diagnostic) <= ACK_MAX_DIAGNOSTIC_CHARS:
+        return diagnostic
+    return diagnostic[: ACK_MAX_DIAGNOSTIC_CHARS - 3] + "..."
+
+
+def _sender_matches(
+    sender: object,
+    expected_sender_host: str | None,
+) -> bool:
+    if expected_sender_host is None:
+        return True
+    return (
+        isinstance(sender, tuple)
+        and len(sender) >= 1
+        and sender[0] == expected_sender_host
+    )
+
+
 def wait_for_acks(
     sock: socket.socket,
     timeout_s: float,
     quiet_window_s: float = 0.05,
+    expected_sender_host: str | None = None,
+    expected_request_id: str | None = None,
+    expected_event: str | None = None,
 ) -> List[Tuple[str, List[OscArg]]]:
     timeout = _finite_wait_seconds(timeout_s, "timeout_s")
     quiet_window = _finite_wait_seconds(quiet_window_s, "quiet_window_s")
@@ -2886,6 +2946,9 @@ def wait_for_acks(
 
     deadline = time.monotonic() + timeout
     received: List[Tuple[str, List[OscArg]]] = []
+    packets_processed = 0
+    retained_bytes = 0
+    received_expected_event = False
     quiet_window = max(0.0, quiet_window)
 
     while True:
@@ -2893,10 +2956,14 @@ def wait_for_acks(
         if remaining <= 0:
             break
 
-        # Before first packet, wait up to the full timeout. Once we have at
-        # least one ACK, only wait a short quiet window for follow-on packets.
+        # Wait up to the full timeout for the expected command response; use
+        # the shorter quiet window only after its ACK or matching error arrives.
         wait_timeout = remaining
-        if received and quiet_window > 0.0:
+        if (
+            received
+            and quiet_window > 0.0
+            and (expected_event is None or received_expected_event)
+        ):
             wait_timeout = min(wait_timeout, quiet_window)
 
         readable, _, _ = select.select([sock], [], [], wait_timeout)
@@ -2905,19 +2972,71 @@ def wait_for_acks(
                 break
             break
 
-        while True:
+        packets_in_batch = 0
+        while (
+            packets_in_batch < ACK_MAX_PACKETS_PER_SELECT
+            and packets_processed < ACK_WAIT_MAX_PACKETS
+        ):
+            if time.monotonic() >= deadline:
+                return received
             try:
-                packet, _addr = sock.recvfrom(65535)
+                packet, sender = sock.recvfrom(ACK_PACKET_BUDGET_BYTES + 1)
             except BlockingIOError:
                 break
             except OSError:
                 return received
+            packets_in_batch += 1
+            packets_processed += 1
+            if time.monotonic() >= deadline:
+                return received
+            if not _sender_matches(sender, expected_sender_host):
+                continue
 
-            try:
-                address, args = decode_osc_message(packet)
-                received.append((address, args))
-            except Exception as exc:  # noqa: BLE001 - best-effort debug output
-                received.append(("<unparsed>", [f"{exc}: {packet!r}"]))
+            retained_item: Tuple[str, List[OscArg]]
+            if len(packet) > ACK_PACKET_BUDGET_BYTES:
+                retained_item = (
+                    "<unparsed>",
+                    [
+                        "OSC packet exceeds "
+                        f"{ACK_PACKET_BUDGET_BYTES}-byte budget: "
+                        f"{len(packet)} bytes"
+                    ],
+                )
+            else:
+                try:
+                    retained_item = decode_osc_message(packet)
+                except Exception as exc:  # noqa: BLE001 - best-effort debug output
+                    retained_item = (
+                        "<unparsed>",
+                        [_bounded_packet_diagnostic(exc, packet)],
+                    )
+
+            event: AckEvent | None = None
+            if expected_request_id is not None or expected_event is not None:
+                event = parse_ack_event(*retained_item)
+                if (
+                    expected_request_id is not None
+                    and event.request_id != expected_request_id
+                ):
+                    continue
+
+            if (
+                len(received) < ACK_WAIT_MAX_RETAINED_ACKS
+                and retained_bytes + len(packet) <= ACK_WAIT_MAX_RETAINED_BYTES
+            ):
+                received.append(retained_item)
+                retained_bytes += len(packet)
+                if (
+                    expected_event is not None
+                    and event is not None
+                    and event.address == "/ack"
+                    and event.request_id == expected_request_id
+                    and (event.is_error or event.event == expected_event)
+                ):
+                    received_expected_event = True
+
+        if packets_processed >= ACK_WAIT_MAX_PACKETS:
+            break
 
     return received
 
@@ -2952,7 +3071,9 @@ def wait_for_session_clip_inspection_acks(
             if time.monotonic() >= deadline:
                 return received
             try:
-                packet, _addr = sock.recvfrom(65535)
+                packet, _addr = sock.recvfrom(
+                    SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES + 1
+                )
             except BlockingIOError:
                 break
             except OSError:
@@ -2979,7 +3100,12 @@ def wait_for_session_clip_inspection_acks(
                 address, args = decode_osc_message(packet)
             except Exception as exc:  # noqa: BLE001 - best-effort debug output
                 if unrelated_ack_count < SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS:
-                    received.append(("<unparsed>", [f"{exc}: {packet!r}"]))
+                    received.append(
+                        (
+                            "<unparsed>",
+                            [_bounded_packet_diagnostic(exc, packet)],
+                        )
+                    )
                     unrelated_ack_count += 1
                 continue
 
@@ -3036,7 +3162,9 @@ def _drain_acks_nonblocking(sock: socket.socket) -> List[Tuple[str, List[OscArg]
             address, args = decode_osc_message(packet)
             drained.append((address, args))
         except Exception as exc:  # noqa: BLE001
-            drained.append(("<unparsed>", [f"{exc}: {packet!r}"]))
+            drained.append(
+                ("<unparsed>", [_bounded_packet_diagnostic(exc, packet)])
+            )
     return drained
 
 
@@ -3045,22 +3173,67 @@ def _collect_and_print_acks(
     timeout_s: float,
     durations_ms: List[float],
     ack_counts: List[int],
+    *,
+    expected_event: str | None = None,
+    expected_request_id: str | None = None,
+    expected_sender_host: str | None = None,
+    command_address: str | None = None,
 ) -> None:
     t0 = time.perf_counter()
-    acks = wait_for_acks(ack_sock, timeout_s)
+    acks = wait_for_acks(
+        ack_sock,
+        timeout_s,
+        expected_sender_host=expected_sender_host,
+        expected_request_id=expected_request_id,
+        expected_event=expected_event,
+    )
     durations_ms.append((time.perf_counter() - t0) * 1000.0)
     ack_counts.append(len(acks))
 
     if not acks:
-        print(
-            "ack:  (none received; bridge may not be loaded yet)",
-            file=sys.stderr,
+        target = command_address or "the command"
+        correlation = (
+            "" if expected_request_id is None else f" (request {expected_request_id})"
         )
-        return
+        raise BridgeAcknowledgementError(
+            f"no acknowledgement received for {target}{correlation} "
+            f"within {timeout_s:.2f}s; bridge may not be loaded"
+        )
 
+    matching_ack = False
+    matching_error: AckEvent | None = None
     for address, args in acks:
         for line in summarize_ack(address, args):
             print(line)
+        if address != "/ack":
+            continue
+        event = parse_ack_event(address, args)
+        if event.request_id != expected_request_id:
+            continue
+        if event.is_error:
+            matching_error = event
+        elif expected_event is None or event.event == expected_event:
+            matching_ack = True
+
+    target = command_address or "the command"
+    correlation = (
+        "" if expected_request_id is None else f" (request {expected_request_id})"
+    )
+    if matching_error is not None:
+        code = matching_error.payload.get("code", "unknown_error")
+        raise BridgeAcknowledgementError(
+            f"bridge rejected {target}{correlation}: {code}"
+        )
+    if not matching_ack:
+        event_description = (
+            "an acknowledgement"
+            if expected_event is None
+            else f"the {expected_event} acknowledgement"
+        )
+        raise BridgeAcknowledgementError(
+            f"did not receive {event_description} for {target}{correlation} "
+            f"within {timeout_s:.2f}s"
+        )
 
 
 def _collect_and_print_session_clip_inspection_acks(
@@ -3080,15 +3253,77 @@ def _collect_and_print_session_clip_inspection_acks(
     ack_counts.append(len(acks))
 
     if not acks:
-        print(
-            "ack:  (none received; bridge may not be loaded yet)",
-            file=sys.stderr,
+        raise BridgeAcknowledgementError(
+            "no acknowledgement received for /api/session_clip_inspect "
+            f"(request {request_id}) within {timeout_s:.2f}s; "
+            "bridge may not be loaded"
         )
-        return
 
+    assembler = SessionClipInspectionAssembler()
+    inspection_completed = False
     for address, args in acks:
         for line in summarize_ack(address, args):
             print(line)
+        if address != "/ack":
+            continue
+        event = parse_ack_event(address, args)
+        if event.request_id != request_id:
+            continue
+        if event.is_error:
+            code = event.payload.get("code", "unknown_error")
+            raise BridgeAcknowledgementError(
+                "bridge rejected /api/session_clip_inspect "
+                f"(request {request_id}): {code}"
+            )
+        if event.event == "api_session_clip_inspect":
+            inspection_completed = assembler.add_event(event) is not None
+
+    if not inspection_completed:
+        raise BridgeAcknowledgementError(
+            "did not receive a complete /api/session_clip_inspect "
+            f"acknowledgement (request {request_id}) within {timeout_s:.2f}s"
+        )
+
+
+_ACK_REQUEST_ARGUMENT_COUNTS = {
+    "/api/ping": 0,
+    "/api/get": 2,
+    "/api/set": 4,
+    "/api/call": 4,
+    "/api/children": 2,
+    "/api/describe": 1,
+    "/api_observe": 4,
+    "/api_unobserve": 2,
+    "/api_observers": 0,
+    "/api_clear_observers": 1,
+    "/api/session_context": 0,
+    "/api/theory_status": 0,
+    "/api/tuning_status": 0,
+    "/api/device_list": 1,
+    "/api/device_parameters": 1,
+    "/api/parameter_set": 3,
+    "/api/mixer_status": 1,
+    "/api/insert_device": 4,
+    "/api/insert_chain": 3,
+    "/api/drum_chain_in_note": 3,
+}
+
+
+def _command_ack_expectation(command: OscCommand) -> tuple[str, str | None]:
+    if command.address in {"/ping", "/api/ping"}:
+        expected_event = "pong"
+    elif command.address == "/rename_track":
+        expected_event = "track_renamed"
+    else:
+        expected_event = command.address.lstrip("/").replace("/", "_")
+
+    request_argument_index = _ACK_REQUEST_ARGUMENT_COUNTS.get(command.address)
+    if request_argument_index is None or len(command.args) <= request_argument_index:
+        return expected_event, None
+    request_id = command.args[request_argument_index]
+    if isinstance(request_id, str) and request_id:
+        return expected_event, request_id
+    return expected_event, None
 
 
 def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetrics:
@@ -3107,6 +3342,11 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
         )
 
     ack_sock = open_ack_socket(cfg)
+    if cfg.expect_ack and ack_sock is None:
+        raise BridgeAcknowledgementError(
+            "acknowledgements were requested, but the ack socket could not "
+            f"bind on {cfg.host}:{cfg.ack_port}; no commands were sent"
+        )
     send_durations_ms: List[float] = []
     ack_wait_durations_ms: List[float] = []
     ack_counts: List[int] = []
@@ -3114,63 +3354,77 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
 
     t_all = time.perf_counter()
 
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        print(f"Target: udp://{cfg.host}:{cfg.port}")
-        if ack_sock is not None:
-            print(f"Ack:    udp://{cfg.host}:{cfg.ack_port} (timeout {cfg.ack_timeout_s:.2f}s)")
-
-        for idx, cmd in enumerate(commands):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            print(f"Target: udp://{cfg.host}:{cfg.port}")
             if ack_sock is not None:
-                _drain_acks_nonblocking(ack_sock)
+                print(
+                    f"Ack:    udp://{cfg.host}:{cfg.ack_port} "
+                    f"(timeout {cfg.ack_timeout_s:.2f}s)"
+                )
 
-            payload = encode_osc_message(cmd.address, cmd.args)
-            t_send = time.perf_counter()
-            sock.sendto(payload, (cfg.host, cfg.port))
-            send_durations_ms.append((time.perf_counter() - t_send) * 1000.0)
-            print(f"sent: {describe_command(cmd)}")
+            for idx, cmd in enumerate(commands):
+                if ack_sock is not None:
+                    _drain_acks_nonblocking(ack_sock)
 
-            if ack_sock is not None:
-                if cmd.address == "/api/session_clip_inspect":
-                    request_id = str(cmd.args[3])
-                    _collect_and_print_session_clip_inspection_acks(
-                        ack_sock,
-                        cfg.ack_timeout_s,
-                        request_id,
-                        ack_wait_durations_ms,
-                        ack_counts,
-                    )
-                elif cfg.ack_mode == "per_command":
-                    _collect_and_print_acks(
-                        ack_sock,
-                        cfg.ack_timeout_s,
-                        ack_wait_durations_ms,
-                        ack_counts,
-                    )
-                else:
-                    flush_pending += 1
-                    should_flush = False
-                    if cfg.ack_mode == "flush_end":
-                        should_flush = idx == len(commands) - 1
-                    elif cfg.ack_mode == "flush_interval":
-                        should_flush = (
-                            flush_pending >= max(1, int(cfg.ack_flush_interval))
-                            or idx == len(commands) - 1
+                payload = encode_osc_message(cmd.address, cmd.args)
+                t_send = time.perf_counter()
+                sock.sendto(payload, (cfg.host, cfg.port))
+                send_durations_ms.append((time.perf_counter() - t_send) * 1000.0)
+                print(f"sent: {describe_command(cmd)}")
+
+                if ack_sock is not None:
+                    if cmd.address == "/api/session_clip_inspect":
+                        request_id = str(cmd.args[3])
+                        _collect_and_print_session_clip_inspection_acks(
+                            ack_sock,
+                            cfg.ack_timeout_s,
+                            request_id,
+                            ack_wait_durations_ms,
+                            ack_counts,
                         )
-
-                    if should_flush:
+                    elif cfg.ack_mode == "per_command":
+                        expected_event, request_id = _command_ack_expectation(cmd)
                         _collect_and_print_acks(
                             ack_sock,
                             cfg.ack_timeout_s,
                             ack_wait_durations_ms,
                             ack_counts,
+                            expected_event=expected_event,
+                            expected_request_id=request_id,
+                            expected_sender_host=cfg.host,
+                            command_address=cmd.address,
                         )
-                        flush_pending = 0
+                    else:
+                        flush_pending += 1
+                        should_flush = False
+                        if cfg.ack_mode == "flush_end":
+                            should_flush = idx == len(commands) - 1
+                        elif cfg.ack_mode == "flush_interval":
+                            should_flush = (
+                                flush_pending >= max(1, int(cfg.ack_flush_interval))
+                                or idx == len(commands) - 1
+                            )
 
-            if delay_s > 0 and idx < len(commands) - 1:
-                time.sleep(delay_s)
+                        if should_flush:
+                            expected_event, request_id = _command_ack_expectation(cmd)
+                            _collect_and_print_acks(
+                                ack_sock,
+                                cfg.ack_timeout_s,
+                                ack_wait_durations_ms,
+                                ack_counts,
+                                expected_event=expected_event,
+                                expected_request_id=request_id,
+                                expected_sender_host=cfg.host,
+                                command_address=cmd.address,
+                            )
+                            flush_pending = 0
 
-    if ack_sock is not None:
-        ack_sock.close()
+                if delay_s > 0 and idx < len(commands) - 1:
+                    time.sleep(delay_s)
+    finally:
+        if ack_sock is not None:
+            ack_sock.close()
 
     metrics = SendMetrics(
         command_count=len(commands),
@@ -3231,18 +3485,35 @@ def listen_for_events(cfg: BridgeConfig) -> int:
             if not readable:
                 continue
 
-            while True:
+            packets_in_batch = 0
+            while packets_in_batch < ACK_MAX_PACKETS_PER_SELECT:
+                if deadline is not None and time.monotonic() >= deadline:
+                    return event_count
                 try:
-                    packet, _addr = ack_sock.recvfrom(65535)
+                    packet, _addr = ack_sock.recvfrom(
+                        ACK_PACKET_BUDGET_BYTES + 1
+                    )
                 except BlockingIOError:
                     break
                 except OSError:
                     return event_count
+                packets_in_batch += 1
+                if deadline is not None and time.monotonic() >= deadline:
+                    return event_count
 
-                try:
-                    address, args = decode_osc_message(packet)
-                except Exception as exc:  # noqa: BLE001
-                    address, args = "<unparsed>", [f"{exc}: {packet!r}"]
+                if len(packet) > ACK_PACKET_BUDGET_BYTES:
+                    address, args = "<unparsed>", [
+                        "OSC packet exceeds "
+                        f"{ACK_PACKET_BUDGET_BYTES}-byte budget: "
+                        f"{len(packet)} bytes"
+                    ]
+                else:
+                    try:
+                        address, args = decode_osc_message(packet)
+                    except Exception as exc:  # noqa: BLE001
+                        address, args = "<unparsed>", [
+                            _bounded_packet_diagnostic(exc, packet)
+                        ]
                 for line in summarize_ack(address, args):
                     print(line)
                 event_count += 1

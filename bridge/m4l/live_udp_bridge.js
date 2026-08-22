@@ -2,7 +2,7 @@
 // This file is intended to be loaded via: [js live_udp_bridge.js]
 
 autowatch = 1;
-inlets = 1;
+inlets = 2; // 0 -> routed commands, 1 -> local capability-token setup
 outlets = 3; // 0 -> UDP ack/debug, 1 -> console/debug, 2 -> MIDI out
 
 var song = null;
@@ -17,6 +17,10 @@ var MIN_AUTH_TOKEN_BYTES = 16;
 var MAX_AUTH_TOKEN_BYTES = 256;
 var MAX_TRACKS_PER_COMMAND = 32;
 var MAX_TRACK_TARGET = 256;
+var API_READ_MAX_COLLECTION_ITEMS = 256;
+var API_READ_MAX_TOTAL_ITEMS = 512;
+var API_READ_MAX_RESPONSE_BYTES = 49152;
+var API_READ_MAX_ELAPSED_MS = 1000;
 var ERROR_CORRELATION_MARKER = "request_correlation";
 var SESSION_CLIP_INSPECTION_SCHEMA = "codex-live-bridge.session-midi-clip-inspection";
 var SESSION_CLIP_INSPECTION_SCHEMA_VERSION = 1;
@@ -25,7 +29,12 @@ var SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES = 4096;
 var SESSION_CLIP_INSPECTION_MAX_NOTES = 4096;
 var SESSION_CLIP_INSPECTION_MAX_DEVICES = 256;
 var SESSION_CLIP_INSPECTION_MAX_FRAGMENTS = 1024;
+var SESSION_CLIP_INSPECTION_NOTE_BATCH_SIZE = 256;
+var SESSION_CLIP_INSPECTION_MAX_ID_CALL_BYTES = 262144;
+var SESSION_CLIP_INSPECTION_MAX_NOTE_CALL_BYTES = 262144;
+var LEGACY_CLIP_INSPECTION_MAX_RESPONSE_BYTES = 49152;
 var sessionClipInspectionCounter = 0;
+var sessionClipInspectionDictCounter = 0;
 
 function debug(msg) {
   var text = "[live-bridge] " + msg;
@@ -85,6 +94,10 @@ function isValidAuthToken(token) {
 }
 
 function set_auth_token(token) {
+  if (typeof inlet === "undefined" || Number(inlet) !== 1) {
+    debug("Rejected capability-token configuration outside the local setup inlet.");
+    return;
+  }
   var text = token === undefined || token === null ? "" : String(token).trim();
   if (!isValidAuthToken(text)) {
     bridgeAuthToken = "";
@@ -125,6 +138,118 @@ function boundedInteger(value, minimum, maximum) {
     return null;
   }
   return parsed;
+}
+
+function newApiReadBudget(contextName, requestId) {
+  return {
+    context: String(contextName || "api_read"),
+    request_id: requestId,
+    started_ms: nowMs(),
+    items: 0,
+    failed: false,
+  };
+}
+
+function failApiReadLimit(budget, resourceName, actual, limit) {
+  if (!budget || budget.failed) {
+    return false;
+  }
+  budget.failed = true;
+  ackWithRequest(
+    "error",
+    [
+      "api_read_limit_exceeded",
+      budget.context,
+      String(resourceName || "items"),
+      Number(actual),
+      Number(limit),
+    ],
+    budget.request_id
+  );
+  return false;
+}
+
+function consumeApiReadItems(budget, count, resourceName) {
+  if (!budget || budget.failed) {
+    return false;
+  }
+  var itemCount = Number(count);
+  if (!(isFinite(itemCount) && itemCount >= 0 && Math.floor(itemCount) === itemCount)) {
+    return failApiReadLimit(budget, resourceName, itemCount, API_READ_MAX_COLLECTION_ITEMS);
+  }
+  if (itemCount > API_READ_MAX_COLLECTION_ITEMS) {
+    return failApiReadLimit(
+      budget,
+      resourceName,
+      itemCount,
+      API_READ_MAX_COLLECTION_ITEMS
+    );
+  }
+  if (budget.items + itemCount > API_READ_MAX_TOTAL_ITEMS) {
+    return failApiReadLimit(
+      budget,
+      "total_items",
+      budget.items + itemCount,
+      API_READ_MAX_TOTAL_ITEMS
+    );
+  }
+  budget.items += itemCount;
+  return checkApiReadDeadline(budget);
+}
+
+function checkApiReadDeadline(budget) {
+  if (!budget || budget.failed) {
+    return false;
+  }
+  var elapsedMs = nowMs() - budget.started_ms;
+  if (elapsedMs > API_READ_MAX_ELAPSED_MS) {
+    return failApiReadLimit(
+      budget,
+      "elapsed_ms",
+      elapsedMs,
+      API_READ_MAX_ELAPSED_MS
+    );
+  }
+  return true;
+}
+
+function ackBoundedApiReadSerializedJson(eventName, leadingArgs, payloadJson, budget) {
+  if (!budget || budget.failed || !checkApiReadDeadline(budget)) {
+    return false;
+  }
+  var payloadBytes = utf8ByteLength(payloadJson);
+  if (payloadBytes > API_READ_MAX_RESPONSE_BYTES) {
+    budget.failed = true;
+    ackWithRequest(
+      "error",
+      [
+        "api_read_response_too_large",
+        budget.context,
+        payloadBytes,
+        API_READ_MAX_RESPONSE_BYTES,
+      ],
+      budget.request_id
+    );
+    return false;
+  }
+  ackWithRequest(
+    eventName,
+    (leadingArgs || []).concat([payloadJson]),
+    budget.request_id
+  );
+  return true;
+}
+
+function ackBoundedApiReadJson(eventName, leadingArgs, payload, budget) {
+  if (!budget || budget.failed || !checkApiReadDeadline(budget)) {
+    return false;
+  }
+  return ackBoundedApiReadSerializedJson(
+    eventName,
+    leadingArgs,
+    safeJsonStringify(payload, budget.context + "_payload"),
+    budget
+  );
 }
 
 function isValidObserverId(observerId) {
@@ -465,7 +590,7 @@ function describeParameterPath(parameterPath) {
   return describeParameterApi(tryResolveApi(parameterPath), parameterPath);
 }
 
-function describeDeviceApi(deviceApi, requestedPath, includeParameters) {
+function describeDeviceApi(deviceApi, requestedPath, includeParameters, budget) {
   if (!deviceApi || !(Number(deviceApi.id) > 0)) {
     return { path: String(requestedPath || ""), id: 0, error: "path_not_found" };
   }
@@ -492,15 +617,21 @@ function describeDeviceApi(deviceApi, requestedPath, includeParameters) {
   }
   payload.parameter_count = parameterCount;
   if (includeParameters) {
+    if (!consumeApiReadItems(budget, parameterCount, "parameters")) {
+      return null;
+    }
     payload.parameters = [];
     for (var i = 0; i < parameterCount; i += 1) {
+      if (!checkApiReadDeadline(budget)) {
+        return null;
+      }
       payload.parameters.push(describeParameterPath(payload.path + " parameters " + i));
     }
   }
   return payload;
 }
 
-function describeDevicesForTrackPath(trackPath) {
+function describeDevicesForTrackPath(trackPath, budget) {
   var trackApi = tryResolveApi(trackPath);
   if (!trackApi) {
     return { track_path: String(trackPath || ""), error: "track_not_found", devices: [] };
@@ -521,9 +652,22 @@ function describeDevicesForTrackPath(trackPath) {
   } catch (errCount) {
     deviceCount = 0;
   }
+  if (!consumeApiReadItems(budget, deviceCount, "devices")) {
+    return null;
+  }
   var devices = [];
   for (var i = 0; i < deviceCount; i += 1) {
-    devices.push(describeDeviceApi(tryResolveApi(track.path + " devices " + i), track.path + " devices " + i, false));
+    if (!checkApiReadDeadline(budget)) {
+      return null;
+    }
+    devices.push(
+      describeDeviceApi(
+        tryResolveApi(track.path + " devices " + i),
+        track.path + " devices " + i,
+        false,
+        budget
+      )
+    );
   }
   return {
     track: track,
@@ -733,6 +877,7 @@ function api_ping(requestId) {
 function api_get(path, property, requestId) {
   if (!ensureInitialized(requestId)) return;
   var contextName = "api_get";
+  var budget = newApiReadBudget(contextName, requestId);
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
 
@@ -757,7 +902,12 @@ function api_get(path, property, requestId) {
   }
 
   var valueJson = liveApiValueToJson(rawValue, contextName + "_" + propName);
-  ackWithRequest("api_get", [api.path, propName, valueJson], requestId);
+  ackBoundedApiReadSerializedJson(
+    "api_get",
+    [api.path, propName],
+    valueJson,
+    budget
+  );
 }
 
 function api_set(authToken, path, property, valueJson, requestId) {
@@ -886,6 +1036,7 @@ function api_call(authToken, path, method, argsJson, requestId) {
 function api_children(path, childName, requestId) {
   if (!ensureInitialized(requestId)) return;
   var contextName = "api_children";
+  var budget = newApiReadBudget(contextName, requestId);
   var api = resolveApiOrError(path, contextName, requestId);
   if (!api) return;
 
@@ -903,10 +1054,16 @@ function api_children(path, childName, requestId) {
     ackWithRequest("error", ["api_children_count_failed", api.path, childProp], requestId);
     return;
   }
+  if (!consumeApiReadItems(budget, count, childProp)) {
+    return;
+  }
 
   var children = [];
   var apiPath = normalizeLiveApiPath(api.path, path);
   for (var i = 0; i < count; i += 1) {
+    if (!checkApiReadDeadline(budget)) {
+      return;
+    }
     var childPath = apiPath + " " + childProp + " " + i;
     try {
       var childApi = new LiveAPI(null, childPath);
@@ -935,8 +1092,7 @@ function api_children(path, childName, requestId) {
     }
   }
 
-  var childrenJson = safeJsonStringify(children, contextName + "_children");
-  ackWithRequest("api_children", [apiPath, childProp, childrenJson], requestId);
+  ackBoundedApiReadJson("api_children", [apiPath, childProp], children, budget);
 }
 
 function api_describe(path, requestId) {
@@ -981,11 +1137,12 @@ function api_describe(path, requestId) {
 
 function api_session_context(requestId) {
   if (!ensureInitialized(requestId)) return;
+  var budget = newApiReadBudget("api_session_context", requestId);
   var totalTracks = getTotalTracksOrError("session_context", requestId);
   if (totalTracks === 0) return;
-  var midiTracks = countMidiTracks(totalTracks, "session_context", requestId);
+  var midiTracks = countMidiTracks(totalTracks, "session_context", requestId, budget);
   if (midiTracks === null) return;
-  var audioTracks = countAudioTracks(totalTracks, "session_context", requestId);
+  var audioTracks = countAudioTracks(totalTracks, "session_context", requestId, budget);
   if (audioTracks === null) return;
   var payload = {
     generated_ms: nowMs(),
@@ -1026,11 +1183,12 @@ function api_session_context(requestId) {
   try {
     payload.counts.scenes = song.getcount("scenes");
   } catch (errScenes) {}
-  ackWithRequest("api_session_context", [safeJsonStringify(payload, "session_context")], requestId);
+  ackBoundedApiReadJson("api_session_context", [], payload, budget);
 }
 
 function api_theory_status(requestId) {
   if (!ensureInitialized(requestId)) return;
+  var budget = newApiReadBudget("api_theory_status", requestId);
   var payload = {
     path: String(song.path || "live_set"),
     id: Number(song.id || 0),
@@ -1041,11 +1199,12 @@ function api_theory_status(requestId) {
       "scale_mode",
     ]),
   };
-  ackWithRequest("api_theory_status", [safeJsonStringify(payload, "theory_status")], requestId);
+  ackBoundedApiReadJson("api_theory_status", [], payload, budget);
 }
 
 function api_tuning_status(requestId) {
   if (!ensureInitialized(requestId)) return;
+  var budget = newApiReadBudget("api_tuning_status", requestId);
   var tuningApi = tryResolveApi("live_set tuning_system");
   var payload = {
     path: "live_set tuning_system",
@@ -1062,34 +1221,46 @@ function api_tuning_status(requestId) {
       "note_tunings",
     ]);
   }
-  ackWithRequest("api_tuning_status", [safeJsonStringify(payload, "tuning_status")], requestId);
+  ackBoundedApiReadJson("api_tuning_status", [], payload, budget);
 }
 
 function api_device_list(trackRef, requestId) {
   if (!ensureInitialized(requestId)) return;
   var target = trackRef === undefined || trackRef === null ? "all" : String(trackRef).trim();
+  var budget = newApiReadBudget("api_device_list", requestId);
   var payload = { target: target, tracks: [] };
   if (target.length === 0 || target === "all") {
     var totalTracks = getTotalTracksOrError("device_list", requestId);
     if (totalTracks === 0) return;
+    if (!consumeApiReadItems(budget, totalTracks, "tracks")) return;
     for (var i = 0; i < totalTracks; i += 1) {
-      payload.tracks.push(describeDevicesForTrackPath("live_set tracks " + i));
+      if (!checkApiReadDeadline(budget)) return;
+      var trackDevices = describeDevicesForTrackPath("live_set tracks " + i, budget);
+      if (trackDevices === null) return;
+      payload.tracks.push(trackDevices);
     }
   } else {
-    payload.tracks.push(describeDevicesForTrackPath(normalizeTrackPathReference(target, "live_set tracks 0")));
+    var selectedTrackDevices = describeDevicesForTrackPath(
+      normalizeTrackPathReference(target, "live_set tracks 0"),
+      budget
+    );
+    if (selectedTrackDevices === null) return;
+    payload.tracks.push(selectedTrackDevices);
   }
-  ackWithRequest("api_device_list", [target || "all", safeJsonStringify(payload, "device_list")], requestId);
+  ackBoundedApiReadJson("api_device_list", [target || "all"], payload, budget);
 }
 
 function api_device_parameters(devicePath, requestId) {
   if (!ensureInitialized(requestId)) return;
+  var budget = newApiReadBudget("api_device_parameters", requestId);
   var pathText = devicePath === undefined || devicePath === null ? "" : String(devicePath).trim();
   if (pathText.length === 0) {
     ackWithRequest("error", ["api_missing_device_path"], requestId);
     return;
   }
-  var payload = describeDeviceApi(tryResolveApi(pathText), pathText, true);
-  ackWithRequest("api_device_parameters", [pathText, safeJsonStringify(payload, "device_parameters")], requestId);
+  var payload = describeDeviceApi(tryResolveApi(pathText), pathText, true, budget);
+  if (payload === null) return;
+  ackBoundedApiReadJson("api_device_parameters", [pathText], payload, budget);
 }
 
 function api_parameter_set(authToken, parameterPath, valueJson, requestId) {
@@ -1149,6 +1320,7 @@ function api_parameter_set(authToken, parameterPath, valueJson, requestId) {
 
 function api_mixer_status(trackRef, requestId) {
   if (!ensureInitialized(requestId)) return;
+  var budget = newApiReadBudget("api_mixer_status", requestId);
   var trackPath = normalizeTrackPathReference(trackRef, "live_set tracks 0");
   var mixerPath = trackPath + " mixer_device";
   var mixerApi = tryResolveApi(mixerPath);
@@ -1174,10 +1346,12 @@ function api_mixer_status(trackRef, requestId) {
   } catch (errSends) {
     sendCount = 0;
   }
+  if (!consumeApiReadItems(budget, sendCount, "sends")) return;
   for (var i = 0; i < sendCount; i += 1) {
+    if (!checkApiReadDeadline(budget)) return;
     payload.sends.push(describeParameterPath(resolvedMixerPath + " sends " + i));
   }
-  ackWithRequest("api_mixer_status", [trackPath, safeJsonStringify(payload, "mixer_status")], requestId);
+  ackBoundedApiReadJson("api_mixer_status", [trackPath], payload, budget);
 }
 
 function api_insert_device(authToken, targetPath, deviceName, targetIndex, requestId) {
@@ -1540,29 +1714,239 @@ function openSessionClipInspectionApi(path, target, requestId) {
   }
 }
 
-function parseSessionClipInspectionNotes(rawResult, requestId) {
+function callSessionClipNoteMethod(clipApi, methodName, payload) {
+  sessionClipInspectionDictCounter += 1;
+  var wrapperName =
+    "live_bridge_inspection_wrapper_" +
+    nowMs() +
+    "_" +
+    sessionClipInspectionDictCounter;
+  var wrapper = null;
+  try {
+    wrapper = new Dict(wrapperName);
+    wrapper.setparse("wrapper", JSON.stringify(payload));
+    var payloadDict = wrapper.get("wrapper");
+    if (!payloadDict) {
+      throw new Error("Dict wrapper did not return an inspection dictionary");
+    }
+    return {
+      ok: true,
+      result: clipApi.call(methodName, payloadDict),
+    };
+  } catch (err) {
+    debug("Session clip inspection " + methodName + " failed: " + err);
+    return { ok: false, error: "read_failed", details: ["notes", methodName] };
+  } finally {
+    clearBuiltPayload({ wrapper: wrapper });
+  }
+}
+
+function boundedSessionClipNoteJson(rawResult, maxBytes) {
+  var rawText = "";
   var parsed = null;
   if (rawResult && typeof rawResult === "object" && !Array.isArray(rawResult)) {
-    parsed = rawResult;
+    try {
+      if (rawResult instanceof Dict && typeof rawResult.stringify === "function") {
+        rawText = String(rawResult.stringify() || "");
+      } else {
+        rawText = JSON.stringify(rawResult);
+        parsed = rawResult;
+      }
+    } catch (errObject) {
+      return { ok: false, error: "parse_failed", details: ["notes"] };
+    }
+  } else if (Array.isArray(rawResult)) {
+    var parts = [];
+    var bytes = 0;
+    for (var i = 0; i < rawResult.length; i += 1) {
+      var part = String(rawResult[i]);
+      bytes += utf8ByteLength(part) + (i > 0 ? 1 : 0);
+      if (bytes > maxBytes) {
+        return {
+          ok: false,
+          error: "limit_exceeded",
+          details: ["note_call_bytes", bytes, maxBytes],
+        };
+      }
+      parts.push(part);
+    }
+    rawText = parts.join(" ");
   } else {
-    var rawText = Array.isArray(rawResult)
-      ? rawResult.join(" ")
-      : rawResult === undefined || rawResult === null
-        ? ""
-        : String(rawResult);
+    rawText = rawResult === undefined || rawResult === null ? "" : String(rawResult);
+  }
+
+  var rawBytes = utf8ByteLength(rawText);
+  if (rawBytes > maxBytes) {
+    return {
+      ok: false,
+      error: "limit_exceeded",
+      details: ["note_call_bytes", rawBytes, maxBytes],
+    };
+  }
+  if (parsed === null) {
     try {
       parsed = JSON.parse(rawText);
-    } catch (err) {
-      debug("Session clip inspection note JSON parse failed: " + err);
-      sessionClipInspectionError("parse_failed", ["notes"], requestId);
-      return null;
+    } catch (errParse) {
+      debug("Session clip inspection note JSON parse failed: " + errParse);
+      return { ok: false, error: "parse_failed", details: ["notes"] };
     }
   }
   if (!parsed || !Array.isArray(parsed.notes)) {
-    sessionClipInspectionError("parse_failed", ["notes_shape"], requestId);
-    return null;
+    return { ok: false, error: "parse_failed", details: ["notes_shape"] };
   }
-  return parsed.notes;
+  return { ok: true, notes: parsed.notes };
+}
+
+function readBoundedSessionClipNoteIds(clipApi) {
+  var idCall = callSessionClipNoteMethod(
+    clipApi,
+    "get_all_notes_extended",
+    { "return": ["note_id"] }
+  );
+  if (!idCall.ok) {
+    return idCall;
+  }
+  var idResult = boundedSessionClipNoteJson(
+    idCall.result,
+    SESSION_CLIP_INSPECTION_MAX_ID_CALL_BYTES
+  );
+  if (!idResult.ok) {
+    return idResult;
+  }
+  if (idResult.notes.length > SESSION_CLIP_INSPECTION_MAX_NOTES) {
+    return {
+      ok: false,
+      error: "limit_exceeded",
+      details: ["notes", idResult.notes.length, SESSION_CLIP_INSPECTION_MAX_NOTES],
+    };
+  }
+
+  var noteIds = [];
+  var seenNoteIds = Object.create(null);
+  for (var idIndex = 0; idIndex < idResult.notes.length; idIndex += 1) {
+    var idNote = idResult.notes[idIndex];
+    var noteId = idNote && idNote.note_id;
+    if (
+      typeof noteId !== "number" ||
+      !isFinite(noteId) ||
+      noteId < 0 ||
+      Math.floor(noteId) !== noteId
+    ) {
+      return {
+        ok: false,
+        error: "parse_failed",
+        details: ["note_id", idIndex],
+      };
+    }
+    if (seenNoteIds[String(noteId)]) {
+      return {
+        ok: false,
+        error: "snapshot_changed",
+        details: ["duplicate_note_id", noteId],
+      };
+    }
+    seenNoteIds[String(noteId)] = true;
+    noteIds.push(noteId);
+  }
+  return { ok: true, note_ids: noteIds };
+}
+
+function sameSessionClipNoteIds(leftIds, rightIds) {
+  if (leftIds.length !== rightIds.length) {
+    return false;
+  }
+  for (var i = 0; i < leftIds.length; i += 1) {
+    if (leftIds[i] !== rightIds[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function readBoundedSessionClipNotes(clipApi) {
+  var noteFields = [
+    "note_id",
+    "pitch",
+    "start_time",
+    "duration",
+    "velocity",
+    "mute",
+    "probability",
+    "velocity_deviation",
+    "release_velocity",
+  ];
+  var initialIds = readBoundedSessionClipNoteIds(clipApi);
+  if (!initialIds.ok) {
+    return initialIds;
+  }
+  var noteIds = initialIds.note_ids;
+
+  var notes = [];
+  for (
+    var offset = 0;
+    offset < noteIds.length;
+    offset += SESSION_CLIP_INSPECTION_NOTE_BATCH_SIZE
+  ) {
+    var batchIds = noteIds.slice(
+      offset,
+      offset + SESSION_CLIP_INSPECTION_NOTE_BATCH_SIZE
+    );
+    var noteCall = callSessionClipNoteMethod(
+      clipApi,
+      "get_notes_by_id",
+      { note_ids: batchIds, "return": noteFields }
+    );
+    if (!noteCall.ok) {
+      return noteCall;
+    }
+    var noteResult = boundedSessionClipNoteJson(
+      noteCall.result,
+      SESSION_CLIP_INSPECTION_MAX_NOTE_CALL_BYTES
+    );
+    if (!noteResult.ok) {
+      return noteResult;
+    }
+    if (noteResult.notes.length !== batchIds.length) {
+      return {
+        ok: false,
+        error: "snapshot_changed",
+        details: ["notes", batchIds.length, noteResult.notes.length],
+      };
+    }
+    var requestedIds = Object.create(null);
+    for (var requestedIndex = 0; requestedIndex < batchIds.length; requestedIndex += 1) {
+      requestedIds[String(batchIds[requestedIndex])] = true;
+    }
+    var returnedById = Object.create(null);
+    for (var noteIndex = 0; noteIndex < noteResult.notes.length; noteIndex += 1) {
+      var returnedNote = noteResult.notes[noteIndex];
+      var returnedId = returnedNote && returnedNote.note_id;
+      if (!requestedIds[String(returnedId)]) {
+        return {
+          ok: false,
+          error: "snapshot_changed",
+          details: ["note_id", offset + noteIndex],
+        };
+      }
+      delete requestedIds[String(returnedId)];
+      returnedById[String(returnedId)] = returnedNote;
+    }
+    for (var orderedIndex = 0; orderedIndex < batchIds.length; orderedIndex += 1) {
+      notes.push(returnedById[String(batchIds[orderedIndex])]);
+    }
+  }
+  var finalIds = readBoundedSessionClipNoteIds(clipApi);
+  if (!finalIds.ok) {
+    return finalIds;
+  }
+  if (!sameSessionClipNoteIds(noteIds, finalIds.note_ids)) {
+    return {
+      ok: false,
+      error: "snapshot_changed",
+      details: ["note_inventory"],
+    };
+  }
+  return { ok: true, notes: notes };
 }
 
 function copySessionClipInspectionNote(note, index, requestId) {
@@ -2195,24 +2579,12 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     devices.push(device);
   }
 
-  var rawNotes = null;
-  try {
-    rawNotes = clipApi.call("get_all_notes_extended");
-  } catch (errNotes) {
-    debug("Session clip inspection note read failed: " + errNotes);
-    sessionClipInspectionError("read_failed", ["notes"], requestText);
+  var noteRead = readBoundedSessionClipNotes(clipApi);
+  if (!noteRead.ok) {
+    sessionClipInspectionError(noteRead.error, noteRead.details, requestText);
     return;
   }
-  var parsedNotes = parseSessionClipInspectionNotes(rawNotes, requestText);
-  if (parsedNotes === null) return;
-  if (parsedNotes.length > SESSION_CLIP_INSPECTION_MAX_NOTES) {
-    sessionClipInspectionError(
-      "limit_exceeded",
-      ["notes", parsedNotes.length, SESSION_CLIP_INSPECTION_MAX_NOTES],
-      requestText
-    );
-    return;
-  }
+  var parsedNotes = noteRead.notes;
   var notes = [];
   for (var noteIndex = 0; noteIndex < parsedNotes.length; noteIndex += 1) {
     var copiedNote = copySessionClipInspectionNote(
@@ -2464,20 +2836,22 @@ function fallbackRequestId(targetName, args) {
   return args[requestIndex];
 }
 
-function anything() {
-  var rawName = typeof messagename === "undefined" ? "" : String(messagename || "");
+function dispatchOscSelector(rawSelector, args) {
+  var rawName = rawSelector === undefined || rawSelector === null ? "" : String(rawSelector);
   if (!rawName || rawName.charAt(0) !== "/") {
     debug("Unhandled message: " + rawName);
     return;
   }
   var targetName = rawName.slice(1).replace(/\//g, "_");
-  var target = API_FALLBACK_HANDLERS[targetName];
-  if (typeof target !== "function") {
+  if (
+    !Object.prototype.hasOwnProperty.call(API_FALLBACK_HANDLERS, targetName) ||
+    typeof API_FALLBACK_HANDLERS[targetName] !== "function"
+  ) {
     debug("Unhandled OSC selector: " + rawName);
     ack("ack", "error", "unknown_selector", rawName);
     return;
   }
-  var args = arrayfromargs(arguments);
+  var target = API_FALLBACK_HANDLERS[targetName];
   try {
     target.apply(this, args);
   } catch (err) {
@@ -2497,6 +2871,17 @@ function anything() {
       requestId
     );
   }
+}
+
+function osc_dispatch(rawSelector) {
+  var args = arrayfromargs(arguments);
+  args.shift();
+  dispatchOscSelector(rawSelector, args);
+}
+
+function anything() {
+  var rawName = typeof messagename === "undefined" ? "" : String(messagename || "");
+  dispatchOscSelector(rawName, arrayfromargs(arguments));
 }
 
 function clampMidiByte(value, fallback, contextName, label) {
@@ -3270,24 +3655,43 @@ function inspect_session_clip_notes(trackIndex, slotIndex) {
     clipLength = 0;
   }
 
-  try {
-    var result = clip.call("get_all_notes_extended");
-    rawResult = Array.isArray(result) ? result.join(" ") : String(result);
-    var parsed = JSON.parse(rawResult || "{}");
-    var notes = Array.isArray(parsed.notes) ? parsed.notes : [];
-    noteCount = notes.length;
-    if (noteCount > 0) {
-      minPitch = notes[0].pitch;
-      maxPitch = notes[0].pitch;
-      for (var i = 1; i < notes.length; i += 1) {
-        var pitch = notes[i].pitch;
-        if (pitch < minPitch) minPitch = pitch;
-        if (pitch > maxPitch) maxPitch = pitch;
-      }
+  var noteRead = readBoundedSessionClipNotes(clip);
+  if (!noteRead.ok) {
+    ack(
+      "ack",
+      "error",
+      contextName + "_" + noteRead.error,
+      (noteRead.details || []).join(":")
+    );
+    return;
+  }
+  var notes = noteRead.notes;
+  noteCount = notes.length;
+  if (noteCount > 0) {
+    minPitch = notes[0].pitch;
+    maxPitch = notes[0].pitch;
+    for (var i = 1; i < notes.length; i += 1) {
+      var pitch = notes[i].pitch;
+      if (pitch < minPitch) minPitch = pitch;
+      if (pitch > maxPitch) maxPitch = pitch;
     }
-  } catch (err) {
-    debug("Failed to inspect notes: " + err);
-    ack("ack", "error", contextName + "_inspect_failed");
+  }
+  try {
+    rawResult = JSON.stringify({ notes: notes });
+  } catch (errSerialize) {
+    debug("Failed to serialize legacy note inspection: " + errSerialize);
+    ack("ack", "error", contextName + "_serialization_failed");
+    return;
+  }
+  var responseBytes = utf8ByteLength(rawResult);
+  if (responseBytes > LEGACY_CLIP_INSPECTION_MAX_RESPONSE_BYTES) {
+    ack(
+      "ack",
+      "error",
+      contextName + "_response_too_large",
+      responseBytes,
+      LEGACY_CLIP_INSPECTION_MAX_RESPONSE_BYTES
+    );
     return;
   }
 
@@ -3304,9 +3708,15 @@ function inspect_session_clip_notes(trackIndex, slotIndex) {
   );
 }
 
-function countMidiTracks(totalTracks, contextName, requestId) {
+function countMidiTracks(totalTracks, contextName, requestId, budget) {
+  if (budget && !consumeApiReadItems(budget, totalTracks, "tracks")) {
+    return null;
+  }
   var midiCount = 0;
   for (var i = 0; i < totalTracks; i += 1) {
+    if (budget && !checkApiReadDeadline(budget)) {
+      return null;
+    }
     try {
       var track = new LiveAPI(null, "live_set tracks " + i);
       var hasMidiInput = Number(getScalar(track, "has_midi_input"));
@@ -3323,9 +3733,15 @@ function countMidiTracks(totalTracks, contextName, requestId) {
   return midiCount;
 }
 
-function countAudioTracks(totalTracks, contextName, requestId) {
+function countAudioTracks(totalTracks, contextName, requestId, budget) {
+  if (budget && !consumeApiReadItems(budget, totalTracks, "tracks")) {
+    return null;
+  }
   var audioCount = 0;
   for (var i = 0; i < totalTracks; i += 1) {
+    if (budget && !checkApiReadDeadline(budget)) {
+      return null;
+    }
     try {
       var track = new LiveAPI(null, "live_set tracks " + i);
       var hasAudioInput = Number(getScalar(track, "has_audio_input"));
@@ -3390,6 +3806,7 @@ function delete_audio_tracks(authToken, count) {
 
 function status() {
   if (!ensureInitialized()) return;
+  var budget = newApiReadBudget("status");
   var totalTracks = getTotalTracksOrError("status");
   if (totalTracks === 0) return;
   var returnTracks = 0;
@@ -3398,9 +3815,9 @@ function status() {
   } catch (err) {
     debug("Unable to read return track count: " + err);
   }
-  var midiTracks = countMidiTracks(totalTracks, "status");
+  var midiTracks = countMidiTracks(totalTracks, "status", null, budget);
   if (midiTracks === null) return;
-  var audioTracks = countAudioTracks(totalTracks, "status");
+  var audioTracks = countAudioTracks(totalTracks, "status", null, budget);
   if (audioTracks === null) return;
   var id = song ? Number(song.id) : 0;
   ack("ack", "status", totalTracks, midiTracks, audioTracks, returnTracks, song.path, id);

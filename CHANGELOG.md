@@ -6,6 +6,19 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Replaced the Max command listener with a dependency-free Node-for-Max
+  receiver that binds explicitly to `127.0.0.1:9000`, and restricted the Python
+  client to loopback targets.
+- Routed unmatched Max selectors through an explicit wrapper dispatcher and
+  isolated local capability-token setup on a separate JavaScript inlet.
+- Required the expected loopback source IP and request ID for mutation-driving
+  smoke-test ACKs, and bounded generic ACK and event collection.
+- Added traversal and response budgets to tokenless collection reads, bounded
+  clip-note retrieval before full-record materialization, and retained small
+  legacy reads behind note, batch, and response-byte limits.
+
 ## [3.1.0] - 2026-06-10
 
 ### Added

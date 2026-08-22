@@ -3,8 +3,9 @@
 This file is a quick reference for commands sent to the Max for Live bridge.
 `PROTOCOL.md` is the canonical protocol contract.
 
-Commands are OSC packets sent to `127.0.0.1:9000`. ACKs and observer events are
-OSC packets emitted from `127.0.0.1:9001` at address `/ack`.
+Commands are OSC packets sent to `127.0.0.1:9000`. The shipped receiver binds
+only to that loopback address. ACKs and observer events are OSC packets emitted
+to `127.0.0.1:9001` at address `/ack`.
 Current v3 error ACKs always end with the reserved request-ID correlation
 trailer `request_correlation req:<request_id>`, or
 `request_correlation req:` when the command had no request ID.
@@ -202,5 +203,7 @@ Validation:
 For full ACK schemas, request ID behavior, LiveAPI constraints, and safety
 classes, read `PROTOCOL.md`.
 
-The legacy `/inspect_session_clip_notes <track_index> <slot_index>` command and
-its ACK format remain unchanged.
+Small legacy `/inspect_session_clip_notes <track_index> <slot_index>` reads
+remain compatible. The bridge rejects clips above 4096 notes, fetches full
+notes in batches of 256 IDs, and rejects a single ACK above 49,152 UTF-8 bytes.
+Use `/api/session_clip_inspect` for packet-bounded, correlated clip reads.

@@ -16,7 +16,8 @@ pass.
 When a tagged release includes `LiveUdpBridge.zip`:
 
 1. Download and extract `LiveUdpBridge.zip`.
-2. Keep `LiveUdpBridge.amxd` and `live_udp_bridge.js` next to each other.
+2. Keep `LiveUdpBridge.amxd`, `live_udp_bridge.js`, and
+   `osc_loopback_receiver.js` next to each other.
 3. Open Ableton Live and drag `LiveUdpBridge.amxd` onto a MIDI track.
 4. Open the device with **Edit in Max** and replace
    `CHANGE_ME_BEFORE_USE` in the `set_auth_token` message with a unique local
@@ -46,7 +47,8 @@ opened `.maxpat` file. To create a loadable device from the tracked source:
 4. Use **File > Save As...** in the Live-hosted Max editor and save the device
    as `LiveUdpBridge.amxd`.
 5. Place the packaged `LiveUdpBridge.amxd` next to
-   `bridge/m4l/live_udp_bridge.js`.
+   `bridge/m4l/live_udp_bridge.js` and
+   `bridge/m4l/osc_loopback_receiver.js`.
 6. Reload `LiveUdpBridge.amxd` on a MIDI track in Ableton Live.
 7. Configure the local `set_auth_token` message as described above.
 8. Run the status command shown above.
@@ -57,7 +59,8 @@ After editing `bridge/m4l/LiveUdpBridge.maxpat` or
 `bridge/m4l/live_udp_bridge.js`:
 
 1. Package a fresh `LiveUdpBridge.amxd` from a Live-hosted Max MIDI Effect.
-2. Keep `live_udp_bridge.js` next to the packaged device.
+2. Keep `live_udp_bridge.js` and `osc_loopback_receiver.js` next to the
+   packaged device.
 3. Reload the device in Ableton Live.
 4. Confirm the local token message still matches
    `CODEX_LIVE_BRIDGE_TOKEN`.

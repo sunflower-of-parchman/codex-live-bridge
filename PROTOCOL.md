@@ -12,12 +12,14 @@ Protocol status: v3.1.
 - ACK/event target: `127.0.0.1:9001`
 - Encoding: OSC messages with simple scalar arguments.
 - Structured payloads: JSON strings.
-- Max for Live runtime: `udpreceive`/`udpsend` plus Max `js`.
+- Max for Live runtime: a dependency-free Node-for-Max UDP receiver,
+  `udpsend`, and Max `js`.
 
 The bridge should be loaded in Ableton Live through the shipped Max patch/device. Clients send commands to the command port and listen for acknowledgements on the ACK port.
 
-The bridge is local-first. Keep command and ACK traffic bound to `127.0.0.1`;
-UDP does not encrypt the capability token or Live data.
+The shipped command receiver binds explicitly to `127.0.0.1:9000`. The Python
+client accepts loopback destinations only. Keep ACK traffic bound to
+`127.0.0.1`; UDP does not encrypt the capability token or Live data.
 
 ## Authentication
 
@@ -34,8 +36,11 @@ The Python CLI reads the same value from `--auth-token` or
 `auth_not_configured`; a mismatch returns `unauthorized_command`. Neither error
 echoes the supplied token.
 
-The Max receiver defers UDP work to the low-priority queue and admits at most
-one datagram every 10 ms.
+The Node-for-Max receiver accepts single OSC messages from the loopback socket.
+It rejects bundles, malformed messages, unsupported types, nonfinite floats,
+and trailing bytes. Max defers decoded work to the low-priority queue and
+admits at most one command every 10 ms. Unknown selectors pass through an
+explicit wrapper allowlist before they reach the LiveAPI router.
 
 ## Product Architecture Boundary
 
@@ -236,7 +241,10 @@ and bound aggregate retained fragment bytes across concurrent assemblies.
 
 V1 resource limits are `MAX_NOTES=4096`, `MAX_DEVICES=256`, and
 `MAX_FRAGMENTS=1024`. The producer rejects an inventory above these limits
-before copying every item into fragments and enforces the fragment ceiling
+after an ID-only preflight and before fetching full note records. Full note
+records are retrieved in batches of at most 256 IDs. Each LiveAPI note response
+is byte-bounded before JSON parsing. A final ID-only read detects additions or
+deletions during batching. The producer also enforces the fragment ceiling
 during adaptive page planning. Limit failures emit a correlated
 `api_session_clip_inspect_limit_exceeded` error whose encoded packet remains
 within the 4096-byte budget.
@@ -359,10 +367,12 @@ omitted both fields. A cross-surface consumer must use deterministic ID-free
 matching and report release velocity as an SDK-side missing field rather than
 silently treating the two snapshots as exact parity.
 
-The legacy `/inspect_session_clip_notes <track_index> <slot_index>` command and
-its single ACK remain unchanged for compatibility. Clients needing bounded
-packets, metadata, devices, request correlation, or complete Live 12 note
-fields should use `/api/session_clip_inspect`.
+Small reads through the legacy
+`/inspect_session_clip_notes <track_index> <slot_index>` command remain
+compatible. An ID-only preflight rejects clips above 4096 notes. The bridge
+fetches full notes in batches of 256 IDs and rejects a single ACK above 49,152
+UTF-8 bytes. Use `/api/session_clip_inspect` for packet-bounded fragments,
+metadata, devices, request correlation, and complete Live 12 note fields.
 
 ## Device, Parameter, And Mixer Wrappers
 
@@ -386,6 +396,10 @@ Safety classes:
 
 - `device_list`, `device_parameters`, and `mixer_status`: read.
 - `parameter_set`: bounded write.
+
+Tokenless collection wrappers accept at most 256 items from one collection and
+512 aggregate items per request. They stop after 1,000 ms and reject JSON
+responses above 49,152 UTF-8 bytes with a correlated limit error.
 
 `parameter_set` accepts only numeric JSON numbers or numeric strings, checks `is_enabled`, and rejects values outside the parameter's `min`/`max` range when Live exposes that metadata. JSON `null`, booleans, arrays, and objects are rejected before the wrapper calls LiveAPI.
 
@@ -505,6 +519,10 @@ The generic RPC layer can reach broad LiveAPI behavior. Public examples and auto
 ## Payload Guidance
 
 Keep command payloads small enough for local UDP transport. The 3.1 session
-clip inspector enforces a 4096-byte encoded ACK limit. Other large note sets or
-inventory reads should use chunked or batched commands with request IDs and
+clip inspector enforces a 4096-byte encoded ACK limit. Tokenless collection
+wrappers allow at most 256 items from one collection, 512 items across one
+request, 1,000 milliseconds of traversal, and 49,152 UTF-8 bytes of JSON.
+Requests that exceed a traversal limit fail with `api_read_limit_exceeded`.
+Oversized JSON responses fail with `api_read_response_too_large`. Large note
+sets or inventory reads should use chunked commands with request IDs and
 explicit ACK handling.

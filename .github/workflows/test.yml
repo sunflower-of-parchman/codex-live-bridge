@@ -22,7 +22,9 @@ jobs:
       - name: Run repository docs tests
         run: python3 -m unittest discover -s tests -p "test_*.py"
       - name: Check Max JS syntax
-        run: node --check bridge/m4l/live_udp_bridge.js
+        run: |
+          node --check bridge/m4l/live_udp_bridge.js
+          node --check bridge/m4l/osc_loopback_receiver.js
       - name: Check Max patch JSON
         run: python3 -m json.tool bridge/m4l/LiveUdpBridge.maxpat >/dev/null
       - name: Run public hygiene audit

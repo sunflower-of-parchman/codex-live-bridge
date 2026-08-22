@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import math
@@ -31,8 +30,14 @@ const context = {{
   post: () => {{}},
   outlet: () => {{}},
   ack: () => {{}},
-  Dict: function Dict() {{}},
+  Dict: function Dict() {{
+    this.value = null;
+    this.setparse = (_key, text) => {{ this.value = JSON.parse(text); }};
+    this.get = () => this.value;
+    this.clear = () => {{ this.value = null; }};
+  }},
   LiveAPI: function LiveAPI() {{}},
+  inlet: 1,
 }};
 vm.createContext(context);
 vm.runInContext(source, context);
@@ -67,6 +72,39 @@ def _base_args() -> list[str]:
         "--add-audio-tracks",
         "0",
     ]
+
+
+class LoopbackHostTests(unittest.TestCase):
+    def test_parse_args_accepts_documented_loopback_hosts(self) -> None:
+        for host, expected in (
+            ("127.0.0.1", "127.0.0.1"),
+            ("127.1.2.3", "127.1.2.3"),
+            ("localhost", "127.0.0.1"),
+        ):
+            with self.subTest(host=host):
+                cfg = bridge.parse_args(
+                    [
+                        "--host",
+                        host,
+                        "--no-tempo",
+                        "--no-signature",
+                    ]
+                )
+                self.assertEqual(cfg.host, expected)
+
+    def test_parse_args_rejects_non_loopback_host(self) -> None:
+        with (
+            mock.patch("sys.stderr", new=io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            bridge.parse_args(
+                [
+                    "--host",
+                    "203.0.113.10",
+                    "--no-tempo",
+                    "--no-signature",
+                ]
+            )
 
 
 def _run_session_clip_inspect_js(
@@ -106,6 +144,12 @@ const outputs = [];
 let clipOpenCount = 0;
 context.outlet = (...args) => outputs.push(args);
 context.ensureInitialized = () => true;
+context.Dict = function Dict() {{
+  this.value = null;
+  this.setparse = (_key, text) => {{ this.value = JSON.parse(text); }};
+  this.get = () => this.value;
+  this.clear = () => {{ this.value = null; }};
+}};
 if (fixture.max_fragments !== null) {{
   context.SESSION_CLIP_INSPECTION_MAX_FRAGMENTS = fixture.max_fragments;
 }}
@@ -155,9 +199,26 @@ context.LiveAPI = function LiveAPI(_callback, rawPath) {{
         if (Object.prototype.hasOwnProperty.call(values, property)) return values[property];
         throw new Error("unknown clip property " + property);
       }},
-      call: (method) => {{
+      call: (method, payload) => {{
         if (method === "get_all_notes_extended") {{
-          return JSON.stringify({{ notes: fixture.notes }});
+          const fields = payload.return;
+          return JSON.stringify({{
+            notes: fixture.notes.map((note) => {{
+              const projected = {{}};
+              fields.forEach((field) => {{
+                if (Object.prototype.hasOwnProperty.call(note, field)) {{
+                  projected[field] = note[field];
+                }}
+              }});
+              return projected;
+            }}),
+          }});
+        }}
+        if (method === "get_notes_by_id") {{
+          const requested = new Set(payload.note_ids);
+          return JSON.stringify({{
+            notes: fixture.notes.filter((note) => requested.has(note.note_id)),
+          }});
         }}
         throw new Error("unknown clip method " + method);
       }},
@@ -591,6 +652,14 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual(event.payload["property"], "tempo")
         self.assertEqual(event.payload["value"], 142)
 
+    def test_parse_ack_event_preserves_api_ping_request_id(self) -> None:
+        event = bridge.parse_ack_event("/ack", ["pong", "req-ping"])
+
+        self.assertEqual(event.event, "pong")
+        self.assertEqual(event.request_id, "req-ping")
+        self.assertEqual(event.payload["args"], ["pong", "req-ping"])
+        self.assertFalse(event.is_error)
+
     def test_parse_ack_event_observer_payload(self) -> None:
         payload = {
             "observer_id": "obs-tempo",
@@ -858,6 +927,98 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertTrue(fake_sock.closed)
 
+    def test_listen_for_events_enforces_deadline_during_continuous_recv(self) -> None:
+        packet = bridge.encode_osc_message("/ack", ("status",))
+        clock = {"now": 0.0}
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.recv_calls = 0
+                self.closed = False
+
+            def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
+                self.asserted_receive_size = size
+                self.recv_calls += 1
+                clock["now"] += 0.01
+                return packet, ("127.0.0.1", 9001)
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake_sock = _FakeSock()
+        cfg = bridge.parse_args(
+            [
+                "--listen",
+                "--listen-timeout",
+                "0.05",
+                "--no-tempo",
+                "--no-signature",
+            ]
+        )
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=fake_sock),
+            mock.patch(
+                "ableton_udp_bridge.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ),
+            mock.patch(
+                "ableton_udp_bridge.select.select",
+                return_value=([fake_sock], [], []),
+            ),
+            mock.patch("sys.stdout", new=io.StringIO()),
+        ):
+            count = bridge.listen_for_events(cfg)
+
+        self.assertLessEqual(clock["now"], 0.07)
+        self.assertLessEqual(fake_sock.recv_calls, 7)
+        self.assertEqual(count, fake_sock.recv_calls - 1)
+        self.assertEqual(
+            fake_sock.asserted_receive_size,
+            bridge.ACK_PACKET_BUDGET_BYTES + 1,
+        )
+        self.assertTrue(fake_sock.closed)
+
+    def test_listen_for_events_yields_to_select_after_bounded_batch(self) -> None:
+        packet = bridge.encode_osc_message("/ack", ("status",))
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.recv_calls = 0
+                self.closed = False
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                self.recv_calls += 1
+                return packet, ("127.0.0.1", 9001)
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake_sock = _FakeSock()
+        cfg = bridge.parse_args(
+            [
+                "--listen",
+                "--listen-max-events",
+                str(bridge.ACK_MAX_PACKETS_PER_SELECT + 1),
+                "--no-tempo",
+                "--no-signature",
+            ]
+        )
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=fake_sock),
+            mock.patch(
+                "ableton_udp_bridge.select.select",
+                return_value=([fake_sock], [], []),
+            ) as select_mock,
+            mock.patch("sys.stdout", new=io.StringIO()),
+        ):
+            count = bridge.listen_for_events(cfg)
+
+        self.assertEqual(count, bridge.ACK_MAX_PACKETS_PER_SELECT + 1)
+        self.assertEqual(select_mock.call_count, 2)
+        self.assertTrue(fake_sock.closed)
+
     def test_main_returns_error_when_listen_socket_cannot_bind(self) -> None:
         with mock.patch("ableton_udp_bridge.open_ack_socket", return_value=None):
             exit_code = bridge.main(
@@ -872,6 +1033,364 @@ class BridgeCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
 
+    def test_main_does_not_send_when_requested_ack_socket_cannot_bind(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=None),
+            mock.patch("ableton_udp_bridge.socket.socket") as socket_factory,
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            exit_code = bridge.main(_base_args() + ["--status"])
+
+        self.assertEqual(exit_code, 1)
+        socket_factory.assert_not_called()
+        self.assertIn("ack socket could not bind", stderr.getvalue())
+        self.assertIn("no commands were sent", stderr.getvalue())
+
+    def test_main_fails_and_stops_after_missing_required_ack(self) -> None:
+        ack_sock = mock.Mock()
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+        stderr = io.StringIO()
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=ack_sock),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch("ableton_udp_bridge.wait_for_acks", return_value=[]),
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            exit_code = bridge.main(_base_args() + ["--status"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(send_sock.sendto.call_count, 1)
+        ack_sock.close.assert_called_once()
+        self.assertIn("no acknowledgement received for /ping", stderr.getvalue())
+
+    def test_main_preserves_fire_and_forget_without_ack(self) -> None:
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=None),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge.wait_for_acks") as wait_mock,
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=io.StringIO()),
+        ):
+            exit_code = bridge.main(["--status", "--no-tempo", "--no-signature"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(send_sock.sendto.call_count, 1)
+        wait_mock.assert_not_called()
+
+    def test_main_rejects_observer_traffic_as_command_ack(self) -> None:
+        ack_sock = mock.Mock()
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+        observer_ack = (
+            "/ack",
+            ["api_event", "observer-1", json.dumps({"property": "tempo"})],
+        )
+        stderr = io.StringIO()
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=ack_sock),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch("ableton_udp_bridge.wait_for_acks", return_value=[observer_ack]),
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            exit_code = bridge.main(_base_args() + ["--status"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(send_sock.sendto.call_count, 1)
+        ack_sock.close.assert_called_once()
+        self.assertIn("did not receive the pong acknowledgement", stderr.getvalue())
+
+    def test_main_rejects_correlated_bridge_error(self) -> None:
+        ack_sock = mock.Mock()
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+        error_ack = (
+            "/ack",
+            [
+                "error",
+                "api_unknown_property",
+                "live_set",
+                "tempo",
+                "request_correlation",
+                "req:req-tempo",
+            ],
+        )
+        stderr = io.StringIO()
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=ack_sock),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch(
+                "ableton_udp_bridge.wait_for_acks",
+                return_value=[error_ack],
+            ) as wait_mock,
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            exit_code = bridge.main(
+                _base_args()
+                + [
+                    "--no-ping-first",
+                    "--api-get",
+                    "live_set",
+                    "tempo",
+                    "req-tempo",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("bridge rejected /api/get", stderr.getvalue())
+        self.assertIn("api_unknown_property", stderr.getvalue())
+        wait_mock.assert_called_once_with(
+            ack_sock,
+            0.6,
+            expected_sender_host="127.0.0.1",
+            expected_request_id="req-tempo",
+            expected_event="api_get",
+        )
+        ack_sock.close.assert_called_once()
+
+    def test_main_ignores_unrelated_error_before_correlated_success(self) -> None:
+        ack_sock = mock.Mock()
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+        unrelated_error = (
+            "/ack",
+            [
+                "error",
+                "api_unknown_property",
+                "request_correlation",
+                "req:another-request",
+            ],
+        )
+        matching_ack = (
+            "/ack",
+            ["api_get", "live_set", "tempo", "120", "req-tempo"],
+        )
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=ack_sock),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch(
+                "ableton_udp_bridge.wait_for_acks",
+                return_value=[unrelated_error, matching_ack],
+            ),
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=io.StringIO()),
+        ):
+            exit_code = bridge.main(
+                _base_args()
+                + [
+                    "--no-ping-first",
+                    "--api-get",
+                    "live_set",
+                    "tempo",
+                    "req-tempo",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        ack_sock.close.assert_called_once()
+
+    def test_main_rejects_ack_with_wrong_request_id(self) -> None:
+        ack_sock = mock.Mock()
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+        wrong_ack = (
+            "/ack",
+            ["api_get", "live_set", "tempo", "120", "another-request"],
+        )
+        stderr = io.StringIO()
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=ack_sock),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch("ableton_udp_bridge.wait_for_acks", return_value=[wrong_ack]),
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            exit_code = bridge.main(
+                _base_args()
+                + [
+                    "--no-ping-first",
+                    "--api-get",
+                    "live_set",
+                    "tempo",
+                    "req-tempo",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("did not receive the api_get acknowledgement", stderr.getvalue())
+        self.assertIn("request req-tempo", stderr.getvalue())
+        ack_sock.close.assert_called_once()
+
+    def test_main_accepts_correlated_api_ping_ack(self) -> None:
+        ack_sock = mock.Mock()
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=ack_sock),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch(
+                "ableton_udp_bridge.wait_for_acks",
+                return_value=[("/ack", ["pong", "req-ping"])],
+            ) as wait_mock,
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=io.StringIO()),
+        ):
+            exit_code = bridge.main(
+                _base_args()
+                + [
+                    "--no-ping-first",
+                    "--api-ping",
+                    "req-ping",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        wait_mock.assert_called_once_with(
+            ack_sock,
+            0.6,
+            expected_sender_host="127.0.0.1",
+            expected_request_id="req-ping",
+            expected_event="pong",
+        )
+        ack_sock.close.assert_called_once()
+
+    def test_main_accepts_legacy_multi_ack_command_after_observer_traffic(self) -> None:
+        ack_sock = mock.Mock()
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+        acks = [
+            (
+                "/ack",
+                ["api_event", "observer-1", json.dumps({"property": "tempo"})],
+            ),
+            ("/ack", ["midi_track_created", 1, "MIDI 1"]),
+            ("/ack", ["midi_track_created", 2, "MIDI 2"]),
+            ("/ack", ["add_midi_tracks", 2, "MIDI", 2, 4]),
+        ]
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=ack_sock),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch("ableton_udp_bridge.wait_for_acks", return_value=acks),
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=io.StringIO()),
+        ):
+            exit_code = bridge.main(
+                _base_args()
+                + [
+                    "--no-ping-first",
+                    "--add-midi-tracks",
+                    "2",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        ack_sock.close.assert_called_once()
+
+    def test_main_rejects_incomplete_session_clip_inspection(self) -> None:
+        ack_sock = mock.Mock()
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+        fragment = _inspection_fragment(
+            index=0,
+            count=2,
+            kind="context",
+            request_id="req-clip",
+            inspection_id="inspection-clip",
+            data=_inspection_context_data(
+                note_count=1,
+                pitch_min=60,
+                pitch_max=60,
+            ),
+        )
+        partial_ack = (
+            "/ack",
+            ["api_session_clip_inspect", json.dumps(fragment), "req-clip"],
+        )
+        stderr = io.StringIO()
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=ack_sock),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch(
+                "ableton_udp_bridge.wait_for_session_clip_inspection_acks",
+                return_value=[partial_ack],
+            ),
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            exit_code = bridge.main(
+                _base_args()
+                + [
+                    "--no-ping-first",
+                    "--api-session-clip-inspect",
+                    "2",
+                    "3",
+                    "req-clip",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("did not receive a complete", stderr.getvalue())
+        ack_sock.close.assert_called_once()
+
+    def test_main_accepts_complete_session_clip_inspection(self) -> None:
+        ack_sock = mock.Mock()
+        send_sock = mock.MagicMock()
+        send_sock.__enter__.return_value = send_sock
+        fragment = _complete_inspection_fragment()
+        fragment["correlation"]["request_id"] = "req-clip"
+        complete_ack = (
+            "/ack",
+            ["api_session_clip_inspect", json.dumps(fragment), "req-clip"],
+        )
+
+        with (
+            mock.patch("ableton_udp_bridge.open_ack_socket", return_value=ack_sock),
+            mock.patch("ableton_udp_bridge.socket.socket", return_value=send_sock),
+            mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
+            mock.patch(
+                "ableton_udp_bridge.wait_for_session_clip_inspection_acks",
+                return_value=[complete_ack],
+            ),
+            mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch("sys.stderr", new=io.StringIO()),
+        ):
+            exit_code = bridge.main(
+                _base_args()
+                + [
+                    "--no-ping-first",
+                    "--api-session-clip-inspect",
+                    "2",
+                    "3",
+                    "req-clip",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        ack_sock.close.assert_called_once()
+
     def test_js_and_patch_support_api_wrapper_fallback_route(self) -> None:
         m4l_dir = pathlib.Path(__file__).with_name("m4l")
         js_source = m4l_dir.joinpath("live_udp_bridge.js").read_text()
@@ -879,6 +1398,7 @@ class BridgeCliTests(unittest.TestCase):
         boxes = [item["box"] for item in patch_source["patcher"]["boxes"]]
         route_box = next(box for box in boxes if str(box.get("text", "")).startswith("route "))
         js_box = next(box for box in boxes if box.get("text") == "js live_udp_bridge.js")
+        dispatch_box = next(box for box in boxes if box.get("text") == "prepend osc_dispatch")
         route_tokens = str(route_box["text"]).split()[1:]
         fallback_outlet = len(route_tokens)
         patchlines = [item["patchline"] for item in patch_source["patcher"]["lines"]]
@@ -886,13 +1406,28 @@ class BridgeCliTests(unittest.TestCase):
         self.assertIn("function api_session_context", js_source)
         self.assertIn("function api_insert_device", js_source)
         self.assertIn("function anything", js_source)
+        self.assertIn("function osc_dispatch", js_source)
         self.assertNotIn("/api/session_context", route_tokens)
         self.assertNotIn("/api/insert_device", route_tokens)
         self.assertNotIn("/api/session_clip_inspect", route_tokens)
         self.assertTrue(
             any(
                 line.get("source") == [route_box["id"], fallback_outlet]
+                and line.get("destination") == [dispatch_box["id"], 0]
+                for line in patchlines
+            )
+        )
+        self.assertFalse(
+            any(
+                line.get("source") == [route_box["id"], fallback_outlet]
                 and line.get("destination", [None])[0] == js_box["id"]
+                for line in patchlines
+            )
+        )
+        self.assertTrue(
+            any(
+                line.get("source") == [dispatch_box["id"], 0]
+                and line.get("destination") == [js_box["id"], 0]
                 for line in patchlines
             )
         )
@@ -907,7 +1442,11 @@ class BridgeCliTests(unittest.TestCase):
         boxes = [item["box"] for item in patch_source["patcher"]["boxes"]]
         patchlines = [item["patchline"] for item in patch_source["patcher"]["lines"]]
         receiver = next(
-            box for box in boxes if str(box.get("text", "")).startswith("udpreceive 9000")
+            box
+            for box in boxes
+            if str(box.get("text", "")).startswith(
+                "node.script osc_loopback_receiver.js"
+            )
         )
         limiter = next(
             box for box in boxes if box.get("text") == "qlim 10 @defer 1"
@@ -915,6 +1454,7 @@ class BridgeCliTests(unittest.TestCase):
         route_box = next(box for box in boxes if str(box.get("text", "")).startswith("route "))
 
         self.assertIn("@defer 1", receiver["text"])
+        self.assertIn("@autostart 1", receiver["text"])
         self.assertTrue(
             any(
                 line.get("source") == [receiver["id"], 0]
@@ -958,7 +1498,7 @@ class BridgeCliTests(unittest.TestCase):
         self.assertTrue(
             any(
                 line.get("source") == [auth_box["id"], 0]
-                and line.get("destination") == [js_box["id"], 0]
+                and line.get("destination") == [js_box["id"], 1]
                 for line in patchlines
             )
         )
@@ -1979,20 +2519,9 @@ return outputs.filter((args) => args[1] === "/ack");
             ["request_correlation", "req:req-large-item"],
         )
 
-    def test_legacy_session_clip_inspect_source_and_ack_remain_unchanged(self) -> None:
-        source = pathlib.Path(__file__).with_name("m4l").joinpath("live_udp_bridge.js").read_text()
-        function_source = source.split("function inspect_session_clip_notes", 1)[1].split(
-            "\n}\n", 1
-        )[0]
-        digest = hashlib.sha256(
-            ("function inspect_session_clip_notes" + function_source + "\n}\n").encode()
-        ).hexdigest()
-        self.assertEqual(
-            digest,
-            "e3cfa4781d667e4c21c3c146cbe06aab398786bed5ef63b3ed0e6f1828388b63",
-        )
-
-        raw_notes = '{"notes":[{"pitch":60,"start_time":0,"duration":1,"velocity":100}]}'
+    def test_legacy_session_clip_inspect_preserves_small_bounded_ack(self) -> None:
+        notes = [_inspection_note(note_id=91, pitch=60)]
+        raw_notes = json.dumps({"notes": notes}, separators=(",", ":"))
         result = _run_bridge_js(
             f"""
 const outputs = [];
@@ -2009,7 +2538,15 @@ context.LiveAPI = function LiveAPI(_callback, path) {{
   if (path === "live_set tracks 2 clip_slots 3 clip") {{
     return {{
       get: (property) => property === "length" ? 4 : null,
-      call: () => {json.dumps(raw_notes)},
+      call: (method, payload) => {{
+        if (method === "get_all_notes_extended") {{
+          return JSON.stringify({{ notes: {json.dumps(notes)}.map((note) => ({{ note_id: note.note_id }})) }});
+        }}
+        if (method === "get_notes_by_id") {{
+          return JSON.stringify({{ notes: {json.dumps(notes)}.filter((note) => payload.note_ids.includes(note.note_id)) }});
+        }}
+        throw new Error("unexpected method");
+      }},
     }};
   }}
   throw new Error("unknown path");
@@ -2018,10 +2555,276 @@ context.inspect_session_clip_notes(2, 3);
 return outputs.filter((args) => args[1] === "/ack");
 """
         )
-        self.assertEqual(
-            result,
-            [[0, "/ack", "inspect_session_clip_notes", 2, 3, 1, 60, 60, 4, raw_notes]],
+        self.assertEqual(result[0][:9], [0, "/ack", "inspect_session_clip_notes", 2, 3, 1, 60, 60, 4])
+        self.assertEqual(json.loads(result[0][9]), json.loads(raw_notes))
+
+    def test_legacy_session_clip_inspect_rejects_large_single_ack(self) -> None:
+        result = _run_bridge_js(
+            """
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+context.ensureInitialized = () => true;
+context.LEGACY_CLIP_INSPECTION_MAX_RESPONSE_BYTES = 64;
+context.song = { getcount: (child) => child === "tracks" ? 1 : 0 };
+const note = {
+  note_id: 1,
+  pitch: 60,
+  start_time: 0,
+  duration: 1,
+  velocity: 100,
+  mute: 0,
+  probability: 1,
+  velocity_deviation: 0,
+  release_velocity: 64,
+};
+context.LiveAPI = function LiveAPI(_callback, path) {
+  if (path === "live_set tracks 0") return { get: () => 1 };
+  if (path === "live_set tracks 0 clip_slots 0") return { get: () => 1 };
+  return {
+    get: () => 4,
+    call: (method) => method === "get_all_notes_extended"
+      ? JSON.stringify({ notes: [{ note_id: note.note_id }] })
+      : JSON.stringify({ notes: [note] }),
+  };
+};
+context.inspect_session_clip_notes(0, 0);
+return outputs.filter((args) => args[1] === "/ack");
+"""
         )
+
+        self.assertEqual(result[0][2:4], ["error", "inspect_session_clip_notes_response_too_large"])
+        self.assertNotIn("inspect_session_clip_notes", [output[2] for output in result])
+
+    def test_js_clip_note_read_rejects_over_limit_before_full_note_fetch(self) -> None:
+        result = _run_bridge_js(
+            """
+const calls = [];
+const ids = Array.from(
+  { length: context.SESSION_CLIP_INSPECTION_MAX_NOTES + 1 },
+  (_unused, index) => ({ note_id: index })
+);
+const clip = {
+  call: (method) => {
+    calls.push(method);
+    return JSON.stringify({ notes: ids });
+  },
+};
+const read = context.readBoundedSessionClipNotes(clip);
+return { calls, ok: read.ok, error: read.error, details: read.details };
+"""
+        )
+
+        self.assertEqual(result["calls"], ["get_all_notes_extended"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "limit_exceeded")
+        self.assertEqual(result["details"][0], "notes")
+
+    def test_js_clip_note_read_fetches_full_notes_in_bounded_id_batches(self) -> None:
+        result = _run_bridge_js(
+            """
+const sourceNotes = Array.from({ length: 300 }, (_unused, index) => ({
+  note_id: index,
+  pitch: 36 + (index % 48),
+  start_time: index / 4,
+  duration: 0.25,
+  velocity: 100,
+  mute: 0,
+  probability: 1,
+  velocity_deviation: 0,
+  release_velocity: 64,
+}));
+const batchSizes = [];
+const clip = {
+  call: (method, payload) => {
+    if (method === "get_all_notes_extended") {
+      return JSON.stringify({ notes: sourceNotes.map((note) => ({ note_id: note.note_id })) });
+    }
+    batchSizes.push(payload.note_ids.length);
+    const requested = new Set(payload.note_ids);
+    return JSON.stringify({ notes: sourceNotes.filter((note) => requested.has(note.note_id)).reverse() });
+  },
+};
+const read = context.readBoundedSessionClipNotes(clip);
+return {
+  ok: read.ok,
+  batchSizes,
+  noteCount: read.notes.length,
+  firstIds: read.notes.slice(0, 3).map((note) => note.note_id),
+  lastIds: read.notes.slice(-3).map((note) => note.note_id),
+};
+"""
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["batchSizes"], [256, 44])
+        self.assertEqual(result["noteCount"], 300)
+        self.assertEqual(result["firstIds"], [0, 1, 2])
+        self.assertEqual(result["lastIds"], [297, 298, 299])
+
+    def test_js_clip_note_read_rejects_duplicate_or_changed_ids(self) -> None:
+        result = _run_bridge_js(
+            """
+function run(responses) {
+  let callCount = 0;
+  const clip = {
+    call: () => {
+      const notes = responses[Math.min(callCount, responses.length - 1)];
+      callCount += 1;
+      return JSON.stringify({ notes });
+    },
+  };
+  const read = context.readBoundedSessionClipNotes(clip);
+  return { ok: read.ok, error: read.error, details: read.details };
+}
+return {
+  duplicate: run([[{ note_id: 1 }, { note_id: 1 }]]),
+  changedBatch: run([[{ note_id: 1 }], [{ note_id: 2 }]]),
+  changedInventory: run([
+    [{ note_id: 1 }],
+    [{
+      note_id: 1,
+      pitch: 60,
+      start_time: 0,
+      duration: 1,
+      velocity: 100,
+      mute: 0,
+      probability: 1,
+      velocity_deviation: 0,
+      release_velocity: 64,
+    }],
+    [{ note_id: 1 }, { note_id: 2 }],
+  ]),
+};
+"""
+        )
+
+        self.assertEqual(result["duplicate"]["error"], "snapshot_changed")
+        self.assertEqual(result["duplicate"]["details"][0], "duplicate_note_id")
+        self.assertEqual(result["changedBatch"]["error"], "snapshot_changed")
+        self.assertEqual(result["changedBatch"]["details"][0], "note_id")
+        self.assertEqual(result["changedInventory"]["error"], "snapshot_changed")
+        self.assertEqual(result["changedInventory"]["details"][0], "note_inventory")
+
+    def test_js_api_children_enforces_item_and_response_budgets(self) -> None:
+        result = _run_bridge_js(
+            """
+function run(count, name, responseLimit) {
+  const outputs = [];
+  let childOpenCount = 0;
+  context.outlet = (...args) => outputs.push(args);
+  context.ensureInitialized = () => true;
+  context.API_READ_MAX_RESPONSE_BYTES = responseLimit;
+  context.resolveApiOrError = () => ({ path: "live_set", id: 1, getcount: () => count });
+  context.LiveAPI = function LiveAPI(_callback, path) {
+    childOpenCount += 1;
+    return { id: childOpenCount + 1, path, get: () => name };
+  };
+  context.api_children("live_set", "tracks", "req-children");
+  return { outputs, childOpenCount };
+}
+return {
+  itemLimit: run(257, "Track", 49152),
+  responseLimit: run(1, "X".repeat(200), 64),
+  small: run(1, "Track", 49152),
+};
+"""
+        )
+
+        self.assertEqual(result["itemLimit"]["childOpenCount"], 0)
+        self.assertEqual(result["itemLimit"]["outputs"][0][3], "api_read_limit_exceeded")
+        self.assertEqual(result["responseLimit"]["outputs"][0][3], "api_read_response_too_large")
+        self.assertEqual(result["small"]["outputs"][0][2], "api_children")
+        self.assertEqual(json.loads(result["small"]["outputs"][0][5])[0]["name"], "Track")
+
+    def test_js_api_get_enforces_response_budget_and_preserves_small_wire_shape(self) -> None:
+        result = _run_bridge_js(
+            """
+const outputs = [];
+context.outlet = (...args) => outputs.push(args);
+context.ensureInitialized = () => true;
+context.API_READ_MAX_RESPONSE_BYTES = 64;
+context.resolveApiOrError = () => ({
+  path: "live_set",
+  id: 1,
+  get: (property) => property === "tempo" ? 120 : "X".repeat(200),
+});
+context.getApiCapabilities = () => ({ hasPropertiesList: false });
+context.api_get("live_set", "large_value", "req-large");
+context.api_get("live_set", "tempo", "req-small");
+return outputs;
+"""
+        )
+
+        self.assertEqual(
+            result[0][2:5],
+            ["error", "api_read_response_too_large", "api_get"],
+        )
+        self.assertEqual(result[0][-2:], ["request_correlation", "req:req-large"])
+        self.assertEqual(
+            result[1],
+            [0, "/ack", "api_get", "live_set", "tempo", "120", "req-small"],
+        )
+
+    def test_js_wrapper_reads_reject_large_collections_before_traversal(self) -> None:
+        result = _run_bridge_js(
+            """
+function capture(call) {
+  const events = [];
+  context.ackWithRequest = (eventName, args, requestId) => {
+    events.push([eventName, ...args, requestId ?? null]);
+  };
+  context.ensureInitialized = () => true;
+  call();
+  return events;
+}
+let deviceTrackOpens = 0;
+context.song = { path: "live_set", id: 1, getcount: () => 257 };
+const deviceList = capture(() => {
+  context.LiveAPI = function LiveAPI() { deviceTrackOpens += 1; return {}; };
+  context.api_device_list("all", "req-devices");
+});
+let parameterOpens = 0;
+const deviceParameters = capture(() => {
+  context.tryResolveApi = (path) => {
+    if (String(path).includes(" parameters ")) parameterOpens += 1;
+    return { id: 9, path: String(path), get: () => null, getcount: () => 257 };
+  };
+  context.api_device_parameters("live_set tracks 0 devices 0", "req-parameters");
+});
+let sendOpens = 0;
+const mixerStatus = capture(() => {
+  context.tryResolveApi = (path) => {
+    if (String(path).includes(" sends ")) sendOpens += 1;
+    return { id: 10, path: String(path), get: () => null, getcount: () => 257 };
+  };
+  context.api_mixer_status("0", "req-mixer");
+});
+let statusTrackOpens = 0;
+const status = capture(() => {
+  context.song = { path: "live_set", id: 1, getcount: () => 257 };
+  context.LiveAPI = function LiveAPI() { statusTrackOpens += 1; return {}; };
+  context.status();
+});
+return {
+  deviceList,
+  deviceTrackOpens,
+  deviceParameters,
+  parameterOpens,
+  mixerStatus,
+  sendOpens,
+  status,
+  statusTrackOpens,
+};
+"""
+        )
+
+        self.assertEqual(result["deviceTrackOpens"], 0)
+        self.assertEqual(result["parameterOpens"], 0)
+        self.assertEqual(result["sendOpens"], 0)
+        self.assertEqual(result["statusTrackOpens"], 0)
+        for key in ("deviceList", "deviceParameters", "mixerStatus", "status"):
+            with self.subTest(endpoint=key):
+                self.assertEqual(result[key][0][1], "api_read_limit_exceeded")
 
     def test_session_clip_inspection_assembler_accepts_out_of_order_duplicates(self) -> None:
         fragments = [
@@ -3172,7 +3975,7 @@ return cases.map((testCase) => {
                 return [fake_sock], [], []
             return [], [], []
 
-        clock = iter([0.0, 0.01, 0.02, 0.03, 0.04])
+        clock = iter([0.0, 0.01, 0.02, 0.03, 0.04, 0.05])
         with (
             mock.patch("ableton_udp_bridge.time.monotonic", side_effect=lambda: next(clock)),
             mock.patch("ableton_udp_bridge.select.select", side_effect=_fake_select),
@@ -3182,6 +3985,280 @@ return cases.map((testCase) => {
         self.assertEqual(len(acks), 1)
         self.assertGreater(timeouts[0], 0.90)
         self.assertLessEqual(timeouts[1], 0.05 + 1e-6)
+
+    def test_wait_for_acks_observer_traffic_does_not_start_quiet_window(self) -> None:
+        observer = bridge.encode_osc_message(
+            "/ack",
+            ("api_event", "observer-1", '{"property":"tempo"}'),
+        )
+        pong = bridge.encode_osc_message("/ack", ("pong",))
+        timeouts: list[float] = []
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.ready_packet: bytes | None = None
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if self.ready_packet is None:
+                    raise BlockingIOError
+                packet = self.ready_packet
+                self.ready_packet = None
+                return packet, ("127.0.0.1", 9001)
+
+        fake_sock = _FakeSock()
+
+        def _fake_select(
+            _read: object,
+            _write: object,
+            _errors: object,
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            timeouts.append(timeout)
+            if len(timeouts) == 1:
+                fake_sock.ready_packet = observer
+                return [fake_sock], [], []
+            if len(timeouts) == 2 and timeout >= 0.1:
+                fake_sock.ready_packet = pong
+                return [fake_sock], [], []
+            return [], [], []
+
+        with mock.patch("ableton_udp_bridge.select.select", side_effect=_fake_select):
+            acks = bridge.wait_for_acks(
+                fake_sock,
+                timeout_s=1.0,
+                expected_event="pong",
+            )
+
+        self.assertEqual([args[0] for _address, args in acks], ["api_event", "pong"])
+        self.assertGreater(timeouts[1], 0.9)
+        self.assertLessEqual(timeouts[2], 0.05 + 1e-6)
+
+    def test_wait_for_acks_rejects_unexpected_sender_and_accepts_loopback(self) -> None:
+        forged = bridge.encode_osc_message("/ack", ("status", 999))
+        legitimate = bridge.encode_osc_message("/ack", ("status", 1))
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self._packets = [
+                    (forged, ("192.0.2.10", 12345)),
+                    (legitimate, ("127.0.0.1", 45678)),
+                ]
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if self._packets:
+                    return self._packets.pop(0)
+                raise BlockingIOError
+
+        fake_sock = _FakeSock()
+        with mock.patch(
+            "ableton_udp_bridge.select.select",
+            side_effect=[([fake_sock], [], []), ([], [], [])],
+        ):
+            acks = bridge.wait_for_acks(
+                fake_sock,
+                timeout_s=1.0,
+                expected_sender_host="127.0.0.1",
+            )
+
+        self.assertEqual(acks, [("/ack", ["status", 1])])
+
+    def test_wait_for_acks_accepts_generic_ack_above_inspection_budget(self) -> None:
+        large_payload = "x" * (
+            bridge.SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES + 1024
+        )
+        packet = bridge.encode_osc_message(
+            "/ack",
+            ("api_children", "live_set", "tracks", large_payload, "req-large"),
+        )
+        self.assertGreater(
+            len(packet),
+            bridge.SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES,
+        )
+        self.assertLessEqual(len(packet), bridge.ACK_PACKET_BUDGET_BYTES)
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.receive_sizes: list[int] = []
+                self._packets = [packet]
+
+            def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
+                self.receive_sizes.append(size)
+                if self._packets:
+                    return self._packets.pop(0), ("127.0.0.1", 9001)
+                raise BlockingIOError
+
+        fake_sock = _FakeSock()
+        with mock.patch(
+            "ableton_udp_bridge.select.select",
+            side_effect=[([fake_sock], [], []), ([], [], [])],
+        ):
+            acks = bridge.wait_for_acks(fake_sock, timeout_s=1.0)
+
+        self.assertEqual(acks[0][1][3], large_payload)
+        self.assertEqual(
+            set(fake_sock.receive_sizes),
+            {bridge.ACK_PACKET_BUDGET_BYTES + 1},
+        )
+
+    def test_wait_for_acks_ignores_wrong_request_id_until_correlated_ack(self) -> None:
+        forged = bridge.encode_osc_message(
+            "/ack",
+            (
+                "api_children",
+                "live_set",
+                "tracks",
+                "[]",
+                "attacker-request",
+            ),
+        )
+        legitimate = bridge.encode_osc_message(
+            "/ack",
+            (
+                "api_children",
+                "live_set",
+                "tracks",
+                "[]",
+                "smoke-request",
+            ),
+        )
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self._packets = [forged, legitimate]
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if self._packets:
+                    return self._packets.pop(0), ("127.0.0.1", 9001)
+                raise BlockingIOError
+
+        fake_sock = _FakeSock()
+        with mock.patch(
+            "ableton_udp_bridge.select.select",
+            side_effect=[([fake_sock], [], []), ([], [], [])],
+        ):
+            acks = bridge.wait_for_acks(
+                fake_sock,
+                timeout_s=1.0,
+                expected_sender_host="127.0.0.1",
+                expected_request_id="smoke-request",
+            )
+
+        self.assertEqual(
+            acks,
+            [
+                (
+                    "/ack",
+                    [
+                        "api_children",
+                        "live_set",
+                        "tracks",
+                        "[]",
+                        "smoke-request",
+                    ],
+                )
+            ],
+        )
+
+    def test_wait_for_acks_bounds_continuous_packet_flood(self) -> None:
+        packet = bridge.encode_osc_message(
+            "/ack",
+            ("status", "x" * 2048),
+        )
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.recv_calls = 0
+                self.receive_sizes: list[int] = []
+
+            def recvfrom(self, size: int) -> tuple[bytes, tuple[str, int]]:
+                self.recv_calls += 1
+                self.receive_sizes.append(size)
+                return packet, ("127.0.0.1", 9001)
+
+        fake_sock = _FakeSock()
+        with (
+            mock.patch(
+                "ableton_udp_bridge.time.monotonic",
+                return_value=0.0,
+            ),
+            mock.patch(
+                "ableton_udp_bridge.select.select",
+                return_value=([fake_sock], [], []),
+            ),
+        ):
+            acks = bridge.wait_for_acks(fake_sock, timeout_s=1.0)
+
+        self.assertEqual(fake_sock.recv_calls, bridge.ACK_WAIT_MAX_PACKETS)
+        self.assertLess(len(acks), bridge.ACK_WAIT_MAX_RETAINED_ACKS)
+        self.assertLessEqual(
+            sum(len(bridge.encode_osc_message(address, args)) for address, args in acks),
+            bridge.ACK_WAIT_MAX_RETAINED_BYTES,
+        )
+        self.assertEqual(
+            set(fake_sock.receive_sizes),
+            {bridge.ACK_PACKET_BUDGET_BYTES + 1},
+        )
+
+    def test_wait_for_acks_enforces_deadline_during_continuous_recv(self) -> None:
+        packet = bridge.encode_osc_message("/ack", ("status",))
+        clock = {"now": 0.0}
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self.recv_calls = 0
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                self.recv_calls += 1
+                clock["now"] += 0.01
+                return packet, ("127.0.0.1", 9001)
+
+        fake_sock = _FakeSock()
+        with (
+            mock.patch(
+                "ableton_udp_bridge.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ),
+            mock.patch(
+                "ableton_udp_bridge.select.select",
+                return_value=([fake_sock], [], []),
+            ),
+        ):
+            acks = bridge.wait_for_acks(fake_sock, timeout_s=0.05)
+
+        self.assertLessEqual(clock["now"], 0.07)
+        self.assertLessEqual(fake_sock.recv_calls, 7)
+        self.assertLessEqual(len(acks), fake_sock.recv_calls)
+
+    def test_wait_for_acks_rejects_oversized_packet_and_bounds_diagnostic(self) -> None:
+        class _FakeSock:
+            def __init__(self, packet: bytes) -> None:
+                self._packets = [packet]
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if self._packets:
+                    return self._packets.pop(0), ("127.0.0.1", 9001)
+                raise BlockingIOError
+
+        def _collect(packet: bytes) -> list[tuple[str, list[bridge.OscArg]]]:
+            fake_sock = _FakeSock(packet)
+            with mock.patch(
+                "ableton_udp_bridge.select.select",
+                side_effect=[([fake_sock], [], []), ([], [], [])],
+            ):
+                return bridge.wait_for_acks(fake_sock, timeout_s=1.0)
+
+        oversized_acks = _collect(
+            b"x" * (bridge.ACK_PACKET_BUDGET_BYTES + 1)
+        )
+        malformed_acks = _collect(b"y" * 4096)
+
+        self.assertEqual(len(oversized_acks), 1)
+        self.assertIn("exceeds", str(oversized_acks[0][1][0]))
+        self.assertEqual(len(malformed_acks), 1)
+        self.assertLessEqual(
+            len(str(malformed_acks[0][1][0])),
+            bridge.ACK_MAX_DIAGNOSTIC_CHARS,
+        )
 
     def test_timeout_parsers_reject_nonfinite_values(self) -> None:
         for flag in ("--ack-timeout", "--listen-timeout"):
@@ -3618,6 +4695,7 @@ return cases.map((testCase) => {
             _timeout: float,
             durations_ms: list[float],
             ack_counts: list[int],
+            **_expectations: object,
         ) -> None:
             order.append("collect")
             durations_ms.append(0.0)

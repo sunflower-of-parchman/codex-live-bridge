@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import socket
 import sys
 from dataclasses import dataclass
@@ -28,10 +29,16 @@ def _send_and_collect_acks(
     ack_sock: socket.socket,
     command: bridge.OscCommand,
     timeout_s: float = ACK_TIMEOUT_S,
+    expected_request_id: str | None = None,
 ) -> List[OscAck]:
     payload = bridge.encode_osc_message(command.address, command.args)
     sock.sendto(payload, (HOST, PORT))
-    return bridge.wait_for_acks(ack_sock, timeout_s)
+    return bridge.wait_for_acks(
+        ack_sock,
+        timeout_s,
+        expected_sender_host=HOST,
+        expected_request_id=expected_request_id,
+    )
 
 
 def _print_acks(acks: Sequence[OscAck]) -> None:
@@ -71,21 +78,32 @@ def _extract_status(acks: Sequence[OscAck]) -> Status | None:
     return None
 
 
-def _extract_api_children(acks: Sequence[OscAck]) -> List[dict]:
+def _extract_api_children(
+    acks: Sequence[OscAck],
+    request_id: str,
+) -> List[dict]:
     for address, args in acks:
-        if address != "/ack" or not args:
+        event = bridge.parse_ack_event(address, args)
+        if event.address != "/ack" or event.event != "api_children":
             continue
-        if args[0] != "api_children" or len(args) < 4:
+        if event.request_id != request_id:
             continue
-        payload = args[3]
-        if not isinstance(payload, str):
-            return []
-        try:
-            parsed = json.loads(payload)
-            return parsed if isinstance(parsed, list) else []
-        except json.JSONDecodeError:
-            return []
+        if (
+            event.payload.get("path") != "live_set"
+            or event.payload.get("child_name") != "tracks"
+        ):
+            continue
+        children = event.payload.get("children")
+        if not isinstance(children, list):
+            continue
+        if not all(isinstance(child, dict) for child in children):
+            continue
+        return children
     return []
+
+
+def _smoke_request_id(label: str) -> str:
+    return f"smoke-{label}-{secrets.token_hex(16)}"
 
 
 def _extract_note_count(acks: Sequence[OscAck]) -> int | None:
@@ -199,10 +217,18 @@ def run(auth_token: str) -> int:
             print(f"sent: {bridge.describe_command(cmd)}")
             _print_acks(_send_and_collect_acks(sock, ack_sock, cmd))
 
+        tracks_before_request_id = _smoke_request_id("tracks-before")
         tracks_before = _extract_api_children(
             _send_and_collect_acks(
-                sock, ack_sock, bridge.OscCommand("/api/children", ("live_set", "tracks"))
-            )
+                sock,
+                ack_sock,
+                bridge.OscCommand(
+                    "/api/children",
+                    ("live_set", "tracks", tracks_before_request_id),
+                ),
+                expected_request_id=tracks_before_request_id,
+            ),
+            tracks_before_request_id,
         )
         if not tracks_before:
             print("error: did not receive api_children tracks; reload the device in Live", file=sys.stderr)
@@ -223,10 +249,18 @@ def run(auth_token: str) -> int:
         print(f"sent: {bridge.describe_command(create_track)}")
         _print_acks(_send_and_collect_acks(sock, ack_sock, create_track))
 
+        tracks_after_request_id = _smoke_request_id("tracks-after")
         tracks_after = _extract_api_children(
             _send_and_collect_acks(
-                sock, ack_sock, bridge.OscCommand("/api/children", ("live_set", "tracks"))
-            )
+                sock,
+                ack_sock,
+                bridge.OscCommand(
+                    "/api/children",
+                    ("live_set", "tracks", tracks_after_request_id),
+                ),
+                expected_request_id=tracks_after_request_id,
+            ),
+            tracks_after_request_id,
         )
         track_count_after = len(tracks_after)
         new_track_index = _new_track_index(tracks_before, tracks_after)
@@ -291,19 +325,32 @@ def run(auth_token: str) -> int:
         inspect_acks = _send_and_collect_acks(sock, ack_sock, inspect, timeout_s=1.5)
         _print_acks(inspect_acks)
         note_count = _extract_note_count(inspect_acks)
-        if note_count is not None:
-            print(f"info: final note_count={note_count}")
+        if note_count is None:
+            print("error: did not receive the final clip note inspection", file=sys.stderr)
+            ack_sock.close()
+            return 4
+        if note_count != len(notes):
+            print(
+                "error: final clip note count did not match the written pattern "
+                f"(expected {len(notes)}, received {note_count})",
+                file=sys.stderr,
+            )
+            ack_sock.close()
+            return 4
+        print(f"info: final note_count={note_count}")
 
         final_status_acks = _send_and_collect_acks(sock, ack_sock, bridge.OscCommand("/status"))
         final_status = _extract_status(final_status_acks)
-        if final_status is not None:
-            print(
-                "info: final status total_tracks="
-                f"{final_status.total_tracks} midi={final_status.midi_tracks} "
-                f"audio={final_status.audio_tracks} returns={final_status.return_tracks}"
-            )
-        else:
+        if final_status is None:
             _print_acks(final_status_acks)
+            print("error: did not receive the final bridge status", file=sys.stderr)
+            ack_sock.close()
+            return 5
+        print(
+            "info: final status total_tracks="
+            f"{final_status.total_tracks} midi={final_status.midi_tracks} "
+            f"audio={final_status.audio_tracks} returns={final_status.return_tracks}"
+        )
 
     ack_sock.close()
     return 0

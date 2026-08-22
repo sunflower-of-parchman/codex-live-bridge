@@ -8,9 +8,10 @@ Security fixes are applied on a best-effort basis to the latest code on `main`.
 
 The bridge protects mutating and persistent-control commands with an
 authenticated capability token configured locally in the Max device. Read-only
-commands remain tokenless. Keep command and ACK traffic on loopback addresses
-such as `127.0.0.1`; UDP does not encrypt the token or Live data, so do not
-expose ports `9000` or `9001` to an untrusted network.
+commands remain tokenless. The shipped command receiver binds explicitly to
+`127.0.0.1:9000`, and the Python client rejects non-loopback targets. Keep ACK
+traffic on loopback as well. UDP does not encrypt the token or Live data, so do
+not expose port `9001` to an untrusted network.
 
 The generic `/api/set` and `/api/call` surface can reach broad LiveAPI behavior.
 Treat it as powerful local control of the active Live set. Destructive commands

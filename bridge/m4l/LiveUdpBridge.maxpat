@@ -76,10 +76,10 @@
 					"id" : "obj-6",
 					"maxclass" : "newobj",
 					"numinlets" : 1,
-					"numoutlets" : 1,
-					"outlettype" : [ "" ],
-					"patching_rect" : [ 300.0, 90.0, 102.0, 23.0 ],
-					"text" : "udpreceive 9000 @defer 1"
+					"numoutlets" : 2,
+					"outlettype" : [ "", "" ],
+					"patching_rect" : [ 300.0, 90.0, 332.0, 23.0 ],
+					"text" : "node.script osc_loopback_receiver.js @autostart 1 @defer 1 @restart 1"
 				}
 
 			}
@@ -171,7 +171,7 @@
 				"box" : 				{
 					"id" : "obj-14",
 					"maxclass" : "newobj",
-					"numinlets" : 1,
+					"numinlets" : 2,
 					"numoutlets" : 3,
 					"outlettype" : [ "", "", "" ],
 					"patching_rect" : [ 600.0, 240.0, 156.0, 23.0 ],
@@ -510,7 +510,7 @@
 					"numinlets" : 1,
 					"numoutlets" : 1,
 					"outlettype" : [ "" ],
-					"patching_rect" : [ 420.0, 90.0, 78.0, 23.0 ],
+					"patching_rect" : [ 650.0, 90.0, 78.0, 23.0 ],
 					"text" : "qlim 10 @defer 1"
 				}
 
@@ -538,7 +538,19 @@
 				}
 
 			}
- ],
+, 			{
+				"box" : 				{
+					"id" : "obj-61",
+					"maxclass" : "newobj",
+					"numinlets" : 1,
+					"numoutlets" : 1,
+					"outlettype" : [ "" ],
+					"patching_rect" : [ 2670.0, 170.0, 132.0, 23.0 ],
+					"text" : "prepend osc_dispatch"
+				}
+
+			}
+	 ],
 		"lines" : [ 			{
 				"patchline" : 				{
 					"destination" : [ "obj-14", 0 ],
@@ -961,7 +973,7 @@
 				}
 	, 			{
 					"patchline" : 				{
-						"destination" : [ "obj-14", 0 ],
+						"destination" : [ "obj-61", 0 ],
 						"source" : [ "obj-7", 28 ]
 					}
 
@@ -1003,20 +1015,34 @@
 			}
 , 			{
 				"patchline" : 				{
-					"destination" : [ "obj-14", 0 ],
+					"destination" : [ "obj-14", 1 ],
 					"source" : [ "obj-59", 0 ]
 				}
 
 			}
- ],
+, 			{
+				"patchline" : 				{
+					"destination" : [ "obj-14", 0 ],
+					"source" : [ "obj-61", 0 ]
+				}
+
+			}
+	 ],
 		"dependency_cache" : [ 			{
 				"name" : "live_udp_bridge.js",
 				"bootpath" : ".",
 				"patcherrelativepath" : ".",
-				"type" : "TEXT",
-				"implicit" : 1
-			}
- ],
+					"type" : "TEXT",
+					"implicit" : 1
+				}
+, 			{
+					"name" : "osc_loopback_receiver.js",
+					"bootpath" : ".",
+					"patcherrelativepath" : ".",
+					"type" : "TEXT",
+					"implicit" : 1
+				}
+	 ],
 		"autosave" : 0,
 		"oscreceiveudpport" : 0
 	}

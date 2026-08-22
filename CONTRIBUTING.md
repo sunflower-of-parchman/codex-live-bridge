@@ -20,6 +20,7 @@ Run from repo root:
 python3 -m unittest discover -s bridge -p "test_*.py"
 python3 -m unittest discover -s tests -p "test_*.py"
 node --check bridge/m4l/live_udp_bridge.js
+node --check bridge/m4l/osc_loopback_receiver.js
 python3 -m json.tool bridge/m4l/LiveUdpBridge.maxpat >/dev/null
 bash .github/scripts/audit_public_hygiene.sh
 ```
