@@ -1,6 +1,6 @@
 # Installation
 
-The 3.1.1 release includes LiveUdpBridge.zip with the Max for Live device and
+The 3.2.0 release includes LiveUdpBridge.zip with the Max for Live device and
 its two JavaScript runtime files:
 
 ```text
@@ -16,7 +16,7 @@ you need to build your own copy.
 ## Use a Release Device
 
 1. Download and extract
-   [LiveUdpBridge.zip](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/download/codex-live-bridge-v3.1.1/LiveUdpBridge.zip).
+   [LiveUdpBridge.zip](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/download/codex-live-bridge-v3.2.0/LiveUdpBridge.zip).
 2. Keep `LiveUdpBridge.amxd`, `live_udp_bridge.js`, and
    `osc_loopback_receiver.js` next to each other.
 3. Open Ableton Live and drag `LiveUdpBridge.amxd` onto a MIDI track.
@@ -115,16 +115,18 @@ Leave `CHANGE_ME_BEFORE_USE` unchanged when writes should remain disabled.
 ## Source Editing
 
 After editing `bridge/m4l/LiveUdpBridge.maxpat` or
-either JavaScript runtime file:
+either JavaScript runtime file, update an existing installation with:
 
-1. Package a fresh `LiveUdpBridge.amxd` from a Live-hosted Max MIDI Effect.
-2. Keep `live_udp_bridge.js` and `osc_loopback_receiver.js` next to the
-   packaged device.
-3. Reload the device in Ableton Live.
-4. Run the static checks from `README.md`.
-5. Run the read-focused status command before any mutating validation.
-6. If writes are enabled, confirm the local token still matches
-   `CODEX_LIVE_BRIDGE_TOKEN`.
+```bash
+node scripts/ableton-device.js --install --verify-live
+```
+
+Run the static checks from `README.md`. Reload the device when the current Live
+set needs to pick up a changed Max patch. If writes are enabled, confirm the
+local token still matches `CODEX_LIVE_BRIDGE_TOKEN`.
+
+For a first installation, follow [Package From Source](#package-from-source)
+to create the initial device.
 
 Keep real tokens in local packaged devices and environment state. Do not commit
 them to the tracked `.maxpat` source.

@@ -1,6 +1,6 @@
 # codex-live-bridge
 
-Current release: [3.1.1](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/tag/codex-live-bridge-v3.1.1)
+Current release: [3.2.0](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/tag/codex-live-bridge-v3.2.0)
 
 `codex-live-bridge` is a Max for Live OSC/UDP bridge for Ableton Live. It lets
 codex and local scripts inspect a Live set through LiveAPI. A local capability
@@ -42,7 +42,7 @@ included here.
   [Codex CLI](https://developers.openai.com/codex/cli/), or
   [Codex IDE extension](https://developers.openai.com/codex/ide/)
 - Python 3.10+
-- Node.js for the Python security tests and JavaScript syntax checks
+- Node.js for device updates, Python security tests, and JavaScript syntax checks
 
 The separate Live Extension requires Live 12 Suite Beta 12.4.5 or later.
 For details, see [Extensions](https://www.ableton.com/en/live/extensions/)
@@ -64,9 +64,9 @@ node --check scripts/ableton-device.js
 
 2. Download and extract the packaged Max for Live device:
 
-[Download LiveUdpBridge.zip](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/download/codex-live-bridge-v3.1.1/LiveUdpBridge.zip)
+[Download LiveUdpBridge.zip](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/download/codex-live-bridge-v3.2.0/LiveUdpBridge.zip)
 
-The 3.1.1 release includes the device and both JavaScript runtime files:
+The 3.2.0 release includes the device and both JavaScript runtime files:
 
 ```text
 LiveUdpBridge.amxd

@@ -6,12 +6,17 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-08-22
+
 ### Added
 
-- Added `scripts/ableton-device.js` to stage a rebuilt device from an existing
-  installation and the tracked Max patch.
-- Added opt-in installation with preserved local authentication and metadata,
-  persistent backups, token-free Live verification, and rollback on failure.
+- Added `scripts/ableton-device.js` to rebuild and privately stage an existing
+  Max for Live device from the tracked patch.
+- Added explicit device installation with persistent backups and automatic
+  rollback when live verification fails.
+- Preserved Ableton device metadata and local authentication during updates.
+- Verified the installed Ableton bridge with a token-free localhost status
+  request.
 
 ## [3.1.1] - 2026-08-22
 

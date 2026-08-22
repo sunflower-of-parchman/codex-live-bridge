@@ -55,13 +55,14 @@ class PublicDocsTests(unittest.TestCase):
         self.assertNotIn("Live Extension", image)
         self.assertNotIn("Shared inspection core", image)
 
-    def test_public_docs_identify_release_3_1_1(self) -> None:
+    def test_public_docs_identify_release_3_2_0(self) -> None:
         readme = README.read_text(encoding="utf-8")
         changelog = CHANGELOG.read_text(encoding="utf-8")
         protocol = PROTOCOL.read_text(encoding="utf-8")
 
-        self.assertIn("Current release: [3.1.1]", readme)
-        self.assertIn("releases/tag/codex-live-bridge-v3.1.1", readme)
+        self.assertIn("Current release: [3.2.0]", readme)
+        self.assertIn("releases/tag/codex-live-bridge-v3.2.0", readme)
+        self.assertIn("## [3.2.0] - 2026-08-22", changelog)
         self.assertIn("## [3.1.1] - 2026-08-22", changelog)
         self.assertIn("## [3.1.0] - 2026-06-10", changelog)
         self.assertIn("Protocol status: v3.1.", protocol)
@@ -82,10 +83,13 @@ class PublicDocsTests(unittest.TestCase):
         self.assertIn("https://www.ableton.com/en/live/extensions/", text)
         self.assertIn("https://www.ableton.com/en/beta/", text)
 
-    def test_readme_documents_node_requirement_for_security_tests(self) -> None:
+    def test_readme_documents_node_requirement_for_updates_and_security_tests(self) -> None:
         text = README.read_text(encoding="utf-8")
 
-        self.assertIn("Node.js for the Python security tests and JavaScript syntax checks", text)
+        self.assertIn(
+            "Node.js for device updates, Python security tests, and JavaScript syntax checks",
+            text,
+        )
         self.assertRegex(
             text,
             r"`bridge/m4l/LiveUdpBridge\.maxpat` or either JavaScript runtime\s+file",
@@ -136,11 +140,11 @@ class PublicDocsTests(unittest.TestCase):
         install_text = (REPO_ROOT / "INSTALL.md").read_text(encoding="utf-8")
         download_url = (
             "https://github.com/sunflower-of-parchman/codex-live-bridge/"
-            "releases/download/codex-live-bridge-v3.1.1/LiveUdpBridge.zip"
+            "releases/download/codex-live-bridge-v3.2.0/LiveUdpBridge.zip"
         )
 
         self.assertIn("INSTALL.md", text)
-        self.assertIn("3.1.1 release includes the device", text)
+        self.assertIn("3.2.0 release includes the device", text)
         self.assertIn(download_url, text)
         self.assertIn(download_url, install_text)
         self.assertIn("build the device from", text)
@@ -175,7 +179,7 @@ class PublicDocsTests(unittest.TestCase):
     def test_installation_starts_with_read_only_access(self) -> None:
         text = (REPO_ROOT / "INSTALL.md").read_text(encoding="utf-8")
 
-        self.assertIn("3.1.1 release includes LiveUdpBridge.zip", text)
+        self.assertIn("3.2.0 release includes LiveUdpBridge.zip", text)
         self.assertLess(
             text.index("## Use a Release Device"),
             text.index("## Package From Source"),
@@ -279,15 +283,25 @@ class PublicDocsTests(unittest.TestCase):
         self.assertIn("Do not commit or upload them", install)
         self.assertIn("placeholder-only device", install)
 
-    def test_device_update_work_stays_unreleased(self) -> None:
-        changelog = CHANGELOG.read_text(encoding="utf-8")
-        unreleased = changelog.split("## [Unreleased]\n", 1)[1].split(
-            "## [3.1.1]", 1
-        )[0]
+        source_editing = install.split("## Source Editing\n", 1)[1]
+        self.assertIn(
+            "node scripts/ableton-device.js --install --verify-live",
+            source_editing,
+        )
+        self.assertIn("For a first installation", source_editing)
+        self.assertNotIn("Package a fresh `LiveUdpBridge.amxd`", source_editing)
 
-        self.assertIn("scripts/ableton-device.js", unreleased)
-        self.assertIn("token-free Live verification", unreleased)
-        self.assertIn("Current release: [3.1.1]", README.read_text(encoding="utf-8"))
+    def test_device_update_work_is_in_current_release(self) -> None:
+        changelog = CHANGELOG.read_text(encoding="utf-8")
+        unreleased, release = changelog.split("## [Unreleased]\n", 1)[1].split(
+            "## [3.2.0] - 2026-08-22", 1
+        )
+        release = release.split("## [3.1.1]", 1)[0]
+
+        self.assertEqual(unreleased.strip(), "")
+        self.assertIn("scripts/ableton-device.js", release)
+        self.assertIn("token-free localhost status", release)
+        self.assertIn("Current release: [3.2.0]", README.read_text(encoding="utf-8"))
 
     def test_removed_auxiliary_files_stay_removed(self) -> None:
         stale_paths = [
