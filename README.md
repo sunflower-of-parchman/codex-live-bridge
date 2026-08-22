@@ -2,14 +2,13 @@
 
 Current release: [3.1.0](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/tag/codex-live-bridge-v3.1.0)
 
-`codex-live-bridge` provides local-first Ableton Live automation and inspection
-through a Max for Live OSC/UDP bridge for Codex, scripts, LiveAPI, observers,
-MIDI, and controlled writes.
+`codex-live-bridge` is a Max for Live OSC/UDP bridge for Ableton Live. It lets
+codex and local scripts inspect a Live set through LiveAPI. A local capability
+token also allows controlled changes when you choose to configure one.
 
-The repo ships the editable Max patch, the JavaScript router loaded by the
-patch, and a Python OSC client/CLI. It is designed for a local Ableton Live
-session on the same machine, using UDP `9000` for commands and UDP `9001` for
-ACKs and observer events.
+The repo ships the editable Max patch and the JavaScript files that run the
+bridge. A Python OSC client/CLI sends local commands on UDP `9000` and receives
+ACKs or observer events on UDP `9001`.
 
 Started during the OpenAI 2026 Hackathon in San Francisco, built in tandem
 with GPT-5.3-Codex.
@@ -19,32 +18,35 @@ Ableton, or Cycling '74. All trademarks belong to their respective owners.
 
 ## How It Fits Together
 
-Two ways to work with Ableton Live use one shared inspection core.
+This repository contains LiveUdpBridge, the standalone external bridge. A Live
+Extension and shared inspection core are separate components and are not
+included here.
 
-![Live Extension and LiveUdpBridge architecture](docs/assets/hybrid-architecture.svg)
+![codex-live-bridge connects local tools with Ableton Live](docs/assets/hybrid-architecture.svg)
 
 ### Responsibilities
 
 | Surface | Responsibility |
 | --- | --- |
-| **Live Extension** | Clip actions, large clip reads, and reports inside Live |
-| **Shared inspection core** | Validate, analyze, report, and compare |
-| **LiveUdpBridge** | External control, observers, LiveAPI, MIDI, writes, and insertion |
+| **LiveUdpBridge (included)** | External control, observers, LiveAPI, MIDI, writes, and insertion |
+| **Live Extension (separate)** | Clip actions, large clip reads, and reports inside Live |
+| **Shared inspection core (separate)** | Validate, analyze, report, and compare |
 
 ## Requirements
 
 - For LiveUdpBridge, release or Beta Ableton Live with Max for Live support:
   [Ableton Live](https://www.ableton.com/en/live/) and
   [Max for Live](https://www.ableton.com/en/live/max-for-live/)
-- For the Live Extension, Live 12 Suite Beta 12.4.5 or later:
-  [Extensions](https://www.ableton.com/en/live/extensions/) and
-  [join the Live Beta](https://www.ableton.com/en/beta/)
-- A local Codex surface:
+- A local terminal, or an optional codex surface:
   [Codex app](https://developers.openai.com/codex/app/),
   [Codex CLI](https://developers.openai.com/codex/cli/), or
   [Codex IDE extension](https://developers.openai.com/codex/ide/)
 - Python 3.10+
-- Node.js for syntax-checking the Max JavaScript file during development
+- Node.js for the Python security tests and JavaScript syntax checks
+
+The separate Live Extension requires Live 12 Suite Beta 12.4.5 or later.
+For details, see [Extensions](https://www.ableton.com/en/live/extensions/)
+and [join the Live Beta](https://www.ableton.com/en/beta/).
 
 ## Quick Start
 
@@ -59,40 +61,30 @@ node --check bridge/m4l/live_udp_bridge.js
 node --check bridge/m4l/osc_loopback_receiver.js
 ```
 
-2. Export or obtain the loadable Max for Live device:
+2. Package the Max for Live device from source:
 
 ```text
 LiveUdpBridge.amxd
+live_udp_bridge.js
+osc_loopback_receiver.js
 ```
 
-Follow `INSTALL.md` to package `LiveUdpBridge.amxd` from the tracked
-`bridge/m4l/LiveUdpBridge.maxpat` source. Tagged releases may also provide the
-packaged device and adjacent JavaScript router as a `LiveUdpBridge.zip`
-download.
+The current 3.1.0 release contains source code only. It does not include a
+LiveUdpBridge.zip download or a packaged device. Follow `INSTALL.md` to create
+`LiveUdpBridge.amxd` from `bridge/m4l/LiveUdpBridge.maxpat` in a Live-hosted
+Max MIDI Effect.
 
-3. Keep both JavaScript runtime files next to the exported device. Max resolves
-the LiveAPI router through `[js live_udp_bridge.js]`. Node for Max runs the
-loopback-only command receiver:
+3. Keep both JavaScript runtime files next to the exported device, then load
+the device onto a MIDI track. Max resolves the LiveAPI router through
+`[js live_udp_bridge.js]`. Node for Max runs the loopback-only command
+receiver:
 
 ```text
 bridge/m4l/live_udp_bridge.js
 bridge/m4l/osc_loopback_receiver.js
 ```
 
-4. Configure the local write token:
-
-```bash
-export CODEX_LIVE_BRIDGE_TOKEN="$(
-  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-)"
-```
-
-In Max, replace `CHANGE_ME_BEFORE_USE` in the
-`set_auth_token CHANGE_ME_BEFORE_USE` message, save the local device, and
-reload it. Use the same token in the environment. Keep real tokens out of the
-tracked `.maxpat` source.
-
-5. Verify the local bridge with a read-focused status command:
+4. Verify the bridge with a read-only status command:
 
 ```bash
 python3 bridge/ableton_udp_bridge.py --ack --status --no-tempo --no-signature
@@ -104,6 +96,25 @@ Expected ACK shape:
 ack:  /ack pong
 ack:  /ack status <total_tracks> <midi_tracks> <audio_tracks> <return_tracks> live_set <id>
 ```
+
+Read-only commands do not require a token. With `--ack`, the client exits with
+an error if its reply listener cannot open, a complete matching response does
+not arrive, or the bridge reports an error. It does not send the command when
+the listener cannot open.
+
+5. Optional: configure a local token for writes and observers:
+
+```bash
+export CODEX_LIVE_BRIDGE_TOKEN="$(
+  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+)"
+printf '%s\n' "$CODEX_LIVE_BRIDGE_TOKEN"
+```
+
+Copy the printed token into the Max `set_auth_token CHANGE_ME_BEFORE_USE`
+message, replacing `CHANGE_ME_BEFORE_USE`. Save and reload the local device.
+The exported environment variable gives the Python client the same token.
+Keep real tokens out of the tracked `.maxpat` source.
 
 The editable `.maxpat` file is the canonical tracked source. Packaged `.amxd`
 devices are release artifacts saved from a Live-hosted Max MIDI Effect.
@@ -154,8 +165,9 @@ local capability token through `--auth-token` or
 
 ## Role In The Hybrid Architecture
 
-`codex-live-bridge` remains the public, standalone external automation surface.
-It does not require Ableton's Extensions SDK.
+`codex-live-bridge` is the public, standalone external automation surface.
+It does not require Ableton's Extensions SDK. The Live Extension and shared
+inspection core are separate and are not included in this repository.
 
 The broader product architecture assigns responsibilities this way:
 
@@ -180,8 +192,8 @@ without adding an Extensions SDK dependency to the bridge.
 ## Protocol Notes
 
 - Default host: `127.0.0.1`
-- Command channel: UDP `9000`
-- ACK/event channel: UDP `9001`
+- Command channel: UDP `9000`, active while the Max for Live device is loaded
+- ACK/event channel: UDP `9001`, active only while a client is listening
 - Structured payloads travel as JSON strings.
 - LiveAPI paths use Ableton's zero-based indexes, for example
   `live_set tracks 0`.
@@ -239,11 +251,20 @@ them. During separate Extensions SDK `1.0.0` qualification, the native SDK
 omitted those two fields. Cross-surface consumers must therefore treat note-ID
 matching as unavailable and release velocity as an explicit SDK-side gap.
 
-Listen for observer events:
+Register and listen for tempo changes after configuring the local token:
 
 ```bash
-python3 bridge/ableton_udp_bridge.py --listen --listen-timeout 30 \
-  --listen-max-events 20 --no-tempo --no-signature
+python3 bridge/ableton_udp_bridge.py --ack --listen --listen-timeout 30 \
+  --listen-max-events 20 --no-tempo --no-signature \
+  --api-observe live_set tempo \
+  '{"observer_id":"obs-tempo","emit_initial":true}' req-observe
+```
+
+Remove the observer when you are done:
+
+```bash
+python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
+  --api-unobserve obs-tempo req-unobserve
 ```
 
 Run the full-surface smoke test in a disposable set:
@@ -257,8 +278,8 @@ meter. Use it only when those changes are acceptable.
 
 ## Development
 
-If you modify `bridge/m4l/live_udp_bridge.js` or
-`bridge/m4l/LiveUdpBridge.maxpat`:
+If you modify `bridge/m4l/LiveUdpBridge.maxpat` or either JavaScript runtime
+file:
 
 1. Keep both JS files next to the patch, or update the Max runtime objects.
 2. Reload the device in Ableton Live.
@@ -277,9 +298,10 @@ bash .github/scripts/audit_public_hygiene.sh
 ```
 
 Live-runtime validation is separate from static validation. Before a release,
-package `LiveUdpBridge.amxd` from a Live-hosted Max MIDI Effect, load that
-device in Ableton Live, confirm UDP `9000` and `9001` are active, then check
-read wrappers, observer cleanup, bounded parameter writes, and Live 12.3 native
+package `LiveUdpBridge.amxd` from a Live-hosted Max MIDI Effect and load that
+device in Ableton Live. Confirm the command receiver is listening on UDP
+`9000`; UDP `9001` opens only while a client is listening. Then check read
+wrappers, observer cleanup, bounded parameter writes, and Live 12.3 native
 insertion wrappers in a disposable set.
 
 ## Data, Training, And Generation Boundary
@@ -300,10 +322,10 @@ learn a user profile or improve itself from behavior over time.
 The OSC bridge uses a local capability token for writes and persistent control.
 Read-only inspection remains tokenless. The shipped command receiver binds
 explicitly to `127.0.0.1:9000`, and the Python client rejects non-loopback
-targets. UDP does not encrypt the token or Live data. Keep port `9001` off
-untrusted networks. Treat generic `/api/set` and `/api/call` commands as
-powerful local LiveAPI access. Only one ACK-listening client can bind the
-default `9001` port at a time.
+targets. UDP does not encrypt the token or Live data. The reply client binds
+`127.0.0.1:9001` only while it is listening. Treat generic `/api/set` and
+`/api/call` commands as powerful local LiveAPI access. Only one ACK-listening
+client can bind the default `9001` port at a time.
 
 ## Project Docs
 
