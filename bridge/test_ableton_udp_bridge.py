@@ -47,7 +47,8 @@ const result = (() => {{
 process.stdout.write(JSON.stringify(result));
 """
     completed = subprocess.run(
-        ["node", "-e", harness],
+        ["node"],
+        input=harness,
         check=True,
         capture_output=True,
         text=True,
