@@ -6,6 +6,13 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `scripts/ableton-device.js` to stage a rebuilt device from an existing
+  installation and the tracked Max patch.
+- Added opt-in installation with preserved local authentication and metadata,
+  persistent backups, token-free Live verification, and rollback on failure.
+
 ## [3.1.1] - 2026-08-22
 
 ### Security

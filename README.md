@@ -59,6 +59,7 @@ python3 -m unittest discover -s bridge -p "test_*.py"
 python3 -m unittest discover -s tests -p "test_*.py"
 node --check bridge/m4l/live_udp_bridge.js
 node --check bridge/m4l/osc_loopback_receiver.js
+node --check scripts/ableton-device.js
 ```
 
 2. Download and extract the packaged Max for Live device:
@@ -116,6 +117,31 @@ Keep real tokens out of the tracked `.maxpat` source.
 The editable `.maxpat` file is the canonical tracked source. Packaged `.amxd`
 devices are release artifacts saved from a Live-hosted Max MIDI Effect.
 
+### Update an Installed Device
+
+Stage an updated copy from an existing installed device:
+
+```bash
+node scripts/ableton-device.js
+```
+
+This command only stages the device and both JavaScript files in a private
+temporary directory. It does not change the installed files. Its JSON output
+includes `stageDir`, `installed`, `verifiedLive`, `backupDir`,
+`tokenConfigured`, and `hashes`.
+
+To update the installation and verify the running Ableton bridge:
+
+```bash
+node scripts/ableton-device.js --install --verify-live
+```
+
+Installation requires `--install`. It preserves the existing device metadata
+and write token. A persistent backup restores the previous files if the
+token-free Live status check fails. Staged devices and backups can contain a
+configured token. Keep them private and do not commit or upload them. See
+`INSTALL.md` for default locations and command options.
+
 ## Included Files
 
 - `bridge/m4l/LiveUdpBridge.maxpat`: editable Max for Live patch source
@@ -124,6 +150,7 @@ devices are release artifacts saved from a Live-hosted Max MIDI Effect.
   bound explicitly to `127.0.0.1:9000`
 - `bridge/ableton_udp_bridge.py`: Python OSC client/CLI with ACK and listen modes
 - `bridge/full_surface_smoke_test.py`: opt-in mutating smoke test for disposable sets
+- `scripts/ableton-device.js`: local device staging and opt-in installation
 - `bridge/commands.md`: command cheat sheet
 - `INSTALL.md`: source export and device loading instructions
 - `PROTOCOL.md`: canonical OSC/UDP protocol contract
@@ -290,6 +317,7 @@ python3 -m unittest discover -s bridge -p "test_*.py"
 python3 -m unittest discover -s tests -p "test_*.py"
 node --check bridge/m4l/live_udp_bridge.js
 node --check bridge/m4l/osc_loopback_receiver.js
+node --check scripts/ableton-device.js
 python3 -m json.tool bridge/m4l/LiveUdpBridge.maxpat >/dev/null
 bash .github/scripts/audit_public_hygiene.sh
 ```

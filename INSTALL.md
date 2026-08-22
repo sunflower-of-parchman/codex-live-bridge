@@ -47,6 +47,51 @@ opened `.maxpat` file. To create a loadable device from the tracked source:
 6. Reload `LiveUdpBridge.amxd` on a MIDI track in Ableton Live.
 7. Run the read-only status command shown above.
 
+## Update an Installed Device
+
+After the bridge has been installed once, stage an updated copy without
+changing the installation:
+
+```bash
+node scripts/ableton-device.js
+```
+
+On macOS, the default baseline is the existing device at:
+
+```text
+~/Music/Ableton/User Library/Presets/MIDI Effects/Max MIDI Effect/LiveUdpBridge.amxd
+```
+
+The command rebuilds the device from the tracked Max patch in a private
+temporary directory. It preserves the installed device metadata and any
+configured local token. An existing baseline does not need to be opened in Max
+or rediscovered through the Ableton interface.
+
+To replace the installed files, keep Ableton Live open with the bridge loaded
+and run:
+
+```bash
+node scripts/ableton-device.js --install --verify-live
+```
+
+No installed file changes without `--install`. The `--verify-live` option
+requires `--install`. Before installation, the command saves the existing
+device and JavaScript files under:
+
+```text
+~/Library/Application Support/codex-live-bridge/backups
+```
+
+It then checks the running bridge with a token-free localhost status request.
+If verification fails, all three installed files are restored from the backup.
+Override paths with `--device PATH`, `--output-dir DIR`, `--backup-dir DIR`,
+or `--python PATH`. Output and backup directories inside this repository are
+rejected.
+
+Staged devices and backups can contain the existing local token. Keep them
+private. Do not commit or upload them. Public release packages must use a
+placeholder-only device.
+
 ## Configure Authenticated Writes
 
 Skip this section if you only need read-only inspection. Writes, observer

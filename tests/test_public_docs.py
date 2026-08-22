@@ -224,6 +224,71 @@ class PublicDocsTests(unittest.TestCase):
         self.assertIn("`127.0.0.1:9001` only while it is listening", text)
         self.assertNotIn("confirm UDP `9000` and `9001` are active", text)
 
+    def test_docs_describe_safe_local_device_updates(self) -> None:
+        readme = README.read_text(encoding="utf-8")
+        install = (REPO_ROOT / "INSTALL.md").read_text(encoding="utf-8")
+        commands = (REPO_ROOT / "bridge" / "commands.md").read_text(
+            encoding="utf-8"
+        )
+        device_tool = REPO_ROOT / "scripts" / "ableton-device.js"
+
+        self.assertTrue(device_tool.exists())
+        for text in (readme, install, commands):
+            self.assertIn("node scripts/ableton-device.js\n", text)
+            self.assertIn(
+                "node scripts/ableton-device.js --install --verify-live",
+                text,
+            )
+            self.assertIn("token", text)
+            self.assertIn("backup", text)
+            self.assertNotIn("/" + "Users/", text)
+
+        for field in (
+            "stageDir",
+            "installed",
+            "verifiedLive",
+            "backupDir",
+            "tokenConfigured",
+            "hashes",
+        ):
+            self.assertIn(field, readme)
+
+        self.assertIn(
+            "~/Music/Ableton/User Library/Presets/MIDI Effects/Max MIDI "
+            "Effect/LiveUdpBridge.amxd",
+            install,
+        )
+        self.assertIn(
+            "~/Library/Application Support/codex-live-bridge/backups",
+            install,
+        )
+        for option in (
+            "--device PATH",
+            "--output-dir DIR",
+            "--backup-dir DIR",
+            "--python PATH",
+        ):
+            self.assertIn(option, install)
+
+        self.assertRegex(
+            install,
+            r"`--verify-live` option\s+requires `--install`",
+        )
+        self.assertIn("all three installed files are restored", install)
+        self.assertIn("directories inside this repository are", install)
+        self.assertIn("Do not commit or upload them", install)
+        self.assertIn("placeholder-only device", install)
+
+    def test_device_update_work_stays_unreleased(self) -> None:
+        changelog = CHANGELOG.read_text(encoding="utf-8")
+        unreleased = changelog.split("## [Unreleased]\n", 1)[1].split(
+            "## [3.1.1]", 1
+        )[0]
+
+        self.assertIn("scripts/ableton-device.js", unreleased)
+        self.assertIn("token-free Live verification", unreleased)
+        self.assertIn("Current release: [3.1.1]", README.read_text(encoding="utf-8"))
+
     def test_removed_auxiliary_files_stay_removed(self) -> None:
         stale_paths = [
             REPO_ROOT / "bridge" / "benchmark_midi_write.py",
@@ -238,6 +303,7 @@ class PublicDocsTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('python3 -m unittest discover -s tests -p "test_*.py"', ci_text)
+        self.assertIn("node --check scripts/ableton-device.js", ci_text)
 
     def test_session_clip_inspection_v1_constants_and_docs_stay_aligned(self) -> None:
         protocol = PROTOCOL.read_text(encoding="utf-8")

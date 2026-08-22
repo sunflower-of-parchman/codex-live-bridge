@@ -12,6 +12,26 @@ trailer `request_correlation req:<request_id>`, or
 Protocol 3.1 session clip inspection ACKs are packet-bounded to 4096 encoded
 OSC bytes.
 
+## Local Device Maintenance
+
+Stage the existing device and both JavaScript files without changing the
+installation:
+
+```bash
+node scripts/ableton-device.js
+```
+
+To update the installed files and verify the running bridge:
+
+```bash
+node scripts/ableton-device.js --install --verify-live
+```
+
+Installation requires `--install` and preserves the current local token. A
+backup restores all three files if the token-free Live check fails. Staged
+devices and backups may contain a credential. Keep them private and do not
+commit or upload them. See `INSTALL.md` for paths and options.
+
 ## Authentication
 
 Read commands remain tokenless. Every write, generic call, observer lifecycle
