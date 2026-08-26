@@ -55,6 +55,9 @@ change, insertion, track or clip mutation, and MIDI output command places
 /api/device_parameters <device_path> [request_id]
 /api/mixer_status <track_ref|master|return:N> [request_id]
 /api/session_clip_inspect <track_index> <slot_index> 1 <request_id>
+/api/arrangement_project_inspect 1 <request_id>
+/api/arrangement_track_inspect <track_index> 1 <request_id>
+/api/arrangement_clip_inspect <track_index> <clip_index> <include_notes> 1 <request_id>
 ```
 
 Examples:
@@ -65,6 +68,9 @@ Examples:
 /api/children live_set tracks req-tracks
 /api/device_list all req-devices
 /api/session_clip_inspect 0 0 1 req-clip
+/api/arrangement_project_inspect 1 req-project
+/api/arrangement_track_inspect 0 1 req-track
+/api/arrangement_clip_inspect 0 0 0 1 req-arrangement-clip
 ```
 
 `/api/session_clip_inspect` requires non-negative integer indexes, schema
@@ -90,6 +96,28 @@ for complete assembly, a correlated error, or the full ACK timeout:
 python3 bridge/ableton_udp_bridge.py \
   --ack --no-tempo --no-signature \
   --api-session-clip-inspect 0 0 req-clip
+```
+
+Arrangement project inspection includes tempo, meter, ordinary tracks, return
+tracks, and Main. Track inspection adds bounded Arrangement clip/device
+metadata. Clip inspection uses `include_notes=0` by default and does not read
+or return raw MIDI notes. All three commands use required request IDs,
+strictly assembled correlated fragments, and a 4096-byte OSC packet ceiling.
+
+```bash
+python3 bridge/ableton_udp_bridge.py \
+  --ack --no-tempo --no-signature \
+  --api-arrangement-project-inspect req-project \
+  --api-arrangement-track-inspect 0 req-track \
+  --api-arrangement-clip-inspect 0 0 req-clip
+```
+
+Raw MIDI notes require explicit opt-in:
+
+```bash
+python3 bridge/ableton_udp_bridge.py \
+  --ack --no-tempo --no-signature \
+  --api-arrangement-clip-inspect-notes 0 0 req-notes
 ```
 
 ## Observer Commands

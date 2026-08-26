@@ -75,6 +75,19 @@ SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS = 32
 SESSION_CLIP_INSPECTION_MAX_CORRELATED_ACKS = (
     SESSION_CLIP_INSPECTION_MAX_FRAGMENTS + 1
 )
+ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES = 4096
+ARRANGEMENT_INSPECTION_MAX_ITEMS = 256
+ARRANGEMENT_INSPECTION_MAX_NOTES = 4096
+ARRANGEMENT_INSPECTION_MAX_FRAGMENTS = 1024
+ARRANGEMENT_INSPECTION_MAX_ACTIVE_ASSEMBLIES = 16
+ARRANGEMENT_INSPECTION_MAX_RETAINED_BYTES = 4 * 1024 * 1024
+ARRANGEMENT_INSPECTION_EVENTS = frozenset(
+    {
+        "api_arrangement_project_inspect",
+        "api_arrangement_track_inspect",
+        "api_arrangement_clip_inspect",
+    }
+)
 ACK_DRAIN_MAX_PACKETS = 32
 SESSION_CLIP_INSPECTION_MAX_PACKETS_PER_SELECT = 16
 ACK_PACKET_BUDGET_BYTES = 65_507
@@ -150,6 +163,9 @@ class BridgeConfig:
     api_insert_chains: Tuple[Tuple[str, str, str | None], ...] = ()
     api_drum_chain_in_notes: Tuple[Tuple[str, int, str | None], ...] = ()
     api_session_clip_inspects: Tuple[Tuple[int, int, str], ...] = ()
+    api_arrangement_project_inspects: Tuple[str, ...] = ()
+    api_arrangement_track_inspects: Tuple[Tuple[int, str], ...] = ()
+    api_arrangement_clip_inspects: Tuple[Tuple[int, int, bool, str], ...] = ()
     ack_mode: str = "per_command"
     ack_flush_interval: int = 10
     listen: bool = False
@@ -1140,6 +1156,468 @@ class SessionClipInspectionAssembler:
         }
 
 
+class ArrangementInspectionAssemblyError(ValueError):
+    """Raised when Arrangement inspection fragments fail strict validation."""
+
+
+class ArrangementInspectionAssembler:
+    """Assemble bounded, correlated Arrangement facts without implicit notes."""
+
+    SCHEMA = "codex-live-bridge.arrangement-inspection"
+    SCHEMA_VERSION = 1
+    PRODUCER_VERSION = "3.2.0"
+    PACKET_BUDGET_BYTES = ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES
+    MAX_ITEMS = ARRANGEMENT_INSPECTION_MAX_ITEMS
+    MAX_NOTES = ARRANGEMENT_INSPECTION_MAX_NOTES
+    MAX_FRAGMENTS = ARRANGEMENT_INSPECTION_MAX_FRAGMENTS
+    MAX_ACTIVE_ASSEMBLIES = ARRANGEMENT_INSPECTION_MAX_ACTIVE_ASSEMBLIES
+    MAX_RETAINED_BYTES = ARRANGEMENT_INSPECTION_MAX_RETAINED_BYTES
+    _ROOT_KEYS = {
+        "schema", "schema_version", "producer_version", "inspection_id",
+        "correlation", "snapshot", "transfer", "data",
+    }
+    _CORRELATION_KEYS = {"request_id", "scope", "track_index", "clip_index"}
+    _SNAPSHOT_KEYS = {"started_ms", "completed_ms", "atomic", "consistent"}
+    _TRANSFER_KEYS = {
+        "fragment_index", "fragment_count", "fragment_kind", "is_last",
+        "packet_budget_bytes",
+    }
+    _TRACK_KEYS = {
+        "index", "path", "id", "name", "has_midi_input", "has_audio_input",
+        "mute", "solo", "arrangement_clip_count", "device_count",
+    }
+    _CLIP_KEYS = {
+        "index", "path", "id", "name", "start_time", "end_time",
+        "start_marker", "end_marker", "live_length", "looping", "loop_start",
+        "loop_end", "is_midi_clip", "is_audio_clip",
+    }
+    _DEVICE_KEYS = {"index", "path", "id", "name", "class_name", "type"}
+    _AUX_TRACK_KEYS = {"index", "path", "id", "name", "device_count", "mute", "solo"}
+
+    def __init__(self) -> None:
+        self._states: dict[tuple[str, str], dict[str, object]] = {}
+        self._retained_bytes = 0
+
+    @staticmethod
+    def _fail(label: str) -> None:
+        raise ArrangementInspectionAssemblyError(f"malformed fragment: {label}")
+
+    @classmethod
+    def _require_dict(
+        cls, value: object, keys: set[str], label: str
+    ) -> dict[str, object]:
+        if not isinstance(value, dict) or set(value) != keys:
+            cls._fail(label)
+        assert isinstance(value, dict)
+        return value
+
+    @classmethod
+    def _require_index(
+        cls, value: object, label: str, maximum: int | None = None
+    ) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            cls._fail(label)
+        assert isinstance(value, int)
+        if maximum is not None and value > maximum:
+            raise ArrangementInspectionAssemblyError(
+                f"resource limit exceeded: {label}"
+            )
+        return value
+
+    @classmethod
+    def _require_text(cls, value: object, label: str) -> str:
+        if not isinstance(value, str) or not value:
+            cls._fail(label)
+        assert isinstance(value, str)
+        return value
+
+    @classmethod
+    def _require_nullable_text(cls, value: object, label: str) -> None:
+        if value is not None and not isinstance(value, str):
+            cls._fail(label)
+
+    @classmethod
+    def _require_nullable_bool(cls, value: object, label: str) -> None:
+        if value is not None and not isinstance(value, bool):
+            cls._fail(label)
+
+    @classmethod
+    def _require_nullable_number(cls, value: object, label: str) -> None:
+        if value is None:
+            return
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            cls._fail(label)
+
+    @classmethod
+    def _canonical(cls, value: object) -> str:
+        try:
+            return json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ArrangementInspectionAssemblyError(
+                "malformed fragment: not JSON serializable"
+            ) from exc
+
+    def _evict_state(self, key: tuple[str, str]) -> None:
+        state = self._states.pop(key, None)
+        if state is not None:
+            self._retained_bytes = max(
+                0, self._retained_bytes - int(state.get("retained_bytes", 0))
+            )
+
+    def _validate_track(
+        self, value: object, expected_index: int | None = None
+    ) -> dict[str, object]:
+        track = self._require_dict(value, self._TRACK_KEYS, "track keys")
+        index = self._require_index(track["index"], "track.index")
+        if expected_index is not None and index != expected_index:
+            raise ArrangementInspectionAssemblyError("mixed metadata")
+        self._require_text(track["path"], "track.path")
+        self._require_index(track["id"], "track.id")
+        self._require_nullable_text(track["name"], "track.name")
+        for field in ("has_midi_input", "has_audio_input", "mute", "solo"):
+            self._require_nullable_bool(track[field], f"track.{field}")
+        self._require_index(
+            track["arrangement_clip_count"], "track.arrangement_clip_count", self.MAX_ITEMS
+        )
+        self._require_index(track["device_count"], "track.device_count", self.MAX_ITEMS)
+        return track
+
+    def _validate_clip(
+        self, value: object, expected_index: int | None = None
+    ) -> dict[str, object]:
+        clip = self._require_dict(value, self._CLIP_KEYS, "clip keys")
+        index = self._require_index(clip["index"], "clip.index")
+        if expected_index is not None and index != expected_index:
+            raise ArrangementInspectionAssemblyError("mixed metadata")
+        self._require_text(clip["path"], "clip.path")
+        self._require_index(clip["id"], "clip.id")
+        self._require_nullable_text(clip["name"], "clip.name")
+        for field in (
+            "start_time", "end_time", "start_marker", "end_marker", "live_length",
+            "loop_start", "loop_end",
+        ):
+            self._require_nullable_number(clip[field], f"clip.{field}")
+        if (
+            clip["start_time"] is None
+            or clip["end_time"] is None
+            or float(clip["end_time"]) < float(clip["start_time"])
+            or not math.isfinite(float(clip["end_time"]) - float(clip["start_time"]))
+        ):
+            self._fail("clip time range")
+        if clip["live_length"] is not None and float(clip["live_length"]) < 0:
+            self._fail("clip.live_length")
+        for start_field, end_field in (
+            ("start_marker", "end_marker"), ("loop_start", "loop_end")
+        ):
+            start = clip[start_field]
+            end = clip[end_field]
+            if start is not None and end is not None and (
+                float(end) < float(start)
+                or not math.isfinite(float(end) - float(start))
+            ):
+                self._fail("clip ranges")
+        for field in ("looping", "is_midi_clip", "is_audio_clip"):
+            self._require_nullable_bool(clip[field], f"clip.{field}")
+        return clip
+
+    def _validate_devices(self, value: object, expected_count: int) -> None:
+        if not isinstance(value, list) or len(value) != expected_count:
+            self._fail("device count")
+        for expected_index, item in enumerate(value):
+            device = self._require_dict(item, self._DEVICE_KEYS, "device keys")
+            if self._require_index(device["index"], "device.index") != expected_index:
+                self._fail("device indexes")
+            self._require_text(device["path"], "device.path")
+            self._require_index(device["id"], "device.id")
+            self._require_nullable_text(device["name"], "device.name")
+            self._require_nullable_text(device["class_name"], "device.class_name")
+            device_type = device["type"]
+            if device_type is not None and (
+                isinstance(device_type, bool)
+                or not isinstance(device_type, int)
+                or device_type not in {0, 1, 2, 4}
+            ):
+                self._fail("device.type")
+
+    def _validate_aux_track(
+        self, value: object, expected_index: int | None
+    ) -> None:
+        track = self._require_dict(value, self._AUX_TRACK_KEYS, "aux track keys")
+        if track["index"] != expected_index or isinstance(track["index"], bool):
+            self._fail("aux track index")
+        self._require_text(track["path"], "aux track.path")
+        self._require_index(track["id"], "aux track.id")
+        self._require_nullable_text(track["name"], "aux track.name")
+        self._require_index(track["device_count"], "aux track.device_count", self.MAX_ITEMS)
+        self._require_nullable_bool(track["mute"], "aux track.mute")
+        self._require_nullable_bool(track["solo"], "aux track.solo")
+
+    def _validate_payload(
+        self, payload: object, correlation: dict[str, object]
+    ) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            self._fail("payload")
+        assert isinstance(payload, dict)
+        scope = correlation["scope"]
+        if payload.get("context") != "arrangement" or payload.get("scope") != scope:
+            raise ArrangementInspectionAssemblyError("mixed metadata")
+        privacy = self._require_dict(
+            payload.get("privacy"), {"notes_requested", "notes_included"}, "privacy"
+        )
+        requested = privacy["notes_requested"]
+        included = privacy["notes_included"]
+        if not isinstance(requested, bool) or not isinstance(included, bool):
+            self._fail("privacy flags")
+        if requested != included or (scope != "clip" and (requested or included)):
+            raise ArrangementInspectionAssemblyError("privacy contract violation")
+
+        if scope == "project":
+            if set(payload) != {
+                "context", "scope", "project", "tracks", "return_tracks", "main_track", "privacy"
+            }:
+                self._fail("project payload keys")
+            project = self._require_dict(
+                payload["project"],
+                {
+                    "tempo", "signature_numerator", "signature_denominator",
+                    "track_count", "return_track_count",
+                },
+                "project keys",
+            )
+            for field in ("tempo", "signature_numerator", "signature_denominator"):
+                self._require_nullable_number(project[field], f"project.{field}")
+            track_count = self._require_index(
+                project["track_count"], "project.track_count", self.MAX_ITEMS
+            )
+            return_count = self._require_index(
+                project["return_track_count"], "project.return_track_count", self.MAX_ITEMS
+            )
+            tracks = payload["tracks"]
+            if not isinstance(tracks, list) or len(tracks) != track_count:
+                self._fail("track count")
+            for index, track in enumerate(tracks):
+                self._validate_track(track, index)
+            returns = payload["return_tracks"]
+            if not isinstance(returns, list) or len(returns) != return_count:
+                self._fail("return track count")
+            for index, track in enumerate(returns):
+                self._validate_aux_track(track, index)
+            self._validate_aux_track(payload["main_track"], None)
+            return payload
+
+        track = self._validate_track(payload.get("track"), int(correlation["track_index"]))
+        if scope == "track":
+            if set(payload) != {"context", "scope", "track", "clips", "devices", "privacy"}:
+                self._fail("track payload keys")
+            clips = payload["clips"]
+            if not isinstance(clips, list) or len(clips) != track["arrangement_clip_count"]:
+                self._fail("clip count")
+            for index, clip in enumerate(clips):
+                self._validate_clip(clip, index)
+            self._validate_devices(payload["devices"], int(track["device_count"]))
+            return payload
+
+        expected_keys = {"context", "scope", "track", "clip", "devices", "privacy"}
+        if requested:
+            expected_keys.update({"notes", "summary"})
+        if set(payload) != expected_keys:
+            raise ArrangementInspectionAssemblyError("privacy contract violation")
+        clip = self._validate_clip(payload["clip"], int(correlation["clip_index"]))
+        self._validate_devices(payload["devices"], int(track["device_count"]))
+        if requested:
+            if clip["is_midi_clip"] is not True:
+                raise ArrangementInspectionAssemblyError("privacy contract violation")
+            notes = payload["notes"]
+            if not isinstance(notes, list) or len(notes) > self.MAX_NOTES:
+                raise ArrangementInspectionAssemblyError("resource limit exceeded: notes")
+            validator = SessionClipInspectionAssembler()
+            try:
+                for note in notes:
+                    validator._validate_note(note)
+                summary = validator._validate_summary(payload["summary"])
+            except SessionClipInspectionAssemblyError as exc:
+                raise ArrangementInspectionAssemblyError(str(exc)) from exc
+            pitches = [int(note["pitch"]) for note in notes]
+            if (
+                summary["note_count"] != len(notes)
+                or summary["pitch_min"] != (min(pitches) if pitches else None)
+                or summary["pitch_max"] != (max(pitches) if pitches else None)
+            ):
+                self._fail("note summary")
+        return payload
+
+    def add_event(self, event: AckEvent) -> dict[str, object] | None:
+        if event.event not in ARRANGEMENT_INSPECTION_EVENTS:
+            raise ArrangementInspectionAssemblyError("malformed fragment event")
+        return self.add_fragment(event.payload.get("fragment"), event.request_id, event.event)
+
+    def add_fragment(
+        self,
+        fragment: object,
+        request_id: str | None = None,
+        event_name: str | None = None,
+    ) -> dict[str, object] | None:
+        candidate_key: tuple[str, str] | None = None
+        if isinstance(fragment, dict) and isinstance(fragment.get("correlation"), dict):
+            candidate_request = fragment["correlation"].get("request_id")
+            candidate_id = fragment.get("inspection_id")
+            if (
+                isinstance(candidate_request, str)
+                and isinstance(candidate_id, str)
+                and (request_id is None or request_id == candidate_request)
+            ):
+                candidate_key = (candidate_request, candidate_id)
+        try:
+            value = self._require_dict(fragment, self._ROOT_KEYS, "root keys")
+            if (
+                value["schema"] != self.SCHEMA
+                or isinstance(value["schema_version"], bool)
+                or not isinstance(value["schema_version"], int)
+                or value["schema_version"] != self.SCHEMA_VERSION
+                or value["producer_version"] != self.PRODUCER_VERSION
+            ):
+                self._fail("schema")
+            inspection_id = self._require_text(value["inspection_id"], "inspection_id")
+            if len(inspection_id.encode("utf-8")) > 128:
+                self._fail("inspection_id")
+            correlation = self._require_dict(
+                value["correlation"], self._CORRELATION_KEYS, "correlation keys"
+            )
+            correlated_request = self._require_text(
+                correlation["request_id"], "correlation.request_id"
+            )
+            if len(correlated_request.encode("utf-8")) > 128:
+                self._fail("correlation.request_id")
+            if request_id is not None and correlated_request != request_id:
+                raise ArrangementInspectionAssemblyError("request ID mismatch")
+            scope = correlation["scope"]
+            if not isinstance(scope, str) or scope not in {"project", "track", "clip"}:
+                self._fail("correlation.scope")
+            expected_event = f"api_arrangement_{scope}_inspect"
+            if event_name is not None and event_name != expected_event:
+                raise ArrangementInspectionAssemblyError("mixed metadata")
+            track_index = correlation["track_index"]
+            clip_index = correlation["clip_index"]
+            if scope == "project":
+                if track_index is not None or clip_index is not None:
+                    self._fail("correlation indexes")
+            else:
+                self._require_index(track_index, "correlation.track_index")
+                if scope == "track" and clip_index is not None:
+                    self._fail("correlation.clip_index")
+                if scope == "clip":
+                    self._require_index(clip_index, "correlation.clip_index")
+            snapshot = self._require_dict(value["snapshot"], self._SNAPSHOT_KEYS, "snapshot keys")
+            started = self._require_index(snapshot["started_ms"], "snapshot.started_ms")
+            completed = self._require_index(snapshot["completed_ms"], "snapshot.completed_ms")
+            if completed < started or snapshot["atomic"] is not False or snapshot["consistent"] is not True:
+                self._fail("snapshot")
+            transfer = self._require_dict(value["transfer"], self._TRANSFER_KEYS, "transfer keys")
+            count = self._require_index(transfer["fragment_count"], "transfer.fragment_count", self.MAX_FRAGMENTS)
+            index = self._require_index(transfer["fragment_index"], "transfer.fragment_index")
+            if count == 0 or index >= count:
+                self._fail("transfer indexes")
+            kind = transfer["fragment_kind"]
+            if kind != ("complete" if count == 1 else "chunk"):
+                self._fail("transfer.fragment_kind")
+            if transfer["is_last"] is not (index == count - 1):
+                self._fail("transfer.is_last")
+            if (
+                isinstance(transfer["packet_budget_bytes"], bool)
+                or not isinstance(transfer["packet_budget_bytes"], int)
+                or transfer["packet_budget_bytes"] != self.PACKET_BUDGET_BYTES
+            ):
+                self._fail("transfer.packet_budget_bytes")
+            data = self._require_dict(value["data"], {"payload_chunk"}, "data keys")
+            self._require_text(data["payload_chunk"], "data.payload_chunk")
+
+            canonical = self._canonical(value)
+            try:
+                fragment_bytes = len(canonical.encode("utf-8"))
+            except UnicodeError as exc:
+                raise ArrangementInspectionAssemblyError("malformed fragment: UTF-8") from exc
+            if fragment_bytes > self.PACKET_BUDGET_BYTES:
+                raise ArrangementInspectionAssemblyError("resource limit exceeded: fragment bytes")
+            key = (correlated_request, inspection_id)
+            metadata = self._canonical(
+                {
+                    "correlation": correlation,
+                    "snapshot": snapshot,
+                    "count": count,
+                    "event": expected_event,
+                }
+            )
+            state = self._states.get(key)
+            if state is None:
+                if len(self._states) >= self.MAX_ACTIVE_ASSEMBLIES:
+                    raise ArrangementInspectionAssemblyError("active assembly limit exceeded")
+                state = {"metadata": metadata, "count": count, "fragments": {}, "retained_bytes": 0}
+                self._states[key] = state
+            elif state["metadata"] != metadata:
+                raise ArrangementInspectionAssemblyError("mixed metadata")
+            fragments = state["fragments"]
+            assert isinstance(fragments, dict)
+            existing = fragments.get(index)
+            if existing is not None:
+                if existing[1] != canonical:
+                    raise ArrangementInspectionAssemblyError("conflicting duplicate fragment")
+                return None
+            if self._retained_bytes + fragment_bytes > self.MAX_RETAINED_BYTES:
+                raise ArrangementInspectionAssemblyError("resource limit exceeded: retained bytes")
+            fragments[index] = (data["payload_chunk"], canonical)
+            state["retained_bytes"] = int(state["retained_bytes"]) + fragment_bytes
+            self._retained_bytes += fragment_bytes
+            if len(fragments) != count:
+                return None
+            try:
+                payload_text = "".join(str(fragments[i][0]) for i in range(count))
+                if len(payload_text.encode("utf-8")) > self.MAX_RETAINED_BYTES:
+                    raise ArrangementInspectionAssemblyError("resource limit exceeded: payload bytes")
+                payload = json.loads(
+                    payload_text,
+                    parse_constant=lambda _value: (_ for _ in ()).throw(
+                        ValueError("non-finite number")
+                    ),
+                )
+                validated = self._validate_payload(payload, correlation)
+                return {
+                    "schema": self.SCHEMA,
+                    "schema_version": self.SCHEMA_VERSION,
+                    "producer_version": self.PRODUCER_VERSION,
+                    "inspection_id": inspection_id,
+                    "correlation": dict(correlation),
+                    "snapshot": dict(snapshot),
+                    "data": validated,
+                    "transport": {
+                        "complete": True,
+                        "fragment_count": count,
+                        "received_fragment_count": count,
+                        "fragment_indexes": list(range(count)),
+                        "packet_budget_bytes": self.PACKET_BUDGET_BYTES,
+                    },
+                }
+            except (json.JSONDecodeError, ValueError, UnicodeError) as exc:
+                if isinstance(exc, ArrangementInspectionAssemblyError):
+                    raise
+                raise ArrangementInspectionAssemblyError("malformed payload JSON") from exc
+            finally:
+                self._evict_state(key)
+        except ArrangementInspectionAssemblyError:
+            if candidate_key is not None:
+                self._evict_state(candidate_key)
+            raise
+
+
 def _percentile(values: Sequence[float], pct: float) -> float:
     if not values:
         return 0.0
@@ -1510,6 +1988,37 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         default=[],
         metavar=("TRACK_INDEX", "SLOT_INDEX", "REQUEST_ID"),
         help="Send /api/session_clip_inspect <track_index> <slot_index> 1 <request_id>",
+    )
+    parser.add_argument(
+        "--api-arrangement-project-inspect",
+        action="append",
+        default=[],
+        metavar="REQUEST_ID",
+        help="Read bounded Arrangement project/track metadata without MIDI notes",
+    )
+    parser.add_argument(
+        "--api-arrangement-track-inspect",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("TRACK_INDEX", "REQUEST_ID"),
+        help="Read bounded Arrangement track, clip, and device metadata without MIDI notes",
+    )
+    parser.add_argument(
+        "--api-arrangement-clip-inspect",
+        nargs=3,
+        action="append",
+        default=[],
+        metavar=("TRACK_INDEX", "CLIP_INDEX", "REQUEST_ID"),
+        help="Read one Arrangement clip without retrieving or returning MIDI notes",
+    )
+    parser.add_argument(
+        "--api-arrangement-clip-inspect-notes",
+        nargs=3,
+        action="append",
+        default=[],
+        metavar=("TRACK_INDEX", "CLIP_INDEX", "REQUEST_ID"),
+        help="Explicitly opt in to bounded raw MIDI notes for one Arrangement clip",
     )
 
     parser.add_argument(
@@ -1939,6 +2448,52 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
             parsed.append((track_index, slot_index, request_id))
         return tuple(parsed)
 
+    def _arrangement_request_id(value: object, option: str) -> str:
+        request_id = str(value)
+        if not request_id:
+            parser.error(f"{option} request_id must be non-empty")
+        if len(request_id.encode("utf-8")) > 128:
+            parser.error(f"{option} request_id must be at most 128 UTF-8 bytes")
+        return request_id
+
+    def _arrangement_index(value: object, option: str) -> int:
+        try:
+            return non_negative_int(str(value))
+        except (TypeError, ValueError, argparse.ArgumentTypeError):
+            parser.error(f"{option} indexes must be non-negative integers")
+
+    def _parse_api_arrangement_track_inspect(
+        entries: Sequence[Sequence[str]],
+    ) -> Tuple[Tuple[int, str], ...]:
+        option = "--api-arrangement-track-inspect"
+        return tuple(
+            (
+                _arrangement_index(parts[0], option),
+                _arrangement_request_id(parts[1], option),
+            )
+            for parts in entries
+        )
+
+    def _parse_api_arrangement_clip_inspect(
+        entries: Sequence[Sequence[str]],
+        *,
+        include_notes: bool,
+    ) -> Tuple[Tuple[int, int, bool, str], ...]:
+        option = (
+            "--api-arrangement-clip-inspect-notes"
+            if include_notes
+            else "--api-arrangement-clip-inspect"
+        )
+        return tuple(
+            (
+                _arrangement_index(parts[0], option),
+                _arrangement_index(parts[1], option),
+                include_notes,
+                _arrangement_request_id(parts[2], option),
+            )
+            for parts in entries
+        )
+
     def _parse_midi_cc(entries: Sequence[Sequence[str]]) -> Tuple[Tuple[int, int, int], ...]:
         parsed: List[Tuple[int, int, int]] = []
         for parts in entries:
@@ -1996,6 +2551,21 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
     api_drum_chain_in_notes = _parse_api_drum_chain_in_note(ns.api_drum_chain_in_note)
     api_session_clip_inspects = _parse_api_session_clip_inspect(
         ns.api_session_clip_inspect
+    )
+    api_arrangement_project_inspects = tuple(
+        _arrangement_request_id(value, "--api-arrangement-project-inspect")
+        for value in ns.api_arrangement_project_inspect
+    )
+    api_arrangement_track_inspects = _parse_api_arrangement_track_inspect(
+        ns.api_arrangement_track_inspect
+    )
+    api_arrangement_clip_inspects = (
+        _parse_api_arrangement_clip_inspect(
+            ns.api_arrangement_clip_inspect, include_notes=False
+        )
+        + _parse_api_arrangement_clip_inspect(
+            ns.api_arrangement_clip_inspect_notes, include_notes=True
+        )
     )
     midi_ccs = _parse_midi_cc(ns.midi_cc)
     cc64s = _parse_cc64(ns.cc64)
@@ -2057,6 +2627,9 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         api_insert_chains=api_insert_chains,
         api_drum_chain_in_notes=api_drum_chain_in_notes,
         api_session_clip_inspects=api_session_clip_inspects,
+        api_arrangement_project_inspects=api_arrangement_project_inspects,
+        api_arrangement_track_inspects=api_arrangement_track_inspects,
+        api_arrangement_clip_inspects=api_arrangement_clip_inspects,
         ack_mode=str(ns.ack_mode),
         ack_flush_interval=int(ns.ack_flush_interval),
         listen=bool(ns.listen),
@@ -2314,7 +2887,9 @@ def parse_ack_event(address: str, args: Sequence[OscArg]) -> AckEvent:
     elif event == "api_drum_chain_in_note" and len(args) >= 3:
         request_id = _optional_request_id(args, 3)
         payload = {"chain_path": args[1], "chain": _try_parse_json(args[2])}
-    elif event == "api_session_clip_inspect" and len(args) >= 3:
+    elif (
+        event == "api_session_clip_inspect" or event in ARRANGEMENT_INSPECTION_EVENTS
+    ) and len(args) >= 3:
         request_id = _optional_request_id(args, 2)
         payload = {"fragment": _try_parse_json(args[1])}
     elif event == "api_event" and len(args) >= 3:
@@ -2520,6 +3095,25 @@ def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
             f"{detail}{_req_suffix(request_id)}"
         )
 
+    if event in ARRANGEMENT_INSPECTION_EVENTS and len(args) >= 3:
+        request_id = args[2]
+        parsed = _try_parse_json(args[1])
+        transfer = parsed.get("transfer") if isinstance(parsed, dict) else None
+        correlation = parsed.get("correlation") if isinstance(parsed, dict) else None
+        if not isinstance(transfer, dict) or not isinstance(correlation, dict):
+            return f"{event} malformed{_req_suffix(request_id)}"
+        index = transfer.get("fragment_index")
+        index_text = (
+            int(index) + 1
+            if isinstance(index, int) and not isinstance(index, bool)
+            else "?"
+        )
+        return (
+            f"{event} scope={correlation.get('scope', '?')} "
+            f"fragment={index_text}/{transfer.get('fragment_count', '?')}"
+            f"{_req_suffix(request_id)}"
+        )
+
     if event in {
         "api_device_list",
         "api_device_parameters",
@@ -2591,7 +3185,10 @@ def summarize_ack(address: str, args: Sequence[OscArg]) -> List[str]:
     if address == "/ack":
         summary = _rpc_ack_summary(args)
         if summary:
-            if args and args[0] == "api_session_clip_inspect":
+            if args and (
+                args[0] == "api_session_clip_inspect"
+                or args[0] in ARRANGEMENT_INSPECTION_EVENTS
+            ):
                 return [f"ack:  {summary}"]
             suffix = "" if not args else " " + " ".join(format_arg(a) for a in args)
             lines = [f"ack:  {address}{suffix}"]
@@ -2720,6 +3317,21 @@ def build_commands(cfg: BridgeConfig) -> List[OscCommand]:
             OscCommand(
                 "/api/session_clip_inspect",
                 (track_index, slot_index, 1, request_id),
+            )
+        )
+    for request_id in cfg.api_arrangement_project_inspects:
+        commands.append(
+            OscCommand("/api/arrangement_project_inspect", (1, request_id))
+        )
+    for track_index, request_id in cfg.api_arrangement_track_inspects:
+        commands.append(
+            OscCommand("/api/arrangement_track_inspect", (track_index, 1, request_id))
+        )
+    for track_index, clip_index, include_notes, request_id in cfg.api_arrangement_clip_inspects:
+        commands.append(
+            OscCommand(
+                "/api/arrangement_clip_inspect",
+                (track_index, clip_index, int(include_notes), 1, request_id),
             )
         )
 
@@ -3135,6 +3747,89 @@ def wait_for_session_clip_inspection_acks(
     return received
 
 
+def wait_for_arrangement_inspection_acks(
+    sock: socket.socket,
+    timeout_s: float,
+    request_id: str,
+    expected_event: str,
+) -> List[Tuple[str, List[OscArg]]]:
+    """Wait for complete bounded Arrangement facts or a correlated failure."""
+    if expected_event not in ARRANGEMENT_INSPECTION_EVENTS:
+        raise ArrangementInspectionAssemblyError("malformed fragment event")
+    timeout = _finite_wait_seconds(timeout_s, "timeout_s")
+    if timeout <= 0:
+        return []
+
+    deadline = time.monotonic() + timeout
+    received: List[Tuple[str, List[OscArg]]] = []
+    assembler = ArrangementInspectionAssembler()
+    correlated_ack_count = 0
+    unrelated_ack_count = 0
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        readable, _, _ = select.select([sock], [], [], remaining)
+        if not readable:
+            break
+
+        packets_processed = 0
+        while packets_processed < SESSION_CLIP_INSPECTION_MAX_PACKETS_PER_SELECT:
+            if time.monotonic() >= deadline:
+                return received
+            try:
+                packet, _address = sock.recvfrom(
+                    ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES + 1
+                )
+            except (BlockingIOError, OSError):
+                break
+            packets_processed += 1
+            if time.monotonic() >= deadline:
+                return received
+            if len(packet) > ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES:
+                if unrelated_ack_count < SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS:
+                    received.append(
+                        (
+                            "<unparsed>",
+                            [
+                                "OSC packet exceeds Arrangement inspection "
+                                f"budget: {len(packet)} bytes"
+                            ],
+                        )
+                    )
+                    unrelated_ack_count += 1
+                continue
+            try:
+                address, args = decode_osc_message(packet)
+            except Exception as exc:  # noqa: BLE001 - bounded diagnostic only
+                if unrelated_ack_count < SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS:
+                    received.append(
+                        ("<unparsed>", [_bounded_packet_diagnostic(exc, packet)])
+                    )
+                    unrelated_ack_count += 1
+                continue
+
+            event = parse_ack_event(address, args)
+            correlated_error = event.is_error and event.request_id == request_id
+            correlated_fragment = (
+                event.event == expected_event and event.request_id == request_id
+            )
+            if correlated_error or correlated_fragment:
+                if correlated_ack_count < ARRANGEMENT_INSPECTION_MAX_FRAGMENTS + 1:
+                    received.append((address, args))
+                    correlated_ack_count += 1
+            elif unrelated_ack_count < SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS:
+                received.append((address, args))
+                unrelated_ack_count += 1
+            if correlated_error:
+                return received
+            if correlated_fragment and assembler.add_event(event) is not None:
+                return received
+
+    return received
+
+
 def _drain_acks_nonblocking(sock: socket.socket) -> List[Tuple[str, List[OscArg]]]:
     drained: List[Tuple[str, List[OscArg]]] = []
     for _packet_index in range(ACK_DRAIN_MAX_PACKETS):
@@ -3285,6 +3980,56 @@ def _collect_and_print_session_clip_inspection_acks(
         )
 
 
+def _collect_and_print_arrangement_inspection_acks(
+    ack_sock: socket.socket,
+    timeout_s: float,
+    request_id: str,
+    expected_event: str,
+    durations_ms: List[float],
+    ack_counts: List[int],
+) -> None:
+    started = time.perf_counter()
+    acks = wait_for_arrangement_inspection_acks(
+        ack_sock,
+        timeout_s,
+        request_id,
+        expected_event,
+    )
+    durations_ms.append((time.perf_counter() - started) * 1000.0)
+    ack_counts.append(len(acks))
+    command_address = "/api/" + expected_event[len("api_"):]
+    if not acks:
+        raise BridgeAcknowledgementError(
+            f"no acknowledgement received for {command_address} "
+            f"(request {request_id}) within {timeout_s:.2f}s; "
+            "bridge may not be loaded"
+        )
+
+    assembler = ArrangementInspectionAssembler()
+    completed = False
+    for address, args in acks:
+        for line in summarize_ack(address, args):
+            print(line)
+        if address != "/ack":
+            continue
+        event = parse_ack_event(address, args)
+        if event.request_id != request_id:
+            continue
+        if event.is_error:
+            code = event.payload.get("code", "unknown_error")
+            raise BridgeAcknowledgementError(
+                f"bridge rejected {command_address} "
+                f"(request {request_id}): {code}"
+            )
+        if event.event == expected_event:
+            completed = assembler.add_event(event) is not None
+    if not completed:
+        raise BridgeAcknowledgementError(
+            f"did not receive a complete {command_address} "
+            f"acknowledgement (request {request_id}) within {timeout_s:.2f}s"
+        )
+
+
 _ACK_REQUEST_ARGUMENT_COUNTS = {
     "/api/ping": 0,
     "/api/get": 2,
@@ -3306,6 +4051,9 @@ _ACK_REQUEST_ARGUMENT_COUNTS = {
     "/api/insert_device": 4,
     "/api/insert_chain": 3,
     "/api/drum_chain_in_note": 3,
+    "/api/arrangement_project_inspect": 1,
+    "/api/arrangement_track_inspect": 2,
+    "/api/arrangement_clip_inspect": 4,
 }
 
 
@@ -3380,6 +4128,21 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
                             ack_sock,
                             cfg.ack_timeout_s,
                             request_id,
+                            ack_wait_durations_ms,
+                            ack_counts,
+                        )
+                    elif cmd.address in {
+                        "/api/arrangement_project_inspect",
+                        "/api/arrangement_track_inspect",
+                        "/api/arrangement_clip_inspect",
+                    }:
+                        expected_event, request_id = _command_ack_expectation(cmd)
+                        assert request_id is not None
+                        _collect_and_print_arrangement_inspection_acks(
+                            ack_sock,
+                            cfg.ack_timeout_s,
+                            request_id,
+                            expected_event,
                             ack_wait_durations_ms,
                             ack_counts,
                         )

@@ -33,8 +33,16 @@ var SESSION_CLIP_INSPECTION_NOTE_BATCH_SIZE = 256;
 var SESSION_CLIP_INSPECTION_MAX_ID_CALL_BYTES = 262144;
 var SESSION_CLIP_INSPECTION_MAX_NOTE_CALL_BYTES = 262144;
 var LEGACY_CLIP_INSPECTION_MAX_RESPONSE_BYTES = 49152;
+var ARRANGEMENT_INSPECTION_SCHEMA = "codex-live-bridge.arrangement-inspection";
+var ARRANGEMENT_INSPECTION_SCHEMA_VERSION = 1;
+var ARRANGEMENT_INSPECTION_PRODUCER_VERSION = "3.2.0";
+var ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES = 4096;
+var ARRANGEMENT_INSPECTION_MAX_ITEMS = 256;
+var ARRANGEMENT_INSPECTION_MAX_FRAGMENTS = 1024;
+var ARRANGEMENT_INSPECTION_MAX_PAYLOAD_BYTES = 4194304;
 var sessionClipInspectionCounter = 0;
 var sessionClipInspectionDictCounter = 0;
+var arrangementInspectionCounter = 0;
 
 function debug(msg) {
   var text = "[live-bridge] " + msg;
@@ -2660,6 +2668,639 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   }
 }
 
+function arrangementInspectionError(scope, category, details, requestId) {
+  var boundedDetails = (details || []).map(function (detail) {
+    if (typeof detail === "number" && isFinite(detail)) return detail;
+    return truncateUtf8ToByteLength(
+      detail === undefined ? "undefined" : detail === null ? "null" : String(detail),
+      256
+    );
+  });
+  ackWithRequest(
+    "error",
+    ["api_arrangement_" + String(scope) + "_inspect_" + String(category)].concat(
+      boundedDetails
+    ),
+    truncateUtf8ToByteLength(
+      requestId === undefined || requestId === null ? "" : String(requestId),
+      128
+    )
+  );
+}
+
+function validateArrangementInspectionRequest(scope, schemaVersion, requestId) {
+  var requestText =
+    requestId === undefined || requestId === null ? "" : String(requestId);
+  if (requestText.length === 0) {
+    arrangementInspectionError(scope, "validation_failed", ["request_id_required"], "");
+    return null;
+  }
+  var requestBytes = utf8ByteLength(requestText);
+  if (requestBytes > 128) {
+    arrangementInspectionError(
+      scope,
+      "validation_failed",
+      ["request_id_too_long", requestBytes],
+      truncateUtf8ToByteLength(requestText, 128)
+    );
+    return null;
+  }
+  if (
+    typeof schemaVersion !== "number" ||
+    schemaVersion !== ARRANGEMENT_INSPECTION_SCHEMA_VERSION
+  ) {
+    arrangementInspectionError(
+      scope,
+      "validation_failed",
+      ["unsupported_schema_version", schemaVersion],
+      requestText
+    );
+    return null;
+  }
+  return requestText;
+}
+
+function openArrangementInspectionApi(path, target, scope, requestId) {
+  try {
+    var api = new LiveAPI(null, path);
+    if (api && Number(api.id) > 0) return api;
+  } catch (err) {
+    // Return a bounded, correlated error without exposing Live exception text.
+  }
+  arrangementInspectionError(scope, "not_found", [target, path], requestId);
+  return null;
+}
+
+function arrangementInspectionCount(api, child, scope, requestId, maximum) {
+  var count = 0;
+  try {
+    count = Number(api.getcount(child));
+  } catch (err) {
+    arrangementInspectionError(scope, "read_failed", ["count", child], requestId);
+    return null;
+  }
+  if (!(isFinite(count) && count >= 0 && Math.floor(count) === count)) {
+    arrangementInspectionError(scope, "read_failed", ["count", child], requestId);
+    return null;
+  }
+  if (count > maximum) {
+    arrangementInspectionError(scope, "limit_exceeded", [child, count, maximum], requestId);
+    return null;
+  }
+  return count;
+}
+
+function arrangementNullableNumber(api, property) {
+  try {
+    var value = getScalar(api, property);
+    return typeof value === "number" && isFinite(value) ? value : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function arrangementNullableBoolean(api, property) {
+  try {
+    var value = getScalar(api, property);
+    if (typeof value === "boolean") return value;
+    if (value === 0 || value === 1) return value === 1;
+  } catch (err) {
+    // Unsupported optional Live properties remain nullable.
+  }
+  return null;
+}
+
+function readArrangementTrackSummary(trackApi, trackIndex, scope, requestId) {
+  var clipCount = arrangementInspectionCount(
+    trackApi,
+    "arrangement_clips",
+    scope,
+    requestId,
+    ARRANGEMENT_INSPECTION_MAX_ITEMS
+  );
+  if (clipCount === null) return null;
+  var deviceCount = arrangementInspectionCount(
+    trackApi,
+    "devices",
+    scope,
+    requestId,
+    ARRANGEMENT_INSPECTION_MAX_ITEMS
+  );
+  if (deviceCount === null) return null;
+  var path = normalizeLiveApiPath(trackApi.path, "live_set tracks " + trackIndex);
+  return {
+    index: trackIndex,
+    path: path,
+    id: Number(trackApi.id),
+    name: readNullableSessionClipInspectionTextProperty(trackApi, "name"),
+    has_midi_input: arrangementNullableBoolean(trackApi, "has_midi_input"),
+    has_audio_input: arrangementNullableBoolean(trackApi, "has_audio_input"),
+    mute: arrangementNullableBoolean(trackApi, "mute"),
+    solo: arrangementNullableBoolean(trackApi, "solo"),
+    arrangement_clip_count: clipCount,
+    device_count: deviceCount,
+  };
+}
+
+function readArrangementClipSummary(clipApi, clipIndex, scope, requestId) {
+  var startTime = arrangementNullableNumber(clipApi, "start_time");
+  var endTime = arrangementNullableNumber(clipApi, "end_time");
+  if (
+    startTime === null ||
+    endTime === null ||
+    endTime < startTime ||
+    !isFinite(endTime - startTime)
+  ) {
+    arrangementInspectionError(scope, "parse_failed", ["clip_time_range", clipIndex], requestId);
+    return null;
+  }
+  return {
+    index: clipIndex,
+    path: normalizeLiveApiPath(clipApi.path, ""),
+    id: Number(clipApi.id),
+    name: readNullableSessionClipInspectionTextProperty(clipApi, "name"),
+    start_time: startTime,
+    end_time: endTime,
+    start_marker: arrangementNullableNumber(clipApi, "start_marker"),
+    end_marker: arrangementNullableNumber(clipApi, "end_marker"),
+    live_length: arrangementNullableNumber(clipApi, "length"),
+    looping: arrangementNullableBoolean(clipApi, "looping"),
+    loop_start: arrangementNullableNumber(clipApi, "loop_start"),
+    loop_end: arrangementNullableNumber(clipApi, "loop_end"),
+    is_midi_clip: arrangementNullableBoolean(clipApi, "is_midi_clip"),
+    is_audio_clip: arrangementNullableBoolean(clipApi, "is_audio_clip"),
+  };
+}
+
+function readArrangementAuxTrack(path, index, scope, requestId) {
+  var api = openArrangementInspectionApi(path, "track", scope, requestId);
+  if (!api) return null;
+  var count = arrangementInspectionCount(
+    api,
+    "devices",
+    scope,
+    requestId,
+    ARRANGEMENT_INSPECTION_MAX_ITEMS
+  );
+  if (count === null) return null;
+  return {
+    index: index,
+    path: normalizeLiveApiPath(api.path, path),
+    id: Number(api.id),
+    name: readNullableSessionClipInspectionTextProperty(api, "name"),
+    device_count: count,
+    mute: arrangementNullableBoolean(api, "mute"),
+    solo: arrangementNullableBoolean(api, "solo"),
+  };
+}
+
+function readArrangementDevices(track, scope, requestId) {
+  var devices = [];
+  for (var index = 0; index < track.device_count; index += 1) {
+    var path = track.path + " devices " + index;
+    var api = openArrangementInspectionApi(path, "device", scope, requestId);
+    if (!api) return null;
+    devices.push({
+      index: index,
+      path: normalizeLiveApiPath(api.path, path),
+      id: Number(api.id),
+      name: readNullableSessionClipInspectionTextProperty(api, "name"),
+      class_name: readNullableSessionClipInspectionTextProperty(api, "class_name"),
+      type: readNullableSessionClipInspectionDeviceType(api),
+    });
+  }
+  return devices;
+}
+
+function arrangementInspectionAckPacketBytes(eventName, fragmentJson, requestId) {
+  return (
+    oscStringEncodedByteLength("/ack") +
+    oscStringEncodedByteLength(",sss") +
+    oscStringEncodedByteLength(eventName) +
+    oscStringEncodedByteLength(fragmentJson) +
+    oscStringEncodedByteLength(requestId)
+  );
+}
+
+function makeArrangementInspectionFragment(metadata, index, count, kind, isLast, chunk) {
+  return {
+    schema: ARRANGEMENT_INSPECTION_SCHEMA,
+    schema_version: ARRANGEMENT_INSPECTION_SCHEMA_VERSION,
+    producer_version: ARRANGEMENT_INSPECTION_PRODUCER_VERSION,
+    inspection_id: metadata.inspection_id,
+    correlation: metadata.correlation,
+    snapshot: metadata.snapshot,
+    transfer: {
+      fragment_index: index,
+      fragment_count: count,
+      fragment_kind: kind,
+      is_last: isLast,
+      packet_budget_bytes: ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES,
+    },
+    data: { payload_chunk: chunk },
+  };
+}
+
+function arrangementInspectionSubstring(value, start, end) {
+  if (end < value.length && end > start) {
+    var previous = value.charCodeAt(end - 1);
+    var following = value.charCodeAt(end);
+    if (
+      previous >= 0xd800 && previous <= 0xdbff &&
+      following >= 0xdc00 && following <= 0xdfff
+    ) {
+      end -= 1;
+    }
+  }
+  return value.slice(start, end);
+}
+
+function buildArrangementInspectionFragments(eventName, metadata, payload, requestId) {
+  var payloadJson = "";
+  try {
+    payloadJson = JSON.stringify(payload);
+  } catch (errSerialize) {
+    return { ok: false, error: "serialization_failed", details: [], fragments: [] };
+  }
+  if (typeof payloadJson !== "string") {
+    return { ok: false, error: "serialization_failed", details: [], fragments: [] };
+  }
+  var payloadBytes = utf8ByteLength(payloadJson);
+  if (payloadBytes > ARRANGEMENT_INSPECTION_MAX_PAYLOAD_BYTES) {
+    return {
+      ok: false,
+      error: "limit_exceeded",
+      details: ["payload_bytes", payloadBytes, ARRANGEMENT_INSPECTION_MAX_PAYLOAD_BYTES],
+      fragments: [],
+    };
+  }
+
+  var chunks = [];
+  var offset = 0;
+  while (offset < payloadJson.length) {
+    if (chunks.length >= ARRANGEMENT_INSPECTION_MAX_FRAGMENTS) {
+      return {
+        ok: false,
+        error: "limit_exceeded",
+        details: ["fragments", chunks.length + 1, ARRANGEMENT_INSPECTION_MAX_FRAGMENTS],
+        fragments: [],
+      };
+    }
+    var low = 1;
+    var high = Math.min(
+      payloadJson.length - offset,
+      ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES
+    );
+    var chosen = "";
+    while (low <= high) {
+      var midpoint = Math.floor((low + high) / 2);
+      var candidate = arrangementInspectionSubstring(payloadJson, offset, offset + midpoint);
+      if (candidate.length === 0) {
+        low = midpoint + 1;
+        continue;
+      }
+      var preview = makeArrangementInspectionFragment(
+        metadata,
+        ARRANGEMENT_INSPECTION_MAX_FRAGMENTS - 1,
+        ARRANGEMENT_INSPECTION_MAX_FRAGMENTS,
+        "complete",
+        false,
+        candidate
+      );
+      var previewJson = "";
+      try {
+        previewJson = JSON.stringify(preview);
+      } catch (errPreview) {
+        return { ok: false, error: "serialization_failed", details: [], fragments: [] };
+      }
+      var packetBytes = arrangementInspectionAckPacketBytes(
+        eventName,
+        previewJson,
+        requestId
+      );
+      if (packetBytes <= ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES) {
+        chosen = candidate;
+        low = midpoint + 1;
+      } else {
+        high = midpoint - 1;
+      }
+    }
+    if (chosen.length === 0) {
+      return { ok: false, error: "item_too_large", details: [offset], fragments: [] };
+    }
+    chunks.push(chosen);
+    offset += chosen.length;
+  }
+
+  var fragments = [];
+  for (var index = 0; index < chunks.length; index += 1) {
+    var fragment = makeArrangementInspectionFragment(
+      metadata,
+      index,
+      chunks.length,
+      chunks.length === 1 ? "complete" : "chunk",
+      index === chunks.length - 1,
+      chunks[index]
+    );
+    var serialized = JSON.stringify(fragment);
+    if (
+      arrangementInspectionAckPacketBytes(eventName, serialized, requestId) >
+      ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES
+    ) {
+      return { ok: false, error: "item_too_large", details: [index], fragments: [] };
+    }
+    fragments.push(serialized);
+  }
+  return { ok: true, fragments: fragments };
+}
+
+function emitArrangementInspection(scope, trackIndex, clipIndex, startedMs, payload, requestId) {
+  arrangementInspectionCounter += 1;
+  var eventName = "api_arrangement_" + scope + "_inspect";
+  var metadata = {
+    inspection_id: "arrangement_" + nowMs() + "_" + arrangementInspectionCounter,
+    correlation: {
+      request_id: requestId,
+      scope: scope,
+      track_index: trackIndex,
+      clip_index: clipIndex,
+    },
+    snapshot: {
+      started_ms: startedMs,
+      completed_ms: nowMs(),
+      atomic: false,
+      consistent: true,
+    },
+  };
+  var built = buildArrangementInspectionFragments(eventName, metadata, payload, requestId);
+  if (!built.ok) {
+    arrangementInspectionError(scope, built.error, built.details, requestId);
+    return;
+  }
+  for (var index = 0; index < built.fragments.length; index += 1) {
+    ackWithRequest(eventName, [built.fragments[index]], requestId);
+  }
+}
+
+function api_arrangement_project_inspect(schemaVersion, requestId) {
+  var requestText = validateArrangementInspectionRequest("project", schemaVersion, requestId);
+  if (requestText === null || !ensureInitialized(requestText)) return;
+  var startedMs = nowMs();
+  var count = arrangementInspectionCount(
+    song,
+    "tracks",
+    "project",
+    requestText,
+    ARRANGEMENT_INSPECTION_MAX_ITEMS
+  );
+  if (count === null) return;
+  var returns = arrangementInspectionCount(
+    song,
+    "return_tracks",
+    "project",
+    requestText,
+    ARRANGEMENT_INSPECTION_MAX_ITEMS
+  );
+  if (returns === null) return;
+  var tracks = [];
+  for (var index = 0; index < count; index += 1) {
+    var path = "live_set tracks " + index;
+    var trackApi = openArrangementInspectionApi(path, "track", "project", requestText);
+    if (!trackApi) return;
+    var track = readArrangementTrackSummary(trackApi, index, "project", requestText);
+    if (!track) return;
+    tracks.push(track);
+  }
+  var returnTracks = [];
+  for (var returnIndex = 0; returnIndex < returns; returnIndex += 1) {
+    var returnTrack = readArrangementAuxTrack(
+      "live_set return_tracks " + returnIndex,
+      returnIndex,
+      "project",
+      requestText
+    );
+    if (!returnTrack) return;
+    returnTracks.push(returnTrack);
+  }
+  var mainTrack = readArrangementAuxTrack(
+    "live_set master_track",
+    null,
+    "project",
+    requestText
+  );
+  if (!mainTrack) return;
+  var finalCount = arrangementInspectionCount(
+    song,
+    "tracks",
+    "project",
+    requestText,
+    ARRANGEMENT_INSPECTION_MAX_ITEMS
+  );
+  if (finalCount === null) return;
+  if (finalCount !== count) {
+    arrangementInspectionError("project", "snapshot_changed", [count, finalCount], requestText);
+    return;
+  }
+  emitArrangementInspection(
+    "project",
+    null,
+    null,
+    startedMs,
+    {
+      context: "arrangement",
+      scope: "project",
+      project: {
+        tempo: arrangementNullableNumber(song, "tempo"),
+        signature_numerator: arrangementNullableNumber(song, "signature_numerator"),
+        signature_denominator: arrangementNullableNumber(song, "signature_denominator"),
+        track_count: count,
+        return_track_count: returns,
+      },
+      tracks: tracks,
+      return_tracks: returnTracks,
+      main_track: mainTrack,
+      privacy: { notes_requested: false, notes_included: false },
+    },
+    requestText
+  );
+}
+
+function api_arrangement_track_inspect(trackIndex, schemaVersion, requestId) {
+  var requestText = validateArrangementInspectionRequest("track", schemaVersion, requestId);
+  if (requestText === null) return;
+  if (!isNonNegativeInteger(trackIndex)) {
+    arrangementInspectionError("track", "validation_failed", ["invalid_track_index", trackIndex], requestText);
+    return;
+  }
+  if (!ensureInitialized(requestText)) return;
+  var startedMs = nowMs();
+  var trackApi = openArrangementInspectionApi(
+    "live_set tracks " + trackIndex,
+    "track",
+    "track",
+    requestText
+  );
+  if (!trackApi) return;
+  var track = readArrangementTrackSummary(trackApi, Number(trackIndex), "track", requestText);
+  if (!track) return;
+  if (track.arrangement_clip_count + track.device_count > API_READ_MAX_TOTAL_ITEMS) {
+    arrangementInspectionError(
+      "track",
+      "limit_exceeded",
+      ["total_items", track.arrangement_clip_count + track.device_count, API_READ_MAX_TOTAL_ITEMS],
+      requestText
+    );
+    return;
+  }
+  var clips = [];
+  for (var index = 0; index < track.arrangement_clip_count; index += 1) {
+    var clipPath = track.path + " arrangement_clips " + index;
+    var clipApi = openArrangementInspectionApi(clipPath, "clip", "track", requestText);
+    if (!clipApi) return;
+    var clip = readArrangementClipSummary(clipApi, index, "track", requestText);
+    if (!clip) return;
+    clips.push(clip);
+  }
+  var devices = readArrangementDevices(track, "track", requestText);
+  if (devices === null) return;
+  emitArrangementInspection(
+    "track",
+    Number(trackIndex),
+    null,
+    startedMs,
+    {
+      context: "arrangement",
+      scope: "track",
+      track: track,
+      clips: clips,
+      devices: devices,
+      privacy: { notes_requested: false, notes_included: false },
+    },
+    requestText
+  );
+}
+
+function arrangementValidNote(note) {
+  if (!note || typeof note !== "object" || Array.isArray(note)) return false;
+  var fields = [
+    "note_id", "pitch", "start_time", "duration", "velocity", "mute",
+    "probability", "velocity_deviation", "release_velocity",
+  ];
+  for (var index = 0; index < fields.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(note, fields[index])) return false;
+  }
+  return (
+    isNonNegativeInteger(note.note_id) &&
+    isNonNegativeInteger(note.pitch) && note.pitch <= 127 &&
+    typeof note.start_time === "number" && isFinite(note.start_time) &&
+    typeof note.duration === "number" && isFinite(note.duration) && note.duration >= 0 &&
+    isFinite(note.start_time + note.duration) &&
+    typeof note.velocity === "number" && isFinite(note.velocity) &&
+    note.velocity >= 0 && note.velocity <= 127 &&
+    (typeof note.mute === "boolean" || note.mute === 0 || note.mute === 1) &&
+    typeof note.probability === "number" && isFinite(note.probability) &&
+    note.probability >= 0 && note.probability <= 1 &&
+    typeof note.velocity_deviation === "number" && isFinite(note.velocity_deviation) &&
+    note.velocity_deviation >= -127 && note.velocity_deviation <= 127 &&
+    typeof note.release_velocity === "number" && isFinite(note.release_velocity) &&
+    note.release_velocity >= 0 && note.release_velocity <= 127
+  );
+}
+
+function api_arrangement_clip_inspect(trackIndex, clipIndex, includeNotes, schemaVersion, requestId) {
+  var requestText = validateArrangementInspectionRequest("clip", schemaVersion, requestId);
+  if (requestText === null) return;
+  if (!isNonNegativeInteger(trackIndex) || !isNonNegativeInteger(clipIndex)) {
+    arrangementInspectionError(
+      "clip",
+      "validation_failed",
+      [!isNonNegativeInteger(trackIndex) ? "invalid_track_index" : "invalid_clip_index"],
+      requestText
+    );
+    return;
+  }
+  if (typeof includeNotes !== "number" || (includeNotes !== 0 && includeNotes !== 1)) {
+    arrangementInspectionError("clip", "validation_failed", ["invalid_include_notes"], requestText);
+    return;
+  }
+  if (!ensureInitialized(requestText)) return;
+  var startedMs = nowMs();
+  var trackApi = openArrangementInspectionApi(
+    "live_set tracks " + trackIndex,
+    "track",
+    "clip",
+    requestText
+  );
+  if (!trackApi) return;
+  var track = readArrangementTrackSummary(trackApi, Number(trackIndex), "clip", requestText);
+  if (!track) return;
+  if (clipIndex >= track.arrangement_clip_count) {
+    arrangementInspectionError("clip", "not_found", ["clip", trackIndex, clipIndex], requestText);
+    return;
+  }
+  var clipPath = track.path + " arrangement_clips " + clipIndex;
+  var clipApi = openArrangementInspectionApi(clipPath, "clip", "clip", requestText);
+  if (!clipApi) return;
+  var clip = readArrangementClipSummary(clipApi, Number(clipIndex), "clip", requestText);
+  if (!clip) return;
+  var devices = readArrangementDevices(track, "clip", requestText);
+  if (devices === null) return;
+  var payload = {
+    context: "arrangement",
+    scope: "clip",
+    track: track,
+    clip: clip,
+    devices: devices,
+    privacy: { notes_requested: includeNotes === 1, notes_included: includeNotes === 1 },
+  };
+  if (includeNotes === 1) {
+    if (clip.is_midi_clip !== true) {
+      arrangementInspectionError("clip", "not_midi", [trackIndex, clipIndex], requestText);
+      return;
+    }
+    var noteRead = readBoundedSessionClipNotes(clipApi);
+    if (!noteRead.ok) {
+      arrangementInspectionError("clip", noteRead.error, noteRead.details, requestText);
+      return;
+    }
+    var notes = [];
+    for (var noteIndex = 0; noteIndex < noteRead.notes.length; noteIndex += 1) {
+      if (!arrangementValidNote(noteRead.notes[noteIndex])) {
+        arrangementInspectionError("clip", "parse_failed", ["note", noteIndex], requestText);
+        return;
+      }
+      var note = noteRead.notes[noteIndex];
+      notes.push({
+        note_id: note.note_id,
+        pitch: note.pitch,
+        start_time: note.start_time,
+        duration: note.duration,
+        velocity: note.velocity,
+        mute: note.mute,
+        probability: note.probability,
+        velocity_deviation: note.velocity_deviation,
+        release_velocity: note.release_velocity,
+      });
+    }
+    payload.notes = notes;
+    payload.summary = buildSessionClipInspectionSummary(notes);
+  }
+  var finalClip = openArrangementInspectionApi(clipPath, "clip", "clip", requestText);
+  if (!finalClip) return;
+  if (Number(finalClip.id) !== clip.id) {
+    arrangementInspectionError("clip", "snapshot_changed", [clip.id, Number(finalClip.id)], requestText);
+    return;
+  }
+  emitArrangementInspection(
+    "clip",
+    Number(trackIndex),
+    Number(clipIndex),
+    startedMs,
+    payload,
+    requestText
+  );
+}
+
 function api_observe(authToken, path, property, optionsJson, requestId) {
   if (!requireMutationAuth("api_observe", authToken, requestId)) return;
   if (!ensureInitialized(requestId)) return;
@@ -2808,6 +3449,9 @@ var API_FALLBACK_HANDLERS = {
   "api_insert_chain": api_insert_chain,
   "api_drum_chain_in_note": api_drum_chain_in_note,
   "api_session_clip_inspect": api_session_clip_inspect,
+  "api_arrangement_project_inspect": api_arrangement_project_inspect,
+  "api_arrangement_track_inspect": api_arrangement_track_inspect,
+  "api_arrangement_clip_inspect": api_arrangement_clip_inspect,
 };
 
 var API_FALLBACK_REQUEST_ID_INDEXES = {
@@ -2822,6 +3466,9 @@ var API_FALLBACK_REQUEST_ID_INDEXES = {
   "api_insert_chain": 3,
   "api_drum_chain_in_note": 3,
   "api_session_clip_inspect": 3,
+  "api_arrangement_project_inspect": 1,
+  "api_arrangement_track_inspect": 2,
+  "api_arrangement_clip_inspect": 4,
 };
 
 function fallbackRequestId(targetName, args) {
@@ -2863,6 +3510,11 @@ function dispatchOscSelector(rawSelector, args) {
         [],
         requestId
       );
+      return;
+    }
+    if (targetName.indexOf("api_arrangement_") === 0) {
+      var scope = targetName.slice("api_arrangement_".length).replace(/_inspect$/, "");
+      arrangementInspectionError(scope, "internal_error", [], requestId);
       return;
     }
     ackWithRequest(

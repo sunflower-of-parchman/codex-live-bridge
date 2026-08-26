@@ -71,6 +71,9 @@ UTF-8 bytes. Its repeated success fragments echo the request ID as the final
 ACK argument. Its errors use the same reserved correlation trailer as other v3
 errors.
 
+The three `/api/arrangement_*_inspect` commands have the same required,
+128-UTF-8-byte request-ID limit and correlated success/error behavior.
+
 ## Core RPC Commands
 
 ```text
@@ -373,6 +376,99 @@ compatible. An ID-only preflight rejects clips above 4096 notes. The bridge
 fetches full notes in batches of 256 IDs and rejects a single ACK above 49,152
 UTF-8 bytes. Use `/api/session_clip_inspect` for packet-bounded fragments,
 metadata, devices, request correlation, and complete Live 12 note fields.
+
+## Packet-Bounded Arrangement Inspection
+
+Producer version 3.2.0 adds three tokenless, read-only Arrangement commands:
+
+```text
+/api/arrangement_project_inspect 1 <request_id>
+/api/arrangement_track_inspect <track_index> 1 <request_id>
+/api/arrangement_clip_inspect <track_index> <clip_index> <include_notes> 1 <request_id>
+```
+
+Indexes must be non-negative integers. `include_notes` must be exactly integer
+`0` or `1`; `0` does not call Live's note APIs and never includes raw notes in
+the response. Project and track inspection never read or expose raw notes.
+Explicit `include_notes=1` is accepted only for MIDI clips and uses the same
+4096-note ceiling, ID-only preflight, bounded 256-note batches, complete note
+fields, and final inventory check as Session clip inspection.
+
+Successful responses use the event matching their command:
+
+```text
+/ack api_arrangement_project_inspect <fragment_json> <request_id>
+/ack api_arrangement_track_inspect <fragment_json> <request_id>
+/ack api_arrangement_clip_inspect <fragment_json> <request_id>
+```
+
+Every encoded success packet is at most 4096 OSC bytes. Fragment envelopes use
+the schema `codex-live-bridge.arrangement-inspection`, schema version `1`, and
+producer version `3.2.0`:
+
+```json
+{
+  "schema": "codex-live-bridge.arrangement-inspection",
+  "schema_version": 1,
+  "producer_version": "3.2.0",
+  "inspection_id": "arrangement_...",
+  "correlation": {
+    "request_id": "req-arrangement",
+    "scope": "clip",
+    "track_index": 0,
+    "clip_index": 0
+  },
+  "snapshot": {
+    "started_ms": 0,
+    "completed_ms": 0,
+    "atomic": false,
+    "consistent": true
+  },
+  "transfer": {
+    "fragment_index": 0,
+    "fragment_count": 1,
+    "fragment_kind": "complete",
+    "is_last": true,
+    "packet_budget_bytes": 4096
+  },
+  "data": {
+    "payload_chunk": "{\"context\":\"arrangement\",\"scope\":\"clip\",...}"
+  }
+}
+```
+
+Single fragments use kind `complete`; multiple fragments use kind `chunk`.
+Clients concatenate `payload_chunk` strings in `fragment_index` order before
+JSON decoding. Chunk boundaries preserve Unicode surrogate pairs. The frozen
+envelope rejects unknown keys, mixed metadata, request/scope mismatches,
+conflicting duplicates, malformed transfer indexes, and incomplete transfers.
+No more than 1024 fragments or 4 MiB of aggregate assembly state are accepted;
+a client can retain at most 16 concurrent inspections.
+
+Project payloads contain nullable tempo/time-signature facts, up to 256
+ordinary track summaries, up to 256 return-track summaries, and one Main-track
+summary. Track payloads contain one track plus up to 256 Arrangement clips and
+256 devices. Clip payloads contain one track, one clip, and up to 256 devices.
+Every payload includes exact privacy flags
+`{"notes_requested":false,"notes_included":false}` unless the caller explicitly
+opts in to MIDI notes. Note-free payloads must omit both `notes` and `summary`;
+the strict Python assembler rejects smuggled notes. Live object paths are
+path-first LiveAPI references, never filesystem/audio-file paths.
+
+The Python client exposes `ArrangementInspectionAssembler` and waits for a
+complete assembly, correlated error, or the full timeout. CLI output reports
+only request/scope/fragment metadata and never prints raw note payloads:
+
+```bash
+python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
+  --api-arrangement-project-inspect req-project \
+  --api-arrangement-track-inspect 0 req-track \
+  --api-arrangement-clip-inspect 0 0 req-clip
+```
+
+Raw notes require the separate, explicit
+`--api-arrangement-clip-inspect-notes <track_index> <clip_index> <request_id>`
+flag.
 
 ## Device, Parameter, And Mixer Wrappers
 

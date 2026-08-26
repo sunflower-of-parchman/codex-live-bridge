@@ -169,7 +169,9 @@ The bridge exposes four command families:
 - Named LiveAPI wrappers: `/api/session_context`, `/api/theory_status`,
   `/api/tuning_status`, `/api/device_list`, `/api/device_parameters`,
   `/api/mixer_status`, `/api/parameter_set`, `/api/insert_device`,
-  `/api/insert_chain`, and `/api/drum_chain_in_note`.
+  `/api/insert_chain`, `/api/drum_chain_in_note`, and packet-bounded
+  `/api/arrangement_project_inspect`, `/api/arrangement_track_inspect`, and
+  `/api/arrangement_clip_inspect`.
 
 Safety classes are documented in `PROTOCOL.md`:
 
@@ -212,6 +214,12 @@ correlated raw facts. Every request has a required request ID, every successful
 fragment echoes it, and every encoded response packet is capped at 4096 bytes.
 Product-specific interpretation can happen in a separate shared-core consumer
 without adding an Extensions SDK dependency to the bridge.
+
+The additive Arrangement surface also supports bounded project, track, and clip
+inspection, including return tracks and Main. These read-only requests never
+retrieve MIDI notes unless a caller explicitly opts in. Correlated OSC
+fragments remain capped at 4096 bytes, and the Python client validates complete
+assembly without printing raw note data.
 
 ## Protocol Notes
 
