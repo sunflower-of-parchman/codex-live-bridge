@@ -125,7 +125,15 @@ function canonicalCandidate(target) {
 
 function isWithin(candidate, parent) {
   const relative = path.relative(parent, candidate);
-  return relative === "" || (!relative.startsWith(".." + path.sep) && relative !== "..");
+  return relative === "" || (
+    !path.isAbsolute(relative) &&
+    !relative.startsWith(".." + path.sep) &&
+    relative !== ".."
+  );
+}
+
+function pathsOverlap(left, right) {
+  return isWithin(left, right) || isWithin(right, left);
 }
 
 function rejectRepositoryArtifact(target, label) {
@@ -545,13 +553,13 @@ function resolveDevice(target) {
 }
 
 function ensureDisjointArtifactLocations(stageDirectory, backupRoot, destinationDirectory) {
-  if (isWithin(stageDirectory, destinationDirectory)) {
+  if (pathsOverlap(stageDirectory, destinationDirectory)) {
     fail("Staging directory must not overlap the installed Ableton device directory");
   }
-  if (isWithin(backupRoot, destinationDirectory)) {
+  if (pathsOverlap(backupRoot, destinationDirectory)) {
     fail("Persistent backup root must not overlap the installed Ableton device directory");
   }
-  if (isWithin(stageDirectory, backupRoot) || isWithin(backupRoot, stageDirectory)) {
+  if (pathsOverlap(stageDirectory, backupRoot)) {
     fail("Staging directory and persistent backup root must not overlap");
   }
 }
@@ -592,7 +600,7 @@ function main(argv) {
     options.backupRoot,
     "Persistent backup root"
   );
-  if (isWithin(backupRoot, destinationDirectory)) {
+  if (pathsOverlap(backupRoot, destinationDirectory)) {
     fail("Persistent backup root must not overlap the installed Ableton device directory");
   }
   const stageDirectory = resolveStageDirectory(
@@ -616,6 +624,9 @@ function main(argv) {
     JSON.stringify({
       stageDir: stageDirectory,
       installed: options.install,
+      liveStatusVerified: options.verifyLive,
+      runtimeIdentityVerified: false,
+      // Compatibility alias: this only describes a successful status exchange.
       verifiedLive: options.verifyLive,
       backupDir: backupDirectory,
       tokenConfigured,

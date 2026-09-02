@@ -74,6 +74,35 @@ errors.
 The three `/api/arrangement_*_inspect` commands have the same required,
 128-UTF-8-byte request-ID limit and correlated success/error behavior.
 
+## Python ACK Handling
+
+With `--ack`, the Python CLI requires a valid matching response for every
+command. It checks the expected host address, request correlation, required
+payload fields and JSON types, echoed properties or methods, and canonical
+target paths. Fragmented inspections also validate the requested indexes and
+Arrangement note-access flag. Unrelated replies do not establish success.
+LiveAPI aliases can resolve to a canonical path; correlation does not prove
+the alias's object identity or the loaded bridge's runtime identity.
+
+The default `--ack-mode per_command` waits after each command. `flush_end`
+groups commands into batches of at most 32, with distinct nonempty request
+IDs within each batch. `flush_interval` uses the smaller of
+`--ack-flush-interval` and 32. A duplicate ID starts a new batch. Commands
+without request IDs and fragmented inspections run separately. The client
+does not drain replies between commands in the same batch.
+
+Generic ACK collection has a 65,507-byte datagram receive ceiling and processes
+at most 256 packets per wait. It retains at most 64 replies per wait, with a
+byte allowance of 64 KiB per pending command, up to 2 MiB for a full batch.
+Session and Arrangement inspection fragments retain their separate 4096-byte
+encoded-packet limit;
+the existing JSON, item, and traversal limits still apply.
+
+Batches are not atomic. A failure stops later batches, but writes already
+sent may have applied. A missing ACK does not prove that a command failed to
+execute. Command sending never retries automatically; inspect state before
+retrying a write. Request IDs provide correlation, not idempotency.
+
 ## Core RPC Commands
 
 ```text
@@ -122,6 +151,16 @@ clients preserve older untagged ACK details, including details beginning with
 ```
 
 `/api/describe` returns a JSON object with at least the requested path and LiveAPI ID when available. Name, type, child, property, and function metadata depend on what Live exposes for that path.
+
+Live Beta 12.4.15b1 introduces clip-level `root_note`, `scale_name`,
+`scale_mode`, and `scale_intervals`, according to the
+[September 2, 2026 beta release notes](https://www.ableton.com/en/release-notes/live-12-beta/).
+Use `/api/get` with a Session clip path such as
+`live_set tracks 0 clip_slots 0 clip`, or an Arrangement clip path such as
+`live_set tracks 0 arrangement_clips 0`. Availability is host-dependent and
+has not yet been runtime-qualified on that beta. Older hosts retain their
+correlated unsupported-property errors; these fields do not change either
+frozen inspection schema.
 
 ## Observer Commands
 
@@ -173,7 +212,16 @@ Observer payloads include the observer ID, requested path, current path, propert
 }
 ```
 
+With `emit_initial:false`, registration returns metadata with `value:null`,
+`raw_args:[]`, and `event_count:0` without reading the property's initial
+value. Later callbacks populate the value and increment the count normally.
+
 Clients should unobserve or clear observers before shutdown. The device enforces an observer quota and supports `min_interval_ms` / `throttle_ms` to reduce high-rate event streams. Mutations triggered by observer events should be queued back through the normal command path; do not mutate Live directly from an observer callback.
+
+Unregister an observer before deleting its target clip or track. Ableton's
+[12.4.15b1 notes](https://www.ableton.com/en/release-notes/live-12-beta/)
+describe a fix for a crash involving deletion while observing a clip's
+`start_time`; earlier hosts may still be affected.
 
 Caller-supplied observer IDs must be 1 to 128 UTF-8 bytes, begin with an
 alphanumeric character, and contain only alphanumerics, `.`, `_`, `:`, or `-`.
@@ -205,7 +253,7 @@ Successful ACKs:
 
 Safety class: read.
 
-`/api/session_context` reports transport/session fields, track/scene counts, and selected track/scene/device when Live exposes them. `/api/theory_status` reports `root_note`, `scale_name`, `scale_intervals`, and `scale_mode`. `/api/tuning_status` reports `live_set tuning_system` data when the target Live version exposes that path.
+`/api/session_context` reports transport/session fields, track/scene counts, and selected track/scene/device when Live exposes them. `/api/theory_status` reports the Live set's `root_note`, `scale_name`, `scale_intervals`, and `scale_mode`. `/api/tuning_status` reports `live_set tuning_system` data when the target Live version exposes that path.
 
 ## Packet-Bounded Session MIDI Clip Inspection
 
@@ -251,6 +299,12 @@ deletions during batching. The producer also enforces the fragment ceiling
 during adaptive page planning. Limit failures emit a correlated
 `api_session_clip_inspect_limit_exceeded` error whose encoded packet remains
 within the 4096-byte budget.
+
+Session inspection and legacy note reads also check a cooperative 1,000-ms
+budget between LiveAPI operations and note batches. Session inspection checks
+again after fragment planning, before emitting any success fragment. A single
+blocking LiveAPI call cannot be interrupted; an over-budget result is rejected
+when control returns. Exactly 1,000 ms is allowed.
 
 Every fragment contains:
 
@@ -366,9 +420,10 @@ correlated error, or timeout.
 The V1 bridge note schema is intentionally richer than the qualified
 Extensions SDK `1.0.0` response. The bridge preserves `note_id` and
 `release_velocity` when LiveAPI returns them; the qualified native SDK runtime
-omitted both fields. A cross-surface consumer must use deterministic ID-free
-matching and report release velocity as an SDK-side missing field rather than
-silently treating the two snapshots as exact parity.
+omitted both fields. A cross-surface consumer comparing those responses must
+use deterministic ID-free matching and report the missing release velocity.
+This is an observation about that runtime's response, not a permanent SDK
+field guarantee. Later SDK/runtime combinations require fresh qualification.
 
 Small reads through the legacy
 `/inspect_session_clip_notes <track_index> <slot_index>` command remain
@@ -379,7 +434,9 @@ metadata, devices, request correlation, and complete Live 12 note fields.
 
 ## Packet-Bounded Arrangement Inspection
 
-Producer version 3.2.0 adds three tokenless, read-only Arrangement commands:
+The unreleased source uses producer version 3.2.0 for three tokenless,
+read-only Arrangement commands. The wire producer version does not imply that
+a 3.2.0 release package exists:
 
 ```text
 /api/arrangement_project_inspect 1 <request_id>
@@ -445,6 +502,16 @@ conflicting duplicates, malformed transfer indexes, and incomplete transfers.
 No more than 1024 fragments or 4 MiB of aggregate assembly state are accepted;
 a client can retain at most 16 concurrent inspections.
 
+Arrangement inspection checks the same cooperative 1,000-ms budget between
+LiveAPI operations and after fragment planning. Exceeding it emits one
+correlated `api_arrangement_<scope>_inspect_limit_exceeded` error with
+`elapsed_ms`, the measured time, and the limit. No success fragment is emitted
+for that request. A blocking host call cannot be preempted.
+
+`atomic:false` records that inspection is not a Live transaction.
+`consistent:true` means the endpoint's identity/inventory checks passed;
+it does not guarantee that every property stayed unchanged during the read.
+
 Project payloads contain nullable tempo/time-signature facts, up to 256
 ordinary track summaries, up to 256 return-track summaries, and one Main-track
 summary. Track payloads contain one track plus up to 256 Arrangement clips and
@@ -494,7 +561,7 @@ Safety classes:
 - `parameter_set`: bounded write.
 
 Tokenless collection wrappers accept at most 256 items from one collection and
-512 aggregate items per request. They stop after 1,000 ms and reject JSON
+512 aggregate items per request. They check a 1,000-ms work budget and reject JSON
 responses above 49,152 UTF-8 bytes with a correlated limit error.
 
 `parameter_set` accepts only numeric JSON numbers or numeric strings, checks `is_enabled`, and rejects values outside the parameter's `min`/`max` range when Live exposes that metadata. JSON `null`, booleans, arrays, and objects are rejected before the wrapper calls LiveAPI.
@@ -583,13 +650,17 @@ Supported optional fields:
 Validation:
 
 - `pitch`: integer `0..127`
-- `start_time`: number `>= 0`
-- `duration`: number `> 0`
+- `start_time`: finite number `>= 0`
+- `duration`: finite number `> 0`, with a finite `start_time + duration`
 - `velocity`: integer `0..127`; omitted or invalid values fall back to `100`
 - `mute`: truthy values become `1`, otherwise `0`
 - `probability`: number `0..1`
 - `velocity_deviation`: number `-127..127`
 - `release_velocity`: integer `0..127`
+
+Each note must be an object. Replacement clip length must also be finite and
+greater than zero. Invalid records or timing values are rejected before a
+target clip is deleted or notes are appended.
 
 ## Safety Classes
 

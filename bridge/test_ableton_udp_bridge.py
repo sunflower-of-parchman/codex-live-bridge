@@ -1159,6 +1159,9 @@ class BridgeCliTests(unittest.TestCase):
             expected_sender_host="127.0.0.1",
             expected_request_id="req-tempo",
             expected_event="api_get",
+            expected_commands=(
+                bridge.OscCommand("/api/get", ("live_set", "tempo", "req-tempo")),
+            ),
         )
         ack_sock.close.assert_called_once()
 
@@ -1271,6 +1274,7 @@ class BridgeCliTests(unittest.TestCase):
             expected_sender_host="127.0.0.1",
             expected_request_id="req-ping",
             expected_event="pong",
+            expected_commands=(bridge.OscCommand("/api/ping", ("req-ping",)),),
         )
         ack_sock.close.assert_called_once()
 
@@ -4638,7 +4642,7 @@ return cases.map((testCase) => {
             mock.patch("ableton_udp_bridge._drain_acks_nonblocking", return_value=[]),
             mock.patch(
                 "ableton_udp_bridge._collect_and_print_session_clip_inspection_acks",
-                side_effect=lambda *args: calls.append(args),
+                side_effect=lambda *args, **_kwargs: calls.append(args),
             ),
         ):
             bridge.send_commands(cfg, [command])
@@ -4716,6 +4720,455 @@ return cases.map((testCase) => {
         self.assertGreater(len(order), 1)
         self.assertEqual(order[0], "drain")
         self.assertEqual(order[1], "collect")
+
+
+class AckValidationRegressionTests(unittest.TestCase):
+    def _run_exchange(
+        self,
+        options: list[str],
+        replies: object,
+    ) -> tuple[int, list[tuple[str, list[bridge.OscArg]]], str]:
+        packets: list[bytes] = []
+        sent: list[tuple[str, list[bridge.OscArg]]] = []
+
+        class AckSocket:
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if packets:
+                    return packets.pop(0), ("127.0.0.1", 9001)
+                raise BlockingIOError
+
+            def close(self) -> None:
+                return None
+
+        class SendSocket:
+            def __enter__(self) -> "SendSocket":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def sendto(self, packet: bytes, _destination: object) -> None:
+                command = bridge.decode_osc_message(packet)
+                sent.append(command)
+                for reply in replies(command, len(sent)):
+                    packets.append(bridge.encode_osc_message("/ack", reply))
+
+        ack_socket = AckSocket()
+        output = io.StringIO()
+        with (
+            mock.patch.object(bridge, "open_ack_socket", return_value=ack_socket),
+            mock.patch.object(bridge.socket, "socket", return_value=SendSocket()),
+            mock.patch.object(
+                bridge.select,
+                "select",
+                side_effect=lambda *_args: ([ack_socket] if packets else [], [], []),
+            ),
+            mock.patch("sys.stdout", new=output),
+            mock.patch("sys.stderr", new=output),
+        ):
+            code = bridge.main(
+                _base_args()
+                + ["--no-ping-first", "--delay-ms", "0", "--no-metrics"]
+                + options
+            )
+        return code, sent, output.getvalue()
+
+    @staticmethod
+    def _get_reply(command: tuple[str, list[bridge.OscArg]]) -> list[bridge.OscArg]:
+        _address, args = command
+        result = ["api_get", args[0], args[1], "120"]
+        if len(args) > 2:
+            result.append(args[2])
+        return result
+
+    def test_flush_modes_reject_an_earlier_correlated_error(self) -> None:
+        def replies(command: object, index: int) -> list[list[bridge.OscArg]]:
+            if index == 1:
+                return [[
+                    "error", "api_unknown_property", "request_correlation", "req:req-first"
+                ]]
+            return [self._get_reply(command)]
+
+        for mode in ("flush_end", "flush_interval"):
+            with self.subTest(mode=mode):
+                code, _sent, output = self._run_exchange(
+                    [
+                        "--ack-mode", mode, "--ack-flush-interval", "2",
+                        "--api-get", "live_set", "unknown_property", "req-first",
+                        "--api-get", "live_set", "tempo", "req-last",
+                    ],
+                    replies,
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("api_unknown_property", output)
+
+    def test_flush_modes_require_every_pending_response(self) -> None:
+        for mode in ("flush_end", "flush_interval"):
+            with self.subTest(mode=mode):
+                code, _sent, output = self._run_exchange(
+                    [
+                        "--ack-mode", mode, "--ack-flush-interval", "2",
+                        "--api-get", "live_set", "tempo", "req-first",
+                        "--api-get", "live_set", "is_playing", "req-last",
+                    ],
+                    lambda command, index: [] if index == 1 else [self._get_reply(command)],
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("req-first", output)
+
+    def test_correlated_batch_accepts_out_of_order_replies(self) -> None:
+        first_reply: list[bridge.OscArg] = []
+
+        def replies(command: object, index: int) -> list[list[bridge.OscArg]]:
+            if index == 1:
+                first_reply.extend(self._get_reply(command))
+                return []
+            return [self._get_reply(command), first_reply]
+
+        code, sent, _output = self._run_exchange(
+            [
+                "--ack-mode", "flush_end",
+                "--api-get", "live_set", "tempo", "req-first",
+                "--api-get", "live_set", "is_playing", "req-last",
+            ],
+            replies,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(sent), 2)
+
+    def test_uncorrelated_commands_stop_before_the_next_send(self) -> None:
+        code, sent, _output = self._run_exchange(
+            [
+                "--ack-mode", "flush_end",
+                "--api-get", "live_set", "tempo",
+                "--api-get", "live_set", "is_playing",
+            ],
+            lambda _command, _index: [["error", "api_get_failed"]],
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(len(sent), 1)
+
+    def test_duplicate_request_ids_are_serialized(self) -> None:
+        code, sent, _output = self._run_exchange(
+            [
+                "--ack-mode", "flush_end",
+                "--api-get", "live_set", "tempo", "same-request",
+                "--api-get", "live_set", "is_playing", "same-request",
+            ],
+            lambda command, _index: [self._get_reply(command)],
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(sent), 2)
+
+    def test_malformed_and_wrong_target_successes_do_not_satisfy_commands(self) -> None:
+        cases = [
+            (["--status"], ["status"]),
+            (["--status"], ["status", 1, 2, 0, 0]),
+            (["--api-get", "live_set", "tempo"], ["api_get"]),
+            (
+                ["--api-get", "live_set", "tempo", "req"],
+                ["api_get", "live_set", "tempo", "not-json", "req"],
+            ),
+            (
+                ["--api-get", "live_set", "tempo", "req"],
+                ["api_get", "live_set", "is_playing", "0", "req"],
+            ),
+            (
+                ["--api-get", "live_set", "tempo", "req"],
+                ["api_get", "live_set tracks 7", "tempo", "120", "req"],
+            ),
+            (
+                ["--api-set", "live_set", "tempo", "120", "req"],
+                ["api_set", "live_set", "tempo", '{"ok":false}', "req"],
+            ),
+            (
+                ["--api-children", "live_set", "tracks", "req"],
+                ["api_children", "live_set", "tracks", "{}", "req"],
+            ),
+        ]
+        for options, reply in cases:
+            with self.subTest(options=options, reply=reply):
+                code, _sent, _output = self._run_exchange(
+                    options, lambda _command, _index: [reply]
+                )
+                self.assertEqual(code, 1)
+
+        command = bridge.OscCommand("/api/get", ("live_set", "tempo", "req"))
+        for label, payload in (
+            ("integer digit limit", "1" * 5000),
+            ("deep malformed JSON", "[" * 1200 + "0" + "]" * 1199),
+        ):
+            with self.subTest(payload=label):
+                reply = ["api_get", "live_set", "tempo", payload, "req"]
+                with self.assertRaises(bridge.BridgeAcknowledgementError):
+                    bridge.validate_command_acks(command, [("/ack", reply)])
+
+    def test_unrelated_decoder_limits_do_not_abort_the_expected_ack(self) -> None:
+        for label, payload in (
+            ("integer digit limit", "1" * 5000),
+            ("deeply nested JSON", "[" * 1200 + "0" + "]" * 1200),
+        ):
+            with self.subTest(payload=label):
+                code, _sent, _output = self._run_exchange(
+                    ["--api-get", "live_set", "tempo", "req"],
+                    lambda command, _index: [
+                        ["api_get", "live_set", "tempo", payload, "unrelated-request"],
+                        self._get_reply(command),
+                    ],
+                )
+                self.assertEqual(code, 0)
+
+    def test_valid_json_null_and_quoted_live_path_remain_accepted(self) -> None:
+        code, _sent, _output = self._run_exchange(
+            ["--api-get", "live_set", "optional_property", "req"],
+            lambda _command, _index: [[
+                "api_get", '"live_set"', "optional_property", "null", "req"
+            ]],
+        )
+        self.assertEqual(code, 0)
+
+    def test_resolving_liveapi_aliases_accept_well_formed_resolved_paths(self) -> None:
+        for requested in (
+            "id 101",
+            "this_device canonical_parent",
+            "live_set view selected_track",
+        ):
+            with self.subTest(requested=requested):
+                code, _sent, _output = self._run_exchange(
+                    ["--api-get", requested, "name", "req"],
+                    lambda _command, _index: [[
+                        "api_get", '"live_set tracks 1"', "name", '"Track"', "req"
+                    ]],
+                )
+                self.assertEqual(code, 0)
+
+        code, _sent, _output = self._run_exchange(
+            ["--api-get", "id 101", "name", "req"],
+            lambda _command, _index: [[
+                "api_get", "not/a/live/path", "name", '"Track"', "req"
+            ]],
+        )
+        self.assertEqual(code, 1)
+
+    def test_large_generic_json_replies_fit_single_and_batched_budgets(self) -> None:
+        value_json = json.dumps("x" * 40_000)
+        for count in (1, 2):
+            options = ["--ack-mode", "flush_end"]
+            for index in range(count):
+                options.extend(["--api-get", "live_set", "large_property", f"req-{index}"])
+            with self.subTest(count=count):
+                code, sent, _output = self._run_exchange(
+                    options,
+                    lambda command, _index: [[
+                        "api_get", command[1][0], command[1][1], value_json, command[1][2]
+                    ]],
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(len(sent), count)
+
+    def test_batch_limit_and_fragment_serialization(self) -> None:
+        cfg = bridge.parse_args(_base_args() + ["--ack-mode", "flush_end"])
+        commands = [
+            bridge.OscCommand("/api/get", ("live_set", "tempo", f"req-{index}"))
+            for index in range(bridge.ACK_MAX_BATCH_COMMANDS + 1)
+        ]
+        self.assertEqual(
+            [len(batch) for batch in bridge._ack_command_batches(cfg, commands)],
+            [bridge.ACK_MAX_BATCH_COMMANDS, 1],
+        )
+        session = bridge.OscCommand("/api/session_clip_inspect", (2, 3, 1, "session"))
+        arrangement = bridge.OscCommand("/api/arrangement_track_inspect", (2, 1, "arrangement"))
+        commands = [commands[0], session, arrangement, commands[1]]
+        self.assertEqual(list(bridge._ack_command_batches(cfg, commands)), [[cmd] for cmd in commands])
+
+    def test_batched_wait_rejects_wrong_source_and_unrelated_request_ids(self) -> None:
+        commands = (
+            bridge.OscCommand("/api/get", ("live_set", "tempo", "req-first")),
+            bridge.OscCommand("/api/get", ("live_set", "tempo", "req-last")),
+        )
+        packets = [
+            (bridge.encode_osc_message("/ack", self._get_reply((cmd.address, list(cmd.args)))), host)
+            for cmd, host in (
+                (commands[0], "192.0.2.1"),
+                (bridge.OscCommand("/api/get", ("live_set", "tempo", "other-request")), "127.0.0.1"),
+                (commands[1], "127.0.0.1"),
+            )
+        ]
+
+        class AckSocket:
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                if not packets:
+                    raise BlockingIOError
+                packet, host = packets.pop(0)
+                return packet, (host, 12345)
+
+        sock = AckSocket()
+        with mock.patch.object(
+            bridge.select, "select",
+            side_effect=lambda *_args: ([sock] if packets else [], [], []),
+        ):
+            acks = bridge.wait_for_acks(
+                sock, 0.2, expected_sender_host="127.0.0.1", expected_commands=commands
+            )
+        self.assertEqual(len(acks), 1)
+        with self.assertRaises(bridge.BridgeAcknowledgementError):
+            bridge.validate_command_acks(commands[0], acks)
+        bridge.validate_command_acks(commands[1], acks)
+
+    def test_correlated_wait_keeps_packet_flood_bounded(self) -> None:
+        command = bridge.OscCommand("/api/get", ("live_set", "tempo", "req"))
+        unrelated = bridge.encode_osc_message("/ack", ("pong", "other-request"))
+
+        class AckSocket:
+            calls = 0
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                self.calls += 1
+                return unrelated, ("127.0.0.1", 12345)
+
+        sock = AckSocket()
+        with mock.patch.object(bridge.select, "select", return_value=([sock], [], [])):
+            acks = bridge.wait_for_acks(sock, 0.2, expected_commands=(command,))
+        self.assertEqual(acks, [])
+        self.assertEqual(sock.calls, bridge.ACK_WAIT_MAX_PACKETS)
+
+    def test_correlated_errors_override_saturated_ack_retention(self) -> None:
+        for pending_count in (1, 2):
+            commands = tuple(
+                bridge.OscCommand("/api/get", ("live_set", "tempo", f"req-{index}"))
+                for index in range(pending_count)
+            )
+            for limit in ("count", "bytes"):
+                replies = [self._get_reply((command.address, list(command.args))) for command in commands]
+                if limit == "bytes":
+                    for reply in replies:
+                        reply[3] = json.dumps("x")
+                        padding = bridge.ACK_WAIT_MAX_RETAINED_BYTES // 2 - len(
+                            bridge.encode_osc_message("/ack", reply)
+                        )
+                        reply[3] = json.dumps("x" * (padding + 1))
+                    reply_count = 2 * pending_count
+                else:
+                    reply_count = bridge.ACK_WAIT_MAX_RETAINED_ACKS
+                successes = [replies[0]] * (reply_count - pending_count) + replies
+                packets = [bridge.encode_osc_message("/ack", reply) for reply in successes]
+                if limit == "bytes":
+                    self.assertEqual(
+                        sum(map(len, packets)), bridge.ACK_WAIT_MAX_RETAINED_BYTES * pending_count
+                    )
+                packets.append(bridge.encode_osc_message("/ack", (
+                    "error", "fixture_rejected", "request_correlation", "req:req-0"
+                )))
+
+                class AckSocket:
+                    def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                        if not packets:
+                            raise BlockingIOError
+                        return packets.pop(0), ("127.0.0.1", 12345)
+
+                sock = AckSocket()
+                with self.subTest(pending=pending_count, limit=limit), mock.patch.object(
+                    bridge.select, "select",
+                    side_effect=lambda *_args: ([sock] if packets else [], [], []),
+                ):
+                    acks = bridge.wait_for_acks(
+                        sock, 0.2, expected_sender_host="127.0.0.1", expected_commands=commands
+                    )
+                    self.assertLessEqual(len(acks), bridge.ACK_WAIT_MAX_RETAINED_ACKS)
+                    self.assertLessEqual(
+                        sum(len(bridge.encode_osc_message(address, args)) for address, args in acks),
+                        bridge.ACK_WAIT_MAX_RETAINED_BYTES * pending_count,
+                    )
+                    with self.assertRaises(bridge.BridgeAcknowledgementError):
+                        bridge.validate_command_acks(commands[0], acks)
+
+    def test_session_inspection_checks_requested_target(self) -> None:
+        fragment = _complete_inspection_fragment()
+        response = ["api_session_clip_inspect", json.dumps(fragment), "req-assembly"]
+        for track, slot, expected_code in ((2, 3, 0), (1, 3, 1), (2, 4, 1)):
+            with self.subTest(track=track, slot=slot):
+                code, _sent, _output = self._run_exchange(
+                    ["--api-session-clip-inspect", str(track), str(slot), "req-assembly"],
+                    lambda _command, _index: [response],
+                )
+                self.assertEqual(code, expected_code)
+
+    def test_clip_write_ack_requires_matching_length_note_count_and_name(self) -> None:
+        notes_json = json.dumps({"notes": [_inspection_note()]})
+        command = bridge.OscCommand(
+            "/set_session_clip_notes",
+            bridge.authenticated_args(TEST_AUTH_TOKEN, (2, 3, 4.0, notes_json, "Phrase")),
+        )
+        success = ["set_session_clip_notes", 2, 3, 4.0, 1, 1, "Phrase"]
+        bridge.validate_command_acks(command, [("/ack", success)])
+        for index, value in ((3, 8.0), (4, 0), (6, "Other clip")):
+            wrong = list(success)
+            wrong[index] = value
+            with self.subTest(index=index), self.assertRaises(bridge.BridgeAcknowledgementError):
+                bridge.validate_command_acks(command, [("/ack", wrong)])
+
+    def test_arrangement_inspection_checks_requested_target_and_note_access(self) -> None:
+        # Reuse the producer fixture so the ACK shape remains the real wire schema.
+        from test_arrangement_inspection import _run_arrangement_js
+
+        result = _run_arrangement_js(include_notes=True)
+        responses = [output[2:] for output in result["acks"]]
+        for track, clip, notes, expected_code in (
+            (0, 0, True, 0),
+            (1, 0, True, 1),
+            (0, 1, True, 1),
+            (0, 0, False, 1),
+        ):
+            flag = (
+                "--api-arrangement-clip-inspect-notes"
+                if notes else "--api-arrangement-clip-inspect"
+            )
+            options = [flag, str(track), str(clip), "req-arrangement"]
+            with self.subTest(track=track, clip=clip, notes=notes):
+                code, _sent, _output = self._run_exchange(
+                    options, lambda _command, _index: responses
+                )
+                self.assertEqual(code, expected_code)
+
+    def test_fragment_waiters_filter_sender_without_breaking_localhost(self) -> None:
+        response = bridge.encode_osc_message(
+            "/ack", ("error", "inspection_failed", "request_correlation", "req:request")
+        )
+        for waiter, args in (
+            (bridge.wait_for_session_clip_inspection_acks, ("request",)),
+            (bridge.wait_for_arrangement_inspection_acks, ("request", "api_arrangement_clip_inspect")),
+        ):
+            packets = [(response, "192.0.2.1"), (response, "127.0.0.1")]
+
+            class AckSocket:
+                def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                    packet, host = packets.pop(0)
+                    return packet, (host, 12345)
+
+            sock = AckSocket()
+            with self.subTest(waiter=waiter.__name__), mock.patch.object(
+                bridge.select, "select", return_value=([sock], [], [])
+            ):
+                acks = waiter(sock, 0.2, *args, expected_sender_host="localhost")
+                self.assertEqual(packets, [])
+                self.assertEqual(len(acks), 1)
+
+    def test_manual_cli_numeric_validation_uses_argparse_errors(self) -> None:
+        for options in (
+            ["--midi-cc", "128", "100"],
+            ["--cc64", "oops"],
+            ["--api-drum-chain-in-note", "live_set tracks 0", "oops"],
+        ):
+            with self.subTest(options=options), mock.patch("sys.stderr", new=io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    bridge.parse_args(options)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_arrangement_huge_integer_raises_public_assembly_error(self) -> None:
+        with self.assertRaises(bridge.ArrangementInspectionAssemblyError):
+            bridge.ArrangementInspectionAssembler._require_nullable_number(
+                10 ** 400, "project.tempo"
+            )
 
 
 if __name__ == "__main__":

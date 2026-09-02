@@ -215,6 +215,140 @@ return {{ afterNetworkAttempt, afterLocalSetup, finalToken: context.bridgeAuthTo
         self.assertEqual(result["afterLocalSetup"], TEST_AUTH_TOKEN)
         self.assertEqual(result["finalToken"], TEST_AUTH_TOKEN)
 
+    def test_js_note_writes_reject_invalid_records_and_nonfinite_times_before_mutation(self) -> None:
+        result = _run_bridge_js(
+            f"""
+const outputs = [];
+const mutations = [];
+context.outlet = (...args) => outputs.push(args);
+context.set_auth_token({json.dumps(TEST_AUTH_TOKEN)});
+context.ensureInitialized = () => true;
+context.getTrackOrError = () => ({{ get: () => 1 }});
+context.Dict = function Dict() {{
+  this.setparse = (_key, value) => {{ this.value = JSON.parse(value); }};
+  this.get = () => this.value;
+  this.clear = () => {{ this.value = null; }};
+}};
+const clip = {{
+  id: 3,
+  set: (...args) => mutations.push(["set", ...args]),
+  call: (method, payload) => {{
+    mutations.push([method, payload]);
+    return method === "add_new_notes" ? [101] : [];
+  }},
+}};
+context.LiveAPI = function LiveAPI() {{ return clip; }};
+context.getClipFromSlotOrError = () => clip;
+const valid = '{{"pitch":60,"start_time":0,"duration":1}}';
+const cases = [
+  {{ notes: "[null]", suffix: "invalid_note" }},
+  {{ notes: "[[]]", suffix: "invalid_note" }},
+  {{ notes: "[17]", suffix: "invalid_note" }},
+  {{ notes: '[{{"pitch":60,"start_time":1e309,"duration":1}}]', suffix: "invalid_start_time" }},
+  {{ notes: '[{{"pitch":60,"start_time":0,"duration":1e309}}]', suffix: "invalid_duration" }},
+  {{ notes: '[{{"pitch":60,"start_time":1e308,"duration":1e308}}]', suffix: "invalid_duration" }},
+  {{ notes: "[" + valid + ",null]", suffix: "invalid_note" }},
+];
+const results = [];
+for (const item of cases) {{
+  for (const method of ["set_session_clip_notes", "append_session_clip_notes"]) {{
+    outputs.length = 0;
+    mutations.length = 0;
+    let exception = null;
+    try {{
+      if (method === "set_session_clip_notes") {{
+        context[method]({json.dumps(TEST_AUTH_TOKEN)}, 0, 0, 4, item.notes);
+      }} else {{
+        context[method]({json.dumps(TEST_AUTH_TOKEN)}, 0, 0, item.notes);
+      }}
+    }} catch (error) {{ exception = error.message; }}
+    results.push({{
+      method, suffix: item.suffix, exception,
+      mutations: mutations.slice(),
+      acks: outputs.filter((args) => args[1] === "/ack"),
+    }});
+  }}
+}}
+outputs.length = 0;
+mutations.length = 0;
+context.set_session_clip_notes({json.dumps(TEST_AUTH_TOKEN)}, 0, 0, "Infinity", "[" + valid + "]");
+results.push({{
+  method: "set_session_clip_notes", suffix: "invalid_length", exception: null,
+  mutations, acks: outputs.filter((args) => args[1] === "/ack"),
+}});
+return results;
+"""
+        )
+
+        for item in result:
+            with self.subTest(method=item["method"], suffix=item["suffix"]):
+                self.assertIsNone(item["exception"])
+                self.assertEqual(item["mutations"], [])
+                self.assertEqual(len(item["acks"]), 1)
+                self.assertEqual(item["acks"][0][2:4], [
+                    "error", f"{item['method']}_{item['suffix']}"
+                ])
+                packet = bridge.encode_osc_message("/ack", tuple(item["acks"][0][2:]))
+                self.assertLessEqual(len(packet), 4096)
+                self.assertEqual(item["acks"][0][-2:], ["request_correlation", "req:"])
+
+    def test_js_note_validation_preserves_legacy_numeric_normalization(self) -> None:
+        result = _run_bridge_js(
+            """
+return context.normalizeNote({
+  pitch: "60.9", start_time: "0.25", duration: "1.5", velocity: "96.9",
+  mute: 1, probability: "0.5", velocity_deviation: "-12.5", release_velocity: "64.9",
+}, 0, "fixture", "req-note");
+"""
+        )
+        self.assertEqual(result, {
+            "pitch": 60, "start_time": 0.25, "duration": 1.5, "velocity": 96,
+            "mute": 1, "probability": 0.5, "velocity_deviation": -12.5,
+            "release_velocity": 64,
+        })
+
+    def test_js_observer_initial_snapshot_flag_and_later_callbacks(self) -> None:
+        result = _run_bridge_js(
+            f"""
+const outputs = [];
+let reads = 0;
+let callback = null;
+context.outlet = (...args) => outputs.push(args);
+context.set_auth_token({json.dumps(TEST_AUTH_TOKEN)});
+context.ensureInitialized = () => true;
+context.LiveAPI = function LiveAPI(observerCallback, path) {{
+  if (observerCallback) callback = observerCallback;
+  return {{
+    id: 1, path, info: "properties tempo\\nchildren tracks",
+    get: () => {{ reads += 1; return 123; }},
+  }};
+}};
+return [false, true].map((emitInitial) => {{
+  reads = 0;
+  outputs.length = 0;
+  context.api_observe({json.dumps(TEST_AUTH_TOKEN)}, "live_set", "tempo",
+    JSON.stringify({{ observer_id: "obs-test", emit_initial: emitInitial }}), "req-observe");
+  const registered = outputs.find((args) => args[2] === "api_observe");
+  const initialReads = reads;
+  callback(["tempo", 124]);
+  const event = outputs.find((args) => args[2] === "api_event");
+  return {{
+    emitInitial, initialReads, finalReads: reads,
+    initial: JSON.parse(registered[6]), event: JSON.parse(event[4]),
+  }};
+}});
+"""
+        )
+        for item in result:
+            with self.subTest(emit_initial=item["emitInitial"]):
+                count = int(item["emitInitial"])
+                self.assertEqual(item["initialReads"], count)
+                self.assertEqual(item["finalReads"], count)
+                self.assertEqual(item["initial"]["event_count"], count)
+                self.assertEqual(item["initial"]["value"], 123 if count else None)
+                self.assertEqual(item["event"]["event_count"], count + 1)
+                self.assertEqual(item["event"]["value"], ["tempo", 124])
+
     def test_node_receiver_decodes_python_client_packets(self) -> None:
         packet = bridge.encode_osc_message("/probe", (-2, 1.25, "hello"))
         script = f"""

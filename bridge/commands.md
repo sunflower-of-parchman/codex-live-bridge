@@ -21,7 +21,7 @@ installation:
 node scripts/ableton-device.js
 ```
 
-To update the installed files and verify the running bridge:
+To update the installed files and check the running bridge's status:
 
 ```bash
 node scripts/ableton-device.js --install --verify-live
@@ -32,12 +32,29 @@ backup restores all three files if the token-free Live check fails. Staged
 devices and backups may contain a credential. Keep them private and do not
 commit or upload them. See `INSTALL.md` for paths and options.
 
+`liveStatusVerified` confirms the status exchange only. The deprecated
+`verifiedLive` field is an alias; `runtimeIdentityVerified` remains false.
+Reload the device and verify the affected commands separately.
+
 ## Authentication
 
 Read commands remain tokenless. Every write, generic call, observer lifecycle
 change, insertion, track or clip mutation, and MIDI output command places
 `<auth_token>` first. The Python CLI injects it from `--auth-token` or
 `CODEX_LIVE_BRIDGE_TOKEN`.
+
+## ACK Modes
+
+Use `--ack` to require a valid matching response for every command.
+`--ack-mode per_command` is the default. `flush_end` and `flush_interval`
+batch commands with distinct nonempty request IDs, up to 32 at a time.
+Duplicate IDs start a new batch; uncorrelated commands and fragmented
+inspections run separately. Replies are not drained within a batch.
+
+A failed batch can contain writes that already applied. Command sending does
+not retry automatically, and a request ID does not make a write idempotent.
+Inspect the state before retrying. See `PROTOCOL.md` for validation and
+collection limits.
 
 ## Read Commands
 
@@ -72,6 +89,23 @@ Examples:
 /api/arrangement_track_inspect 0 1 req-track
 /api/arrangement_clip_inspect 0 0 0 1 req-arrangement-clip
 ```
+
+Live Beta 12.4.15b1 adds clip-level scale properties, according to the
+[September 2, 2026 release notes](https://www.ableton.com/en/release-notes/live-12-beta/).
+These generic reads require a host that exposes the properties and an existing
+clip. Availability on that beta is not yet runtime-qualified here:
+
+```bash
+python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
+  --api-get "live_set tracks 0 clip_slots 0 clip" root_note req-clip-root \
+  --api-get "live_set tracks 0 clip_slots 0 clip" scale_name req-clip-scale \
+  --api-get "live_set tracks 0 clip_slots 0 clip" scale_mode req-clip-mode \
+  --api-get "live_set tracks 0 clip_slots 0 clip" scale_intervals req-clip-intervals
+```
+
+Use `live_set tracks 0 arrangement_clips 0` for an Arrangement clip.
+`/api/theory_status` reads the set-level scale; it is not a clip-scale fallback.
+Older hosts return a correlated unsupported-property error.
 
 `/api/session_clip_inspect` requires non-negative integer indexes, schema
 version `1`, and a non-empty request ID of at most 128 UTF-8 bytes. Success
@@ -207,6 +241,7 @@ tracks in one command.
 
 `/delete_midi_tracks` protects track index `0`. `/set_session_clip_notes`
 deletes any existing clip in the target slot before writing the new clip.
+Unregister observers before deleting their target clip or track.
 
 ## Note JSON
 
@@ -228,13 +263,17 @@ Optional fields:
 Validation:
 
 - `pitch`: integer `0..127`
-- `start_time`: number `>= 0`
-- `duration`: number `> 0`
+- `start_time`: finite number `>= 0`
+- `duration`: finite number `> 0`, with a finite `start_time + duration`
 - `velocity`: integer `0..127`; omitted or invalid values default to `100`
 - `mute`: truthy values become `1`, otherwise `0`
 - `probability`: number `0..1`
 - `velocity_deviation`: number `-127..127`
 - `release_velocity`: integer `0..127`
+
+Notes must be objects. Replacement clip length must be finite and greater
+than zero. Invalid records and timing values fail before a clip is replaced
+or notes are appended.
 
 ## ACK Examples
 

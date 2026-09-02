@@ -1,6 +1,10 @@
 # codex-live-bridge
 
-Current release: [3.2.0](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/tag/codex-live-bridge-v3.2.0)
+Current release: [3.1.0](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/tag/codex-live-bridge-v3.1.0)
+
+The current source includes unreleased security and runtime fixes that are
+not in the 3.1.0 release. Use the source setup below for these fixes; a newer
+release package is not yet available.
 
 `codex-live-bridge` is a Max for Live OSC/UDP bridge for Ableton Live. It lets
 codex and local scripts inspect a Live set through LiveAPI. A local capability
@@ -62,11 +66,10 @@ node --check bridge/m4l/osc_loopback_receiver.js
 node --check scripts/ableton-device.js
 ```
 
-2. Download and extract the packaged Max for Live device:
+2. Build the device from the current source, or stage an update to an existing
+installation using [Update an Installed Device](#update-an-installed-device).
 
-[Download LiveUdpBridge.zip](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/download/codex-live-bridge-v3.2.0/LiveUdpBridge.zip)
-
-The 3.2.0 release includes the device and both JavaScript runtime files:
+The current device package needs all three files:
 
 ```text
 LiveUdpBridge.amxd
@@ -74,7 +77,7 @@ live_udp_bridge.js
 osc_loopback_receiver.js
 ```
 
-You can also build the device from `bridge/m4l/LiveUdpBridge.maxpat` in a
+For a first installation, build the device from `bridge/m4l/LiveUdpBridge.maxpat` in a
 Live-hosted Max MIDI Effect. Follow `INSTALL.md` for the source-build steps.
 
 3. Keep both JavaScript runtime files next to the device, then load it onto a
@@ -127,10 +130,11 @@ node scripts/ableton-device.js
 
 This command only stages the device and both JavaScript files in a private
 temporary directory. It does not change the installed files. Its JSON output
-includes `stageDir`, `installed`, `verifiedLive`, `backupDir`,
-`tokenConfigured`, and `hashes`.
+includes `stageDir`, `installed`, `liveStatusVerified`,
+`runtimeIdentityVerified`, `backupDir`, `tokenConfigured`, and `hashes`.
+The deprecated `verifiedLive` field is an alias for `liveStatusVerified`.
 
-To update the installation and verify the running Ableton bridge:
+To update the installation and check the running Ableton bridge's status:
 
 ```bash
 node scripts/ableton-device.js --install --verify-live
@@ -141,6 +145,10 @@ and write token. A persistent backup restores the previous files if the
 token-free Live status check fails. Staged devices and backups can contain a
 configured token. Keep them private and do not commit or upload them. See
 `INSTALL.md` for default locations and command options.
+
+A successful status check can come from an older loaded device. It does not
+prove that Live reloaded the staged code; `runtimeIdentityVerified` remains
+false. Reload the device and verify the affected commands in a disposable set.
 
 ## Included Files
 
@@ -191,7 +199,7 @@ local capability token through `--auth-token` or
 
 ## Role In The Hybrid Architecture
 
-`codex-live-bridge` is the public, standalone external automation surface.
+`codex-live-bridge` is the standalone external automation surface.
 It does not require Ableton's Extensions SDK. The Live Extension and shared
 inspection core are separate and are not included in this repository.
 
@@ -263,6 +271,21 @@ python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
   --api-get live_set tempo req-tempo
 ```
 
+Live Beta 12.4.15b1 adds clip-level `root_note`, `scale_name`, `scale_mode`,
+and `scale_intervals` properties. The existing generic RPC can read them when
+the host exposes them; older hosts return an unsupported-property error.
+This availability comes from the [September 2, 2026 beta release notes](https://www.ableton.com/en/release-notes/live-12-beta/),
+not runtime qualification on that beta. For example, read the scale of the
+clip in Track 1, Session Slot 1:
+
+```bash
+python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
+  --api-get "live_set tracks 0 clip_slots 0 clip" scale_name req-clip-scale
+```
+
+`/api/theory_status` continues to report the Live set's scale. The frozen
+Session and Arrangement inspection schemas are unchanged.
+
 List tracks:
 
 ```bash
@@ -279,9 +302,10 @@ python3 bridge/ableton_udp_bridge.py --ack --no-tempo --no-signature \
 ```
 
 The endpoint preserves note IDs and release velocity when LiveAPI returns
-them. During separate Extensions SDK `1.0.0` qualification, the native SDK
-omitted those two fields. Cross-surface consumers must therefore treat note-ID
-matching as unavailable and release velocity as an explicit SDK-side gap.
+them. During separate Extensions SDK `1.0.0` qualification, the inspected
+native runtime omitted those two fields. Cross-surface consumers comparing
+those responses must use ID-free matching and report the missing release
+velocity. Later SDK/runtime combinations require fresh qualification.
 
 Register and listen for tempo changes after configuring the local token:
 
@@ -315,8 +339,9 @@ file:
 
 1. Keep both JS files next to the patch, or update the Max runtime objects.
 2. Reload the device in Ableton Live.
-3. Save packaged `.amxd` artifacts from a Live-hosted Max MIDI Effect only
-   during an explicit release pass.
+3. For first packaging, save the `.amxd` from a Live-hosted Max MIDI Effect.
+   Preparing distributable release artifacts is a separate, explicit release
+   pass.
 
 Local validation:
 

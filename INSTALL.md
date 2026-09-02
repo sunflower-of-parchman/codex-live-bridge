@@ -1,7 +1,11 @@
 # Installation
 
-The 3.2.0 release includes LiveUdpBridge.zip with the Max for Live device and
-its two JavaScript runtime files:
+The current source includes unreleased security and runtime fixes beyond the
+latest release, 3.1.0. No newer release package is available. Build from the
+current source or update an existing device to use these fixes.
+
+The device package needs the Max for Live device and its two JavaScript
+runtime files:
 
 ```text
 LiveUdpBridge.amxd
@@ -13,10 +17,11 @@ The repository also includes `bridge/m4l/LiveUdpBridge.maxpat`, the editable
 source for the device. Follow [Package From Source](#package-from-source) if
 you need to build your own copy.
 
-## Use a Release Device
+## Load the Current Device
 
-1. Download and extract
-   [LiveUdpBridge.zip](https://github.com/sunflower-of-parchman/codex-live-bridge/releases/download/codex-live-bridge-v3.2.0/LiveUdpBridge.zip).
+1. Follow [Package From Source](#package-from-source) for a first installation,
+   or [Update an Installed Device](#update-an-installed-device) for an existing
+   installation.
 2. Keep `LiveUdpBridge.amxd`, `live_udp_bridge.js`, and
    `osc_loopback_receiver.js` next to each other.
 3. Open Ableton Live and drag `LiveUdpBridge.amxd` onto a MIDI track.
@@ -86,7 +91,14 @@ It then checks the running bridge with a token-free localhost status request.
 If verification fails, all three installed files are restored from the backup.
 Override paths with `--device PATH`, `--output-dir DIR`, `--backup-dir DIR`,
 or `--python PATH`. Output and backup directories inside this repository are
-rejected.
+rejected. Staging, backup, and installed-device locations must not contain
+one another.
+
+The JSON result reports `liveStatusVerified` for this status exchange and
+`runtimeIdentityVerified: false`. The deprecated `verifiedLive` field is an
+alias for `liveStatusVerified`. An older loaded device can answer the status
+request, so this check does not establish which code is running. Reload the
+device and verify the changed commands separately in a disposable set.
 
 Staged devices and backups can contain the existing local token. Keep them
 private. Do not commit or upload them. Public release packages must use a

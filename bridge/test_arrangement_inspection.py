@@ -43,6 +43,11 @@ def _fixture(
         "device_count_override": None,
         "max_fragments": None,
         "max_payload_bytes": None,
+        "operation_ms": 0,
+        "slow_operation_index": None,
+        "slow_operation_ms": 1001,
+        "planning_ms": 0,
+        "repeat_request": False,
         "clip_ids": clip_ids or [301, 301],
         "tracks": [
             {
@@ -105,6 +110,11 @@ def _run_arrangement_js(
             f"context.api_arrangement_clip_inspect({track_index}, {clip_index}, "
             f"{int(include_notes)}, 1, {json.dumps(request_id)});"
         ),
+        "session": (
+            f"context.api_session_clip_inspect({track_index}, {clip_index}, "
+            f"1, {json.dumps(request_id)});"
+        ),
+        "legacy": f"context.inspect_session_clip_notes({track_index}, {clip_index});",
     }[scope]
     result = _run_bridge_js(
         f"""
@@ -155,6 +165,7 @@ context.LiveAPI = function LiveAPI(_callback, rawPath) {{
         throw new Error("unknown track property " + property);
       }},
       getcount: (child) => {{
+        if (child === "clip_slots") return track.clips.length;
         if (child === "arrangement_clips") {{
           return fixture.clip_count_override === null
             ? track.clips.length : fixture.clip_count_override;
@@ -168,10 +179,16 @@ context.LiveAPI = function LiveAPI(_callback, rawPath) {{
       set: () => {{ mutationCalls += 1; throw new Error("unexpected mutation"); }},
     }};
   }}
-  const clipMatch = path.match(/^live_set tracks (\\d+) arrangement_clips (\\d+)$/);
+  const slotMatch = path.match(/^live_set tracks (\\d+) clip_slots (\\d+)$/);
+  if (slotMatch) {{
+    const track = fixture.tracks[Number(slotMatch[1])];
+    const clip = track && track.clips[Number(slotMatch[2])];
+    return {{ id: clip ? 200 : 0, path, get: () => Number(Boolean(clip)) }};
+  }}
+  const clipMatch = path.match(/^live_set tracks (\\d+) (?:arrangement_clips (\\d+)|clip_slots (\\d+) clip)$/);
   if (clipMatch) {{
     const track = fixture.tracks[Number(clipMatch[1])];
-    const index = Number(clipMatch[2]);
+    const index = Number(clipMatch[2] === undefined ? clipMatch[3] : clipMatch[2]);
     const clip = track && track.clips[index];
     if (!clip) return {{ id: 0, path }};
     const first = Number(clipMatch[1]) === 0 && index === 0;
@@ -246,11 +263,49 @@ context.LiveAPI = function LiveAPI(_callback, rawPath) {{
   }}
   return {{ id: 0, path }};
 }};
-{command}
+let elapsedMs = 0;
+const operations = [];
+context.nowMs = () => elapsedMs;
+function hostOperation(label, operation) {{
+  operations.push(label);
+  try {{ return operation(); }} finally {{
+    elapsedMs += fixture.operation_ms;
+    if (operations.length === fixture.slow_operation_index) {{
+      elapsedMs += fixture.slow_operation_ms;
+    }}
+  }}
+}}
+function instrumentApi(api, path) {{
+  for (const method of ["get", "getcount", "call"]) {{
+    if (typeof api[method] !== "function") continue;
+    const original = api[method];
+    api[method] = (...args) => hostOperation(
+      method + ":" + path + ":" + args[0], () => original.apply(api, args));
+  }}
+  return api;
+}}
+const resolveApi = context.LiveAPI;
+context.LiveAPI = function LiveAPI(callback, path) {{
+  return hostOperation("open:" + path, () => instrumentApi(resolveApi(callback, path), path));
+}};
+context.song = instrumentApi(context.song, "live_set");
+for (const name of ["buildArrangementInspectionFragments", "buildSessionClipInspectionFragments"]) {{
+  const original = context[name];
+  context[name] = (...args) => {{
+    const result = original(...args);
+    elapsedMs += fixture.planning_ms;
+    return result;
+  }};
+}}
+const runRequest = () => {{ {command} }};
+runRequest();
+if (fixture.repeat_request) runRequest();
 return {{
   acks: outputs.filter((args) => args[1] === "/ack"),
   noteCalls,
   mutationCalls,
+  elapsedMs,
+  operations,
 }};
 """
     )
@@ -270,6 +325,83 @@ def _assemble(result: dict[str, object]) -> dict[str, object]:
 
 
 class ArrangementInspectionTests(unittest.TestCase):
+    def _assert_deadline_error(self, result: dict[str, object], scope: str) -> None:
+        event = {
+            "session": "api_session_clip_inspect",
+            "legacy": "inspect_session_clip_notes",
+        }.get(scope, f"api_arrangement_{scope}_inspect")
+        self.assertEqual(len(result["acks"]), 1)
+        output = result["acks"][0]
+        self.assertEqual(output[2:4], ["error", event + "_limit_exceeded"])
+        if scope == "legacy":
+            self.assertEqual(output[4], "elapsed_ms:1001:1000")
+            self.assertEqual(output[-2:], ["request_correlation", "req:"])
+        else:
+            self.assertEqual(output[4:7], ["elapsed_ms", 1001, 1000])
+            self.assertEqual(output[-2:], ["request_correlation", "req:req-arrangement"])
+        self.assertLessEqual(len(bridge.encode_osc_message("/ack", tuple(output[2:]))), 4096)
+        self.assertEqual(result["mutationCalls"], 0)
+
+    def test_inspection_deadlines_stop_after_slow_host_operations(self) -> None:
+        for scope in ("project", "track", "clip", "session", "legacy"):
+            baseline = _run_arrangement_js(scope=scope)
+            operations = baseline["operations"]
+            indexes = {1, len(operations)}
+            for prefix in ("open:", "get:", "getcount:"):
+                indexes.add(next(
+                    index + 1 for index, label in enumerate(operations)
+                    if label.startswith(prefix)
+                ))
+            for slow_index in sorted(indexes):
+                with self.subTest(scope=scope, operation=operations[slow_index - 1]):
+                    fixture = _fixture()
+                    fixture["slow_operation_index"] = slow_index
+                    result = _run_arrangement_js(scope=scope, fixture=fixture)
+                    self._assert_deadline_error(result, scope)
+                    self.assertEqual(result["operations"], operations[:slow_index])
+
+    def test_inspection_deadlines_stop_between_note_batches(self) -> None:
+        for scope in ("clip", "session", "legacy"):
+            with self.subTest(scope=scope):
+                fixture = _fixture(notes=[_note(index) for index in range(600)], devices=[])
+                baseline = _run_arrangement_js(scope=scope, include_notes=True, fixture=fixture)
+                operations = baseline["operations"]
+                slow_index = next(
+                    index + 1 for index, label in enumerate(operations)
+                    if label.endswith(":get_notes_by_id")
+                )
+                fixture["slow_operation_index"] = slow_index
+                result = _run_arrangement_js(scope=scope, include_notes=True, fixture=fixture)
+                self._assert_deadline_error(result, scope)
+                self.assertEqual(result["operations"], operations[:slow_index])
+                self.assertEqual(result["noteCalls"], 2)
+
+    def test_inspection_deadlines_include_fragment_planning_before_success(self) -> None:
+        for scope in ("project", "track", "clip", "session"):
+            with self.subTest(scope=scope):
+                fixture = _fixture()
+                fixture["planning_ms"] = 1001
+                result = _run_arrangement_js(scope=scope, fixture=fixture)
+                self._assert_deadline_error(result, scope)
+
+    def test_inspection_deadlines_accept_exact_boundary_and_reset_per_request(self) -> None:
+        for scope in ("project", "track", "clip", "session", "legacy"):
+            with self.subTest(scope=scope):
+                fixture = _fixture()
+                fixture["slow_operation_index"] = 1
+                fixture["slow_operation_ms"] = 1000
+                result = _run_arrangement_js(scope=scope, fixture=fixture)
+                self.assertEqual(result["elapsedMs"], 1000)
+                self.assertTrue(result["acks"])
+                self.assertTrue(all(output[2] != "error" for output in result["acks"]))
+
+                fixture["slow_operation_ms"] = 1001
+                fixture["repeat_request"] = True
+                result = _run_arrangement_js(scope=scope, fixture=fixture)
+                self.assertGreaterEqual(len(result["acks"]), 2)
+                self.assertEqual(result["acks"][0][2], "error")
+                self.assertTrue(all(output[2] != "error" for output in result["acks"][1:]))
+
     def test_cli_builds_tokenless_project_track_and_explicit_note_commands(self) -> None:
         cfg = bridge.parse_args(
             _base_args()

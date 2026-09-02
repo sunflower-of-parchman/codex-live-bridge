@@ -6,8 +6,6 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.2.0] - 2026-08-22
-
 ### Added
 
 - Added `scripts/ableton-device.js` to rebuild and privately stage an existing
@@ -15,10 +13,10 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added explicit device installation with persistent backups and automatic
   rollback when live verification fails.
 - Preserved Ableton device metadata and local authentication during updates.
-- Verified the installed Ableton bridge with a token-free localhost status
-  request.
-
-## [3.1.1] - 2026-08-22
+- Added a token-free localhost status check after installation, reported
+  separately from loaded-runtime identity verification.
+- Added packet-bounded Arrangement project, track, and clip inspection with
+  explicit MIDI-note opt-in and strict Python fragment assembly.
 
 ### Security
 
@@ -39,6 +37,10 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clarified the standalone bridge setup, its three-file device package, and
   the separate Live Extension workflow.
 - Moved tokenless connection checks before optional write-token setup.
+- Corrected setup and release links to distinguish the existing 3.1.0 release
+  from unreleased source changes.
+- Documented the clip-scale properties introduced in Live Beta 12.4.15b1
+  through the existing generic read API, without changing inspection schemas.
 
 ### Fixed
 
@@ -46,7 +48,22 @@ This project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Returned an error when `--ack` cannot bind its reply socket or does not
   receive a matching response.
 - Reported correlated bridge errors as command failures.
-- Required final clip and status verification in the opt-in smoke test.
+- Validated every command in bounded ACK batches and rejected incomplete or
+  mismatched success replies.
+- Checked inspection reply senders, requested targets, and Arrangement
+  note-access flags before accepting completion.
+- Stopped the opt-in smoke test after detected write failures and verified
+  exact note patterns, names, tempo, meter, clip length, and final track counts.
+- Reported oversized integer inspection scalars as assembly errors and
+  invalid manual MIDI arguments as CLI validation errors.
+- Rejected staging and backup paths that contain the installed device
+  directory, and corrected cross-volume path checks.
+- Rejected malformed note records and nonfinite timing before destructive
+  clip replacement or note append.
+- Honored observer registration with `emit_initial:false` without reading an
+  initial value or incrementing its event count.
+- Added cooperative elapsed-work limits to Session and Arrangement inspection
+  and legacy note reads before successful responses are emitted.
 
 ## [3.1.0] - 2026-06-10
 

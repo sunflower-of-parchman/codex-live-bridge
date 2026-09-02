@@ -177,6 +177,8 @@ class AbletonDeviceCommandTests(unittest.TestCase):
             {
                 "stageDir",
                 "installed",
+                "liveStatusVerified",
+                "runtimeIdentityVerified",
                 "verifiedLive",
                 "backupDir",
                 "tokenConfigured",
@@ -287,6 +289,8 @@ class AbletonDeviceCommandTests(unittest.TestCase):
 
         self.assertFalse(summary["installed"])
         self.assertFalse(summary["verifiedLive"])
+        self.assertFalse(summary["liveStatusVerified"])
+        self.assertFalse(summary["runtimeIdentityVerified"])
         self.assertIsNone(summary["backupDir"])
         self.assertTrue(summary["tokenConfigured"])
         self.assertFalse(self.backup_root.exists())
@@ -355,6 +359,8 @@ class AbletonDeviceCommandTests(unittest.TestCase):
 
         self.assertTrue(summary["installed"])
         self.assertTrue(summary["verifiedLive"])
+        self.assertTrue(summary.get("liveStatusVerified"))
+        self.assertIs(summary.get("runtimeIdentityVerified"), False)
         calls = [json.loads(line) for line in record.read_text().splitlines()]
         self.assertEqual(
             calls,
@@ -498,6 +504,41 @@ class AbletonDeviceCommandTests(unittest.TestCase):
         self.assertEqual(real_device.read_bytes(), original)
         self.assertFalse(self.output_dir.exists())
         self.assertFalse(self.backup_root.exists())
+
+    def test_rejects_install_inside_staging_or_backup_ancestor(self) -> None:
+        for ancestor_option in ("staging", "backup"):
+            with self.subTest(ancestor=ancestor_option), tempfile.TemporaryDirectory(
+                prefix="ableton-device-ancestor-test-"
+            ) as fixture_directory:
+                fixture = Path(fixture_directory)
+                ancestor = fixture / "artifact parent"
+                installed = ancestor / "installed bridge"
+                installed.mkdir(parents=True)
+                ancestor.chmod(0o755)
+                for filename in PACKAGE_NAMES:
+                    shutil.copy2(self.install_dir / filename, installed / filename)
+                original = {
+                    name: (installed / name).read_bytes() for name in PACKAGE_NAMES
+                }
+                output = ancestor if ancestor_option == "staging" else fixture / "stage"
+                backup = ancestor if ancestor_option == "backup" else fixture / "backup"
+
+                completed = self._run_tool(
+                    "--install",
+                    output_dir=output,
+                    backup_dir=backup,
+                    device_path=installed / DEVICE_NAME,
+                )
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(stat.S_IMODE(ancestor.stat().st_mode), 0o755)
+                self.assertEqual(list(ancestor.iterdir()), [installed])
+                self.assertEqual(
+                    {name: (installed / name).read_bytes() for name in PACKAGE_NAMES},
+                    original,
+                )
+                self.assertFalse((fixture / "stage").exists())
+                self.assertFalse((fixture / "backup").exists())
 
     def test_rejects_symlinked_staging_destination(self) -> None:
         real_output = self.root / "real output directory"

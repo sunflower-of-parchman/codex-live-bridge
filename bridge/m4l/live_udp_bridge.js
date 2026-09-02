@@ -221,6 +221,32 @@ function checkApiReadDeadline(budget) {
   return true;
 }
 
+function newInspectionReadBudget(onTimeout) {
+  return {
+    started_ms: nowMs(),
+    failure: null,
+    on_timeout: onTimeout,
+  };
+}
+
+function checkInspectionReadDeadline(budget) {
+  if (!budget) return true;
+  if (budget.failure) return false;
+  var elapsedMs = nowMs() - budget.started_ms;
+  if (elapsedMs <= API_READ_MAX_ELAPSED_MS) return true;
+  budget.failure = {
+    ok: false,
+    error: "limit_exceeded",
+    details: ["elapsed_ms", elapsedMs, API_READ_MAX_ELAPSED_MS],
+  };
+  // Each request owns its budget and reports its deadline only once. LiveAPI
+  // calls are synchronous, so the caller checks again after every host call.
+  if (typeof budget.on_timeout === "function") {
+    budget.on_timeout(budget.failure.details);
+  }
+  return false;
+}
+
 function ackBoundedApiReadSerializedJson(eventName, leadingArgs, payloadJson, budget) {
   if (!budget || budget.failed || !checkApiReadDeadline(budget)) {
     return false;
@@ -363,14 +389,17 @@ function listObserverEntries() {
   return items;
 }
 
-function buildObserverPayload(entry, callbackArgs) {
+function buildObserverPayload(entry, callbackArgs, includeValue) {
   if (!entry || !entry.api) {
     return null;
   }
   var args = normalizeObserverCallbackArgs(callbackArgs || []);
-  entry.event_count = Number(entry.event_count || 0) + 1;
-  var value = callbackArgsValue(args);
-  if (value === null && entry.property) {
+  var readValue = includeValue !== false;
+  if (readValue) {
+    entry.event_count = Number(entry.event_count || 0) + 1;
+  }
+  var value = readValue ? callbackArgsValue(args) : null;
+  if (readValue && value === null && entry.property) {
     try {
       value = entry.api.get(entry.property);
     } catch (err) {}
@@ -1610,15 +1639,18 @@ function isNonNegativeInteger(value) {
   );
 }
 
-function readSessionClipInspectionProperty(api, property, target, requestId) {
+function readSessionClipInspectionProperty(api, property, target, requestId, budget) {
+  if (!checkInspectionReadDeadline(budget)) return { ok: false, value: null };
   try {
     var value = getScalar(api, property);
+    if (!checkInspectionReadDeadline(budget)) return { ok: false, value: null };
     if (value === undefined || value === null) {
       sessionClipInspectionError("read_failed", [target, property], requestId);
       return { ok: false, value: null };
     }
     return { ok: true, value: value };
   } catch (err) {
+    if (!checkInspectionReadDeadline(budget)) return { ok: false, value: null };
     debug(
       "Session clip inspection failed to read " +
         target +
@@ -1632,18 +1664,23 @@ function readSessionClipInspectionProperty(api, property, target, requestId) {
   }
 }
 
-function readNullableSessionClipInspectionTextProperty(api, property) {
+function readNullableSessionClipInspectionTextProperty(api, property, budget) {
+  if (!checkInspectionReadDeadline(budget)) return null;
   try {
     var value = getScalar(api, property);
+    if (!checkInspectionReadDeadline(budget)) return null;
     return typeof value === "string" ? value : null;
   } catch (err) {
+    checkInspectionReadDeadline(budget);
     return null;
   }
 }
 
-function readNullableSessionClipInspectionDeviceType(api) {
+function readNullableSessionClipInspectionDeviceType(api, budget) {
+  if (!checkInspectionReadDeadline(budget)) return null;
   try {
     var value = getScalar(api, "type");
+    if (!checkInspectionReadDeadline(budget)) return null;
     if (
       typeof value === "number" &&
       isFinite(value) &&
@@ -1653,6 +1690,7 @@ function readNullableSessionClipInspectionDeviceType(api) {
       return value;
     }
   } catch (err) {
+    checkInspectionReadDeadline(budget);
     // Device type is optional metadata.
   }
   return null;
@@ -1707,22 +1745,26 @@ function validateSessionClipInspectionClipData(clipData, requestId) {
   return true;
 }
 
-function openSessionClipInspectionApi(path, target, requestId) {
+function openSessionClipInspectionApi(path, target, requestId, budget) {
+  if (!checkInspectionReadDeadline(budget)) return null;
   try {
     var api = new LiveAPI(null, path);
+    if (!checkInspectionReadDeadline(budget)) return null;
     if (!api || !(Number(api.id) > 0)) {
       sessionClipInspectionError("not_found", [target, path], requestId);
       return null;
     }
     return api;
   } catch (err) {
+    if (!checkInspectionReadDeadline(budget)) return null;
     debug("Session clip inspection could not resolve " + target + " at " + path + ": " + err);
     sessionClipInspectionError("not_found", [target, path], requestId);
     return null;
   }
 }
 
-function callSessionClipNoteMethod(clipApi, methodName, payload) {
+function callSessionClipNoteMethod(clipApi, methodName, payload, budget) {
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   sessionClipInspectionDictCounter += 1;
   var wrapperName =
     "live_bridge_inspection_wrapper_" +
@@ -1737,11 +1779,15 @@ function callSessionClipNoteMethod(clipApi, methodName, payload) {
     if (!payloadDict) {
       throw new Error("Dict wrapper did not return an inspection dictionary");
     }
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
+    var result = clipApi.call(methodName, payloadDict);
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     return {
       ok: true,
-      result: clipApi.call(methodName, payloadDict),
+      result: result,
     };
   } catch (err) {
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     debug("Session clip inspection " + methodName + " failed: " + err);
     return { ok: false, error: "read_failed", details: ["notes", methodName] };
   } finally {
@@ -1805,12 +1851,15 @@ function boundedSessionClipNoteJson(rawResult, maxBytes) {
   return { ok: true, notes: parsed.notes };
 }
 
-function readBoundedSessionClipNoteIds(clipApi) {
+function readBoundedSessionClipNoteIds(clipApi, budget) {
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   var idCall = callSessionClipNoteMethod(
     clipApi,
     "get_all_notes_extended",
-    { "return": ["note_id"] }
+    { "return": ["note_id"] },
+    budget
   );
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   if (!idCall.ok) {
     return idCall;
   }
@@ -1818,6 +1867,7 @@ function readBoundedSessionClipNoteIds(clipApi) {
     idCall.result,
     SESSION_CLIP_INSPECTION_MAX_ID_CALL_BYTES
   );
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   if (!idResult.ok) {
     return idResult;
   }
@@ -1856,6 +1906,7 @@ function readBoundedSessionClipNoteIds(clipApi) {
     seenNoteIds[String(noteId)] = true;
     noteIds.push(noteId);
   }
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   return { ok: true, note_ids: noteIds };
 }
 
@@ -1871,7 +1922,8 @@ function sameSessionClipNoteIds(leftIds, rightIds) {
   return true;
 }
 
-function readBoundedSessionClipNotes(clipApi) {
+function readBoundedSessionClipNotes(clipApi, budget) {
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   var noteFields = [
     "note_id",
     "pitch",
@@ -1883,7 +1935,7 @@ function readBoundedSessionClipNotes(clipApi) {
     "velocity_deviation",
     "release_velocity",
   ];
-  var initialIds = readBoundedSessionClipNoteIds(clipApi);
+  var initialIds = readBoundedSessionClipNoteIds(clipApi, budget);
   if (!initialIds.ok) {
     return initialIds;
   }
@@ -1895,6 +1947,7 @@ function readBoundedSessionClipNotes(clipApi) {
     offset < noteIds.length;
     offset += SESSION_CLIP_INSPECTION_NOTE_BATCH_SIZE
   ) {
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     var batchIds = noteIds.slice(
       offset,
       offset + SESSION_CLIP_INSPECTION_NOTE_BATCH_SIZE
@@ -1902,8 +1955,10 @@ function readBoundedSessionClipNotes(clipApi) {
     var noteCall = callSessionClipNoteMethod(
       clipApi,
       "get_notes_by_id",
-      { note_ids: batchIds, "return": noteFields }
+      { note_ids: batchIds, "return": noteFields },
+      budget
     );
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     if (!noteCall.ok) {
       return noteCall;
     }
@@ -1911,6 +1966,7 @@ function readBoundedSessionClipNotes(clipApi) {
       noteCall.result,
       SESSION_CLIP_INSPECTION_MAX_NOTE_CALL_BYTES
     );
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     if (!noteResult.ok) {
       return noteResult;
     }
@@ -1943,7 +1999,7 @@ function readBoundedSessionClipNotes(clipApi) {
       notes.push(returnedById[String(batchIds[orderedIndex])]);
     }
   }
-  var finalIds = readBoundedSessionClipNoteIds(clipApi);
+  var finalIds = readBoundedSessionClipNoteIds(clipApi, budget);
   if (!finalIds.ok) {
     return finalIds;
   }
@@ -1954,6 +2010,7 @@ function readBoundedSessionClipNotes(clipApi) {
       details: ["note_inventory"],
     };
   }
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   return { ok: true, notes: notes };
 }
 
@@ -2147,8 +2204,10 @@ function measureSessionClipInspectionFragment(
   fragmentKind,
   isLast,
   data,
-  requestId
+  requestId,
+  budget
 ) {
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   var fragment = makeSessionClipInspectionFragment(
     metadata,
     fragmentIndex,
@@ -2158,6 +2217,7 @@ function measureSessionClipInspectionFragment(
     data
   );
   var serialized = serializeSessionClipInspectionFragment(fragment);
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   if (!serialized.ok) {
     return serialized;
   }
@@ -2165,6 +2225,7 @@ function measureSessionClipInspectionFragment(
     serialized.json,
     requestId
   );
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   return serialized;
 }
 
@@ -2178,11 +2239,13 @@ function paginateSessionClipInspectionItems(
   itemsField,
   requestId,
   maxFragmentCount,
-  maxPages
+  maxPages,
+  budget
 ) {
   var pages = [];
   var offset = 0;
   while (offset < items.length) {
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     if (pages.length >= maxPages) {
       return {
         ok: false,
@@ -2193,6 +2256,7 @@ function paginateSessionClipInspectionItems(
     }
     var pageItems = [];
     while (offset + pageItems.length < items.length) {
+      if (!checkInspectionReadDeadline(budget)) return budget.failure;
       var candidateItems = pageItems.concat([items[offset + pageItems.length]]);
       var candidateData = {};
       candidateData[offsetField] = offset;
@@ -2206,8 +2270,10 @@ function paginateSessionClipInspectionItems(
         fragmentKind,
         false,
         candidateData,
-        requestId
+        requestId,
+        budget
       );
+      if (!checkInspectionReadDeadline(budget)) return budget.failure;
       if (!measured.ok) {
         return {
           ok: false,
@@ -2240,7 +2306,8 @@ function paginateSessionClipInspectionItems(
   return { ok: true, pages: pages };
 }
 
-function buildSessionClipInspectionFragments(metadata, contextData, devices, notes, requestId) {
+function buildSessionClipInspectionFragments(metadata, contextData, devices, notes, requestId, budget) {
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   if (devices.length > SESSION_CLIP_INSPECTION_MAX_DEVICES) {
     return {
       ok: false,
@@ -2278,8 +2345,10 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
     "complete",
     true,
     completeData,
-    requestId
+    requestId,
+    budget
   );
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   if (!complete.ok) {
     return { ok: false, error: "serialization_failed", details: ["complete"], fragments: [] };
   }
@@ -2295,8 +2364,10 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
     "context",
     false,
     contextData,
-    requestId
+    requestId,
+    budget
   );
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   if (!contextMeasured.ok) {
     return { ok: false, error: "serialization_failed", details: ["context"], fragments: [] };
   }
@@ -2319,8 +2390,10 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
     "devices",
     requestId,
     maxFragmentCount,
-    maxFragmentCount - 1
+    maxFragmentCount - 1,
+    budget
   );
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   if (!devicePages.ok) {
     return {
       ok: false,
@@ -2339,8 +2412,10 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
     "notes",
     requestId,
     maxFragmentCount,
-    maxFragmentCount - 1 - devicePages.pages.length
+    maxFragmentCount - 1 - devicePages.pages.length,
+    budget
   );
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   if (!notePages.ok) {
     return {
       ok: false,
@@ -2372,6 +2447,7 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
   }
   var fragments = [];
   for (var i = 0; i < pageSpecs.length; i += 1) {
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     var measured = measureSessionClipInspectionFragment(
       metadata,
       i,
@@ -2379,8 +2455,10 @@ function buildSessionClipInspectionFragments(metadata, contextData, devices, not
       pageSpecs[i].kind,
       i === fragmentCount - 1,
       pageSpecs[i].data,
-      requestId
+      requestId,
+      budget
     );
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     if (!measured.ok) {
       return {
         ok: false,
@@ -2445,13 +2523,16 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     );
     return;
   }
-  if (!ensureInitialized(requestText)) return;
+  var budget = newInspectionReadBudget(function (details) {
+    sessionClipInspectionError("limit_exceeded", details, requestText);
+  });
+  if (!ensureInitialized(requestText) || !checkInspectionReadDeadline(budget)) return;
 
   var track = Number(trackIndex);
   var slot = Number(slotIndex);
-  var startedMs = nowMs();
+  var startedMs = budget.started_ms;
   var trackPath = "live_set tracks " + track;
-  var trackApi = openSessionClipInspectionApi(trackPath, "track", requestText);
+  var trackApi = openSessionClipInspectionApi(trackPath, "track", requestText, budget);
   if (!trackApi) return;
   trackPath = normalizeLiveApiPath(trackApi.path, trackPath);
 
@@ -2459,7 +2540,8 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     trackApi,
     "has_midi_input",
     "track",
-    requestText
+    requestText,
+    budget
   );
   if (!midiResult.ok) return;
   if (Number(midiResult.value) !== 1) {
@@ -2468,17 +2550,21 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   }
   var trackName = readNullableSessionClipInspectionTextProperty(
     trackApi,
-    "name"
+    "name",
+    budget
   );
 
   var slotCount = 0;
+  if (!checkInspectionReadDeadline(budget)) return;
   try {
     slotCount = Number(trackApi.getcount("clip_slots"));
   } catch (errSlotCount) {
+    if (!checkInspectionReadDeadline(budget)) return;
     debug("Session clip inspection could not read clip slot count: " + errSlotCount);
     sessionClipInspectionError("read_failed", ["track", "clip_slots"], requestText);
     return;
   }
+  if (!checkInspectionReadDeadline(budget)) return;
   if (!(isFinite(slotCount) && slotCount >= 0 && Math.floor(slotCount) === slotCount)) {
     sessionClipInspectionError("read_failed", ["track", "clip_slots"], requestText);
     return;
@@ -2489,13 +2575,14 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   }
 
   var slotPath = trackPath + " clip_slots " + slot;
-  var slotApi = openSessionClipInspectionApi(slotPath, "clip_slot", requestText);
+  var slotApi = openSessionClipInspectionApi(slotPath, "clip_slot", requestText, budget);
   if (!slotApi) return;
   var hasClip = readSessionClipInspectionProperty(
     slotApi,
     "has_clip",
     "clip_slot",
-    requestText
+    requestText,
+    budget
   );
   if (!hasClip.ok) return;
   if (Number(hasClip.value) !== 1) {
@@ -2504,7 +2591,7 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   }
 
   var clipPath = slotPath + " clip";
-  var clipApi = openSessionClipInspectionApi(clipPath, "clip", requestText);
+  var clipApi = openSessionClipInspectionApi(clipPath, "clip", requestText, budget);
   if (!clipApi) return;
   clipPath = normalizeLiveApiPath(clipApi.path, clipPath);
   var initialClipId = Number(clipApi.id);
@@ -2521,7 +2608,7 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     slot_index: slot,
     path: clipPath,
     id: initialClipId,
-    name: readNullableSessionClipInspectionTextProperty(clipApi, "name"),
+    name: readNullableSessionClipInspectionTextProperty(clipApi, "name", budget),
   };
   for (var clipPropIndex = 0; clipPropIndex < clipPropertyMap.length; clipPropIndex += 1) {
     var clipProperty = clipPropertyMap[clipPropIndex][0];
@@ -2530,7 +2617,8 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
       clipApi,
       clipProperty,
       "clip",
-      requestText
+      requestText,
+      budget
     );
     if (!clipValue.ok) return;
     clipData[outputProperty] =
@@ -2539,13 +2627,16 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   if (!validateSessionClipInspectionClipData(clipData, requestText)) return;
 
   var deviceCount = 0;
+  if (!checkInspectionReadDeadline(budget)) return;
   try {
     deviceCount = Number(trackApi.getcount("devices"));
   } catch (errDeviceCount) {
+    if (!checkInspectionReadDeadline(budget)) return;
     debug("Session clip inspection could not read device count: " + errDeviceCount);
     sessionClipInspectionError("read_failed", ["track", "devices"], requestText);
     return;
   }
+  if (!checkInspectionReadDeadline(budget)) return;
   if (!(isFinite(deviceCount) && deviceCount >= 0 && Math.floor(deviceCount) === deviceCount)) {
     sessionClipInspectionError("read_failed", ["track", "devices"], requestText);
     return;
@@ -2560,15 +2651,18 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   }
   var devices = [];
   for (var deviceIndex = 0; deviceIndex < deviceCount; deviceIndex += 1) {
+    if (!checkInspectionReadDeadline(budget)) return;
     var devicePath = trackPath + " devices " + deviceIndex;
     var deviceApi = null;
     try {
       deviceApi = new LiveAPI(null, devicePath);
     } catch (errDevice) {
+      if (!checkInspectionReadDeadline(budget)) return;
       debug("Session clip inspection could not read device " + deviceIndex + ": " + errDevice);
       sessionClipInspectionError("read_failed", ["device", deviceIndex], requestText);
       return;
     }
+    if (!checkInspectionReadDeadline(budget)) return;
     if (!deviceApi || !(Number(deviceApi.id) > 0)) {
       sessionClipInspectionError("read_failed", ["device", deviceIndex], requestText);
       return;
@@ -2577,17 +2671,20 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
       index: deviceIndex,
       path: normalizeLiveApiPath(deviceApi.path, devicePath),
       id: Number(deviceApi.id),
-      name: readNullableSessionClipInspectionTextProperty(deviceApi, "name"),
+      name: readNullableSessionClipInspectionTextProperty(deviceApi, "name", budget),
       class_name: readNullableSessionClipInspectionTextProperty(
         deviceApi,
-        "class_name"
+        "class_name",
+        budget
       ),
-      type: readNullableSessionClipInspectionDeviceType(deviceApi),
+      type: readNullableSessionClipInspectionDeviceType(deviceApi, budget),
     };
+    if (!checkInspectionReadDeadline(budget)) return;
     devices.push(device);
   }
 
-  var noteRead = readBoundedSessionClipNotes(clipApi);
+  var noteRead = readBoundedSessionClipNotes(clipApi, budget);
+  if (!checkInspectionReadDeadline(budget)) return;
   if (!noteRead.ok) {
     sessionClipInspectionError(noteRead.error, noteRead.details, requestText);
     return;
@@ -2595,6 +2692,7 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   var parsedNotes = noteRead.notes;
   var notes = [];
   for (var noteIndex = 0; noteIndex < parsedNotes.length; noteIndex += 1) {
+    if (!checkInspectionReadDeadline(budget)) return;
     var copiedNote = copySessionClipInspectionNote(
       parsedNotes[noteIndex],
       noteIndex,
@@ -2634,8 +2732,10 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     contextData,
     devices,
     notes,
-    requestText
+    requestText,
+    budget
   );
+  if (!checkInspectionReadDeadline(budget)) return;
   if (!built.ok) {
     sessionClipInspectionError(built.error, built.details, requestText);
     return;
@@ -2645,10 +2745,12 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
   try {
     finalClipApi = new LiveAPI(null, clipPath);
   } catch (errReread) {
+    if (!checkInspectionReadDeadline(budget)) return;
     debug("Session clip inspection clip id reread failed: " + errReread);
     sessionClipInspectionError("read_failed", ["clip", "id_reread"], requestText);
     return;
   }
+  if (!checkInspectionReadDeadline(budget)) return;
   var finalClipId = finalClipApi ? Number(finalClipApi.id) : 0;
   if (finalClipId !== initialClipId) {
     sessionClipInspectionError(
@@ -2659,6 +2761,7 @@ function api_session_clip_inspect(trackIndex, slotIndex, schemaVersion, requestI
     return;
   }
 
+  if (!checkInspectionReadDeadline(budget)) return;
   for (var fragmentIndex = 0; fragmentIndex < built.fragments.length; fragmentIndex += 1) {
     ackWithRequest(
       "api_session_clip_inspect",
@@ -2720,25 +2823,31 @@ function validateArrangementInspectionRequest(scope, schemaVersion, requestId) {
   return requestText;
 }
 
-function openArrangementInspectionApi(path, target, scope, requestId) {
+function openArrangementInspectionApi(path, target, scope, requestId, budget) {
+  if (!checkInspectionReadDeadline(budget)) return null;
   try {
     var api = new LiveAPI(null, path);
+    if (!checkInspectionReadDeadline(budget)) return null;
     if (api && Number(api.id) > 0) return api;
   } catch (err) {
+    if (!checkInspectionReadDeadline(budget)) return null;
     // Return a bounded, correlated error without exposing Live exception text.
   }
   arrangementInspectionError(scope, "not_found", [target, path], requestId);
   return null;
 }
 
-function arrangementInspectionCount(api, child, scope, requestId, maximum) {
+function arrangementInspectionCount(api, child, scope, requestId, maximum, budget) {
+  if (!checkInspectionReadDeadline(budget)) return null;
   var count = 0;
   try {
     count = Number(api.getcount(child));
   } catch (err) {
+    if (!checkInspectionReadDeadline(budget)) return null;
     arrangementInspectionError(scope, "read_failed", ["count", child], requestId);
     return null;
   }
+  if (!checkInspectionReadDeadline(budget)) return null;
   if (!(isFinite(count) && count >= 0 && Math.floor(count) === count)) {
     arrangementInspectionError(scope, "read_failed", ["count", child], requestId);
     return null;
@@ -2750,33 +2859,40 @@ function arrangementInspectionCount(api, child, scope, requestId, maximum) {
   return count;
 }
 
-function arrangementNullableNumber(api, property) {
+function arrangementNullableNumber(api, property, budget) {
+  if (!checkInspectionReadDeadline(budget)) return null;
   try {
     var value = getScalar(api, property);
+    if (!checkInspectionReadDeadline(budget)) return null;
     return typeof value === "number" && isFinite(value) ? value : null;
   } catch (err) {
+    checkInspectionReadDeadline(budget);
     return null;
   }
 }
 
-function arrangementNullableBoolean(api, property) {
+function arrangementNullableBoolean(api, property, budget) {
+  if (!checkInspectionReadDeadline(budget)) return null;
   try {
     var value = getScalar(api, property);
+    if (!checkInspectionReadDeadline(budget)) return null;
     if (typeof value === "boolean") return value;
     if (value === 0 || value === 1) return value === 1;
   } catch (err) {
+    checkInspectionReadDeadline(budget);
     // Unsupported optional Live properties remain nullable.
   }
   return null;
 }
 
-function readArrangementTrackSummary(trackApi, trackIndex, scope, requestId) {
+function readArrangementTrackSummary(trackApi, trackIndex, scope, requestId, budget) {
   var clipCount = arrangementInspectionCount(
     trackApi,
     "arrangement_clips",
     scope,
     requestId,
-    ARRANGEMENT_INSPECTION_MAX_ITEMS
+    ARRANGEMENT_INSPECTION_MAX_ITEMS,
+    budget
   );
   if (clipCount === null) return null;
   var deviceCount = arrangementInspectionCount(
@@ -2784,27 +2900,30 @@ function readArrangementTrackSummary(trackApi, trackIndex, scope, requestId) {
     "devices",
     scope,
     requestId,
-    ARRANGEMENT_INSPECTION_MAX_ITEMS
+    ARRANGEMENT_INSPECTION_MAX_ITEMS,
+    budget
   );
   if (deviceCount === null) return null;
   var path = normalizeLiveApiPath(trackApi.path, "live_set tracks " + trackIndex);
-  return {
+  var summary = {
     index: trackIndex,
     path: path,
     id: Number(trackApi.id),
-    name: readNullableSessionClipInspectionTextProperty(trackApi, "name"),
-    has_midi_input: arrangementNullableBoolean(trackApi, "has_midi_input"),
-    has_audio_input: arrangementNullableBoolean(trackApi, "has_audio_input"),
-    mute: arrangementNullableBoolean(trackApi, "mute"),
-    solo: arrangementNullableBoolean(trackApi, "solo"),
+    name: readNullableSessionClipInspectionTextProperty(trackApi, "name", budget),
+    has_midi_input: arrangementNullableBoolean(trackApi, "has_midi_input", budget),
+    has_audio_input: arrangementNullableBoolean(trackApi, "has_audio_input", budget),
+    mute: arrangementNullableBoolean(trackApi, "mute", budget),
+    solo: arrangementNullableBoolean(trackApi, "solo", budget),
     arrangement_clip_count: clipCount,
     device_count: deviceCount,
   };
+  return checkInspectionReadDeadline(budget) ? summary : null;
 }
 
-function readArrangementClipSummary(clipApi, clipIndex, scope, requestId) {
-  var startTime = arrangementNullableNumber(clipApi, "start_time");
-  var endTime = arrangementNullableNumber(clipApi, "end_time");
+function readArrangementClipSummary(clipApi, clipIndex, scope, requestId, budget) {
+  var startTime = arrangementNullableNumber(clipApi, "start_time", budget);
+  var endTime = arrangementNullableNumber(clipApi, "end_time", budget);
+  if (!checkInspectionReadDeadline(budget)) return null;
   if (
     startTime === null ||
     endTime === null ||
@@ -2814,62 +2933,66 @@ function readArrangementClipSummary(clipApi, clipIndex, scope, requestId) {
     arrangementInspectionError(scope, "parse_failed", ["clip_time_range", clipIndex], requestId);
     return null;
   }
-  return {
+  var summary = {
     index: clipIndex,
     path: normalizeLiveApiPath(clipApi.path, ""),
     id: Number(clipApi.id),
-    name: readNullableSessionClipInspectionTextProperty(clipApi, "name"),
+    name: readNullableSessionClipInspectionTextProperty(clipApi, "name", budget),
     start_time: startTime,
     end_time: endTime,
-    start_marker: arrangementNullableNumber(clipApi, "start_marker"),
-    end_marker: arrangementNullableNumber(clipApi, "end_marker"),
-    live_length: arrangementNullableNumber(clipApi, "length"),
-    looping: arrangementNullableBoolean(clipApi, "looping"),
-    loop_start: arrangementNullableNumber(clipApi, "loop_start"),
-    loop_end: arrangementNullableNumber(clipApi, "loop_end"),
-    is_midi_clip: arrangementNullableBoolean(clipApi, "is_midi_clip"),
-    is_audio_clip: arrangementNullableBoolean(clipApi, "is_audio_clip"),
+    start_marker: arrangementNullableNumber(clipApi, "start_marker", budget),
+    end_marker: arrangementNullableNumber(clipApi, "end_marker", budget),
+    live_length: arrangementNullableNumber(clipApi, "length", budget),
+    looping: arrangementNullableBoolean(clipApi, "looping", budget),
+    loop_start: arrangementNullableNumber(clipApi, "loop_start", budget),
+    loop_end: arrangementNullableNumber(clipApi, "loop_end", budget),
+    is_midi_clip: arrangementNullableBoolean(clipApi, "is_midi_clip", budget),
+    is_audio_clip: arrangementNullableBoolean(clipApi, "is_audio_clip", budget),
   };
+  return checkInspectionReadDeadline(budget) ? summary : null;
 }
 
-function readArrangementAuxTrack(path, index, scope, requestId) {
-  var api = openArrangementInspectionApi(path, "track", scope, requestId);
+function readArrangementAuxTrack(path, index, scope, requestId, budget) {
+  var api = openArrangementInspectionApi(path, "track", scope, requestId, budget);
   if (!api) return null;
   var count = arrangementInspectionCount(
     api,
     "devices",
     scope,
     requestId,
-    ARRANGEMENT_INSPECTION_MAX_ITEMS
+    ARRANGEMENT_INSPECTION_MAX_ITEMS,
+    budget
   );
   if (count === null) return null;
-  return {
+  var summary = {
     index: index,
     path: normalizeLiveApiPath(api.path, path),
     id: Number(api.id),
-    name: readNullableSessionClipInspectionTextProperty(api, "name"),
+    name: readNullableSessionClipInspectionTextProperty(api, "name", budget),
     device_count: count,
-    mute: arrangementNullableBoolean(api, "mute"),
-    solo: arrangementNullableBoolean(api, "solo"),
+    mute: arrangementNullableBoolean(api, "mute", budget),
+    solo: arrangementNullableBoolean(api, "solo", budget),
   };
+  return checkInspectionReadDeadline(budget) ? summary : null;
 }
 
-function readArrangementDevices(track, scope, requestId) {
+function readArrangementDevices(track, scope, requestId, budget) {
   var devices = [];
   for (var index = 0; index < track.device_count; index += 1) {
+    if (!checkInspectionReadDeadline(budget)) return null;
     var path = track.path + " devices " + index;
-    var api = openArrangementInspectionApi(path, "device", scope, requestId);
+    var api = openArrangementInspectionApi(path, "device", scope, requestId, budget);
     if (!api) return null;
     devices.push({
       index: index,
       path: normalizeLiveApiPath(api.path, path),
       id: Number(api.id),
-      name: readNullableSessionClipInspectionTextProperty(api, "name"),
-      class_name: readNullableSessionClipInspectionTextProperty(api, "class_name"),
-      type: readNullableSessionClipInspectionDeviceType(api),
+      name: readNullableSessionClipInspectionTextProperty(api, "name", budget),
+      class_name: readNullableSessionClipInspectionTextProperty(api, "class_name", budget),
+      type: readNullableSessionClipInspectionDeviceType(api, budget),
     });
   }
-  return devices;
+  return checkInspectionReadDeadline(budget) ? devices : null;
 }
 
 function arrangementInspectionAckPacketBytes(eventName, fragmentJson, requestId) {
@@ -2915,13 +3038,16 @@ function arrangementInspectionSubstring(value, start, end) {
   return value.slice(start, end);
 }
 
-function buildArrangementInspectionFragments(eventName, metadata, payload, requestId) {
+function buildArrangementInspectionFragments(eventName, metadata, payload, requestId, budget) {
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   var payloadJson = "";
   try {
     payloadJson = JSON.stringify(payload);
   } catch (errSerialize) {
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     return { ok: false, error: "serialization_failed", details: [], fragments: [] };
   }
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   if (typeof payloadJson !== "string") {
     return { ok: false, error: "serialization_failed", details: [], fragments: [] };
   }
@@ -2938,6 +3064,7 @@ function buildArrangementInspectionFragments(eventName, metadata, payload, reque
   var chunks = [];
   var offset = 0;
   while (offset < payloadJson.length) {
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     if (chunks.length >= ARRANGEMENT_INSPECTION_MAX_FRAGMENTS) {
       return {
         ok: false,
@@ -2953,6 +3080,7 @@ function buildArrangementInspectionFragments(eventName, metadata, payload, reque
     );
     var chosen = "";
     while (low <= high) {
+      if (!checkInspectionReadDeadline(budget)) return budget.failure;
       var midpoint = Math.floor((low + high) / 2);
       var candidate = arrangementInspectionSubstring(payloadJson, offset, offset + midpoint);
       if (candidate.length === 0) {
@@ -2978,6 +3106,7 @@ function buildArrangementInspectionFragments(eventName, metadata, payload, reque
         previewJson,
         requestId
       );
+      if (!checkInspectionReadDeadline(budget)) return budget.failure;
       if (packetBytes <= ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES) {
         chosen = candidate;
         low = midpoint + 1;
@@ -2994,6 +3123,7 @@ function buildArrangementInspectionFragments(eventName, metadata, payload, reque
 
   var fragments = [];
   for (var index = 0; index < chunks.length; index += 1) {
+    if (!checkInspectionReadDeadline(budget)) return budget.failure;
     var fragment = makeArrangementInspectionFragment(
       metadata,
       index,
@@ -3011,10 +3141,12 @@ function buildArrangementInspectionFragments(eventName, metadata, payload, reque
     }
     fragments.push(serialized);
   }
+  if (!checkInspectionReadDeadline(budget)) return budget.failure;
   return { ok: true, fragments: fragments };
 }
 
-function emitArrangementInspection(scope, trackIndex, clipIndex, startedMs, payload, requestId) {
+function emitArrangementInspection(scope, trackIndex, clipIndex, startedMs, payload, requestId, budget) {
+  if (!checkInspectionReadDeadline(budget)) return;
   arrangementInspectionCounter += 1;
   var eventName = "api_arrangement_" + scope + "_inspect";
   var metadata = {
@@ -3032,11 +3164,14 @@ function emitArrangementInspection(scope, trackIndex, clipIndex, startedMs, payl
       consistent: true,
     },
   };
-  var built = buildArrangementInspectionFragments(eventName, metadata, payload, requestId);
+  var built = buildArrangementInspectionFragments(eventName, metadata, payload, requestId, budget);
+  if (!checkInspectionReadDeadline(budget)) return;
   if (!built.ok) {
     arrangementInspectionError(scope, built.error, built.details, requestId);
     return;
   }
+  // Finish validation and planning before the first fragment. Do not turn an
+  // already-started transfer into a partial success by timing out mid-emission.
   for (var index = 0; index < built.fragments.length; index += 1) {
     ackWithRequest(eventName, [built.fragments[index]], requestId);
   }
@@ -3044,14 +3179,19 @@ function emitArrangementInspection(scope, trackIndex, clipIndex, startedMs, payl
 
 function api_arrangement_project_inspect(schemaVersion, requestId) {
   var requestText = validateArrangementInspectionRequest("project", schemaVersion, requestId);
-  if (requestText === null || !ensureInitialized(requestText)) return;
-  var startedMs = nowMs();
+  if (requestText === null) return;
+  var budget = newInspectionReadBudget(function (details) {
+    arrangementInspectionError("project", "limit_exceeded", details, requestText);
+  });
+  if (!ensureInitialized(requestText) || !checkInspectionReadDeadline(budget)) return;
+  var startedMs = budget.started_ms;
   var count = arrangementInspectionCount(
     song,
     "tracks",
     "project",
     requestText,
-    ARRANGEMENT_INSPECTION_MAX_ITEMS
+    ARRANGEMENT_INSPECTION_MAX_ITEMS,
+    budget
   );
   if (count === null) return;
   var returns = arrangementInspectionCount(
@@ -3059,15 +3199,17 @@ function api_arrangement_project_inspect(schemaVersion, requestId) {
     "return_tracks",
     "project",
     requestText,
-    ARRANGEMENT_INSPECTION_MAX_ITEMS
+    ARRANGEMENT_INSPECTION_MAX_ITEMS,
+    budget
   );
   if (returns === null) return;
   var tracks = [];
   for (var index = 0; index < count; index += 1) {
+    if (!checkInspectionReadDeadline(budget)) return;
     var path = "live_set tracks " + index;
-    var trackApi = openArrangementInspectionApi(path, "track", "project", requestText);
+    var trackApi = openArrangementInspectionApi(path, "track", "project", requestText, budget);
     if (!trackApi) return;
-    var track = readArrangementTrackSummary(trackApi, index, "project", requestText);
+    var track = readArrangementTrackSummary(trackApi, index, "project", requestText, budget);
     if (!track) return;
     tracks.push(track);
   }
@@ -3077,7 +3219,8 @@ function api_arrangement_project_inspect(schemaVersion, requestId) {
       "live_set return_tracks " + returnIndex,
       returnIndex,
       "project",
-      requestText
+      requestText,
+      budget
     );
     if (!returnTrack) return;
     returnTracks.push(returnTrack);
@@ -3086,7 +3229,8 @@ function api_arrangement_project_inspect(schemaVersion, requestId) {
     "live_set master_track",
     null,
     "project",
-    requestText
+    requestText,
+    budget
   );
   if (!mainTrack) return;
   var finalCount = arrangementInspectionCount(
@@ -3094,7 +3238,8 @@ function api_arrangement_project_inspect(schemaVersion, requestId) {
     "tracks",
     "project",
     requestText,
-    ARRANGEMENT_INSPECTION_MAX_ITEMS
+    ARRANGEMENT_INSPECTION_MAX_ITEMS,
+    budget
   );
   if (finalCount === null) return;
   if (finalCount !== count) {
@@ -3110,9 +3255,9 @@ function api_arrangement_project_inspect(schemaVersion, requestId) {
       context: "arrangement",
       scope: "project",
       project: {
-        tempo: arrangementNullableNumber(song, "tempo"),
-        signature_numerator: arrangementNullableNumber(song, "signature_numerator"),
-        signature_denominator: arrangementNullableNumber(song, "signature_denominator"),
+        tempo: arrangementNullableNumber(song, "tempo", budget),
+        signature_numerator: arrangementNullableNumber(song, "signature_numerator", budget),
+        signature_denominator: arrangementNullableNumber(song, "signature_denominator", budget),
         track_count: count,
         return_track_count: returns,
       },
@@ -3121,7 +3266,8 @@ function api_arrangement_project_inspect(schemaVersion, requestId) {
       main_track: mainTrack,
       privacy: { notes_requested: false, notes_included: false },
     },
-    requestText
+    requestText,
+    budget
   );
 }
 
@@ -3132,16 +3278,20 @@ function api_arrangement_track_inspect(trackIndex, schemaVersion, requestId) {
     arrangementInspectionError("track", "validation_failed", ["invalid_track_index", trackIndex], requestText);
     return;
   }
-  if (!ensureInitialized(requestText)) return;
-  var startedMs = nowMs();
+  var budget = newInspectionReadBudget(function (details) {
+    arrangementInspectionError("track", "limit_exceeded", details, requestText);
+  });
+  if (!ensureInitialized(requestText) || !checkInspectionReadDeadline(budget)) return;
+  var startedMs = budget.started_ms;
   var trackApi = openArrangementInspectionApi(
     "live_set tracks " + trackIndex,
     "track",
     "track",
-    requestText
+    requestText,
+    budget
   );
   if (!trackApi) return;
-  var track = readArrangementTrackSummary(trackApi, Number(trackIndex), "track", requestText);
+  var track = readArrangementTrackSummary(trackApi, Number(trackIndex), "track", requestText, budget);
   if (!track) return;
   if (track.arrangement_clip_count + track.device_count > API_READ_MAX_TOTAL_ITEMS) {
     arrangementInspectionError(
@@ -3154,14 +3304,15 @@ function api_arrangement_track_inspect(trackIndex, schemaVersion, requestId) {
   }
   var clips = [];
   for (var index = 0; index < track.arrangement_clip_count; index += 1) {
+    if (!checkInspectionReadDeadline(budget)) return;
     var clipPath = track.path + " arrangement_clips " + index;
-    var clipApi = openArrangementInspectionApi(clipPath, "clip", "track", requestText);
+    var clipApi = openArrangementInspectionApi(clipPath, "clip", "track", requestText, budget);
     if (!clipApi) return;
-    var clip = readArrangementClipSummary(clipApi, index, "track", requestText);
+    var clip = readArrangementClipSummary(clipApi, index, "track", requestText, budget);
     if (!clip) return;
     clips.push(clip);
   }
-  var devices = readArrangementDevices(track, "track", requestText);
+  var devices = readArrangementDevices(track, "track", requestText, budget);
   if (devices === null) return;
   emitArrangementInspection(
     "track",
@@ -3176,7 +3327,8 @@ function api_arrangement_track_inspect(trackIndex, schemaVersion, requestId) {
       devices: devices,
       privacy: { notes_requested: false, notes_included: false },
     },
-    requestText
+    requestText,
+    budget
   );
 }
 
@@ -3223,27 +3375,31 @@ function api_arrangement_clip_inspect(trackIndex, clipIndex, includeNotes, schem
     arrangementInspectionError("clip", "validation_failed", ["invalid_include_notes"], requestText);
     return;
   }
-  if (!ensureInitialized(requestText)) return;
-  var startedMs = nowMs();
+  var budget = newInspectionReadBudget(function (details) {
+    arrangementInspectionError("clip", "limit_exceeded", details, requestText);
+  });
+  if (!ensureInitialized(requestText) || !checkInspectionReadDeadline(budget)) return;
+  var startedMs = budget.started_ms;
   var trackApi = openArrangementInspectionApi(
     "live_set tracks " + trackIndex,
     "track",
     "clip",
-    requestText
+    requestText,
+    budget
   );
   if (!trackApi) return;
-  var track = readArrangementTrackSummary(trackApi, Number(trackIndex), "clip", requestText);
+  var track = readArrangementTrackSummary(trackApi, Number(trackIndex), "clip", requestText, budget);
   if (!track) return;
   if (clipIndex >= track.arrangement_clip_count) {
     arrangementInspectionError("clip", "not_found", ["clip", trackIndex, clipIndex], requestText);
     return;
   }
   var clipPath = track.path + " arrangement_clips " + clipIndex;
-  var clipApi = openArrangementInspectionApi(clipPath, "clip", "clip", requestText);
+  var clipApi = openArrangementInspectionApi(clipPath, "clip", "clip", requestText, budget);
   if (!clipApi) return;
-  var clip = readArrangementClipSummary(clipApi, Number(clipIndex), "clip", requestText);
+  var clip = readArrangementClipSummary(clipApi, Number(clipIndex), "clip", requestText, budget);
   if (!clip) return;
-  var devices = readArrangementDevices(track, "clip", requestText);
+  var devices = readArrangementDevices(track, "clip", requestText, budget);
   if (devices === null) return;
   var payload = {
     context: "arrangement",
@@ -3258,13 +3414,15 @@ function api_arrangement_clip_inspect(trackIndex, clipIndex, includeNotes, schem
       arrangementInspectionError("clip", "not_midi", [trackIndex, clipIndex], requestText);
       return;
     }
-    var noteRead = readBoundedSessionClipNotes(clipApi);
+    var noteRead = readBoundedSessionClipNotes(clipApi, budget);
+    if (!checkInspectionReadDeadline(budget)) return;
     if (!noteRead.ok) {
       arrangementInspectionError("clip", noteRead.error, noteRead.details, requestText);
       return;
     }
     var notes = [];
     for (var noteIndex = 0; noteIndex < noteRead.notes.length; noteIndex += 1) {
+      if (!checkInspectionReadDeadline(budget)) return;
       if (!arrangementValidNote(noteRead.notes[noteIndex])) {
         arrangementInspectionError("clip", "parse_failed", ["note", noteIndex], requestText);
         return;
@@ -3285,7 +3443,7 @@ function api_arrangement_clip_inspect(trackIndex, clipIndex, includeNotes, schem
     payload.notes = notes;
     payload.summary = buildSessionClipInspectionSummary(notes);
   }
-  var finalClip = openArrangementInspectionApi(clipPath, "clip", "clip", requestText);
+  var finalClip = openArrangementInspectionApi(clipPath, "clip", "clip", requestText, budget);
   if (!finalClip) return;
   if (Number(finalClip.id) !== clip.id) {
     arrangementInspectionError("clip", "snapshot_changed", [clip.id, Number(finalClip.id)], requestText);
@@ -3297,7 +3455,8 @@ function api_arrangement_clip_inspect(trackIndex, clipIndex, includeNotes, schem
     Number(clipIndex),
     startedMs,
     payload,
-    requestText
+    requestText,
+    budget
   );
 }
 
@@ -3389,7 +3548,7 @@ function api_observe(authToken, path, property, optionsJson, requestId) {
       initialArgs = [];
     }
   }
-  var payload = buildObserverPayload(entry, initialArgs);
+  var payload = buildObserverPayload(entry, initialArgs, emitInitial);
   var payloadJson = safeJsonStringify(payload, contextName + "_payload");
   ackWithRequest("api_observe", [observerId, normalizeLiveApiPath(observerApi.path, apiPath), propName, payloadJson], requestId);
 }
@@ -3739,15 +3898,18 @@ function add_midi_tracks(authToken, count, name) {
   ack("ack", "add_midi_tracks", targetCount, trackName, created, finalTotal);
 }
 
-function getTotalTracksOrError(contextName, requestId) {
+function getTotalTracksOrError(contextName, requestId, budget) {
+  if (!checkInspectionReadDeadline(budget)) return 0;
   var total = 0;
   try {
     total = song.getcount("tracks");
   } catch (err) {
+    if (!checkInspectionReadDeadline(budget)) return 0;
     debug("Unable to read track count in " + contextName + ": " + err);
     ackWithRequest("error", ["track_count_failed", contextName], requestId);
     return 0;
   }
+  if (!checkInspectionReadDeadline(budget)) return 0;
   if (total === 0) {
     debug("Track count is 0 in " + contextName + ". Device may not be attached to the Live set.");
     ackWithRequest("error", ["not_in_live_set", contextName], requestId);
@@ -3883,14 +4045,15 @@ function rename_track(authToken, trackIndex, name) {
   }
 }
 
-function getTrackOrError(trackIndex, contextName) {
+function getTrackOrError(trackIndex, contextName, budget) {
+  if (!checkInspectionReadDeadline(budget)) return null;
   var index = Math.floor(Number(trackIndex));
   if (!(index >= 0)) {
     ack("ack", "error", contextName + "_invalid_index", trackIndex);
     return null;
   }
 
-  var totalTracks = getTotalTracksOrError(contextName);
+  var totalTracks = getTotalTracksOrError(contextName, null, budget);
   if (totalTracks === 0) {
     return null;
   }
@@ -3900,9 +4063,12 @@ function getTrackOrError(trackIndex, contextName) {
     return null;
   }
 
+  if (!checkInspectionReadDeadline(budget)) return null;
   try {
-    return new LiveAPI(null, "live_set tracks " + index);
+    var track = new LiveAPI(null, "live_set tracks " + index);
+    return checkInspectionReadDeadline(budget) ? track : null;
   } catch (err) {
+    if (!checkInspectionReadDeadline(budget)) return null;
     debug("Unable to access track " + index + " in " + contextName + ": " + err);
     ack("ack", "error", contextName + "_track_access_failed", index);
     return null;
@@ -3951,6 +4117,10 @@ function copyOptionalNoteNumber(note, normalized, fieldName, minValue, maxValue,
 }
 
 function normalizeNote(note, index, contextName, requestId) {
+  if (!note || typeof note !== "object" || Array.isArray(note)) {
+    ackWithRequest("error", [contextName + "_invalid_note", index], requestId);
+    return null;
+  }
   var pitch = Math.floor(Number(note.pitch));
   var startTime = Number(note.start_time);
   var duration = Number(note.duration);
@@ -3964,12 +4134,12 @@ function normalizeNote(note, index, contextName, requestId) {
     ackWithRequest("error", [contextName + "_invalid_pitch", index, note.pitch], requestId);
     return null;
   }
-  if (!(startTime >= 0)) {
-    ackWithRequest("error", [contextName + "_invalid_start_time", index, note.start_time], requestId);
+  if (!(isFinite(startTime) && startTime >= 0)) {
+    ackWithRequest("error", [contextName + "_invalid_start_time", index, String(note.start_time)], requestId);
     return null;
   }
-  if (!(duration > 0)) {
-    ackWithRequest("error", [contextName + "_invalid_duration", index, note.duration], requestId);
+  if (!(isFinite(duration) && duration > 0 && isFinite(startTime + duration))) {
+    ackWithRequest("error", [contextName + "_invalid_duration", index, String(note.duration)], requestId);
     return null;
   }
   if (!(velocity >= 0 && velocity <= 127)) {
@@ -4071,8 +4241,8 @@ function set_session_clip_notes(authToken, trackIndex, slotIndex, lengthBeats, n
   }
 
   var length = Number(lengthBeats);
-  if (!(length > 0)) {
-    ack("ack", "error", contextName + "_invalid_length", lengthBeats);
+  if (!(isFinite(length) && length > 0)) {
+    ack("ack", "error", contextName + "_invalid_length", String(lengthBeats));
     return;
   }
 
@@ -4237,7 +4407,8 @@ function append_session_clip_notes(authToken, trackIndex, slotIndex, notesJson) 
   );
 }
 
-function getClipSlotOrError(trackIndex, slotIndex, contextName) {
+function getClipSlotOrError(trackIndex, slotIndex, contextName, budget) {
+  if (!checkInspectionReadDeadline(budget)) return null;
   var slot = Math.floor(Number(slotIndex));
   if (!(slot >= 0)) {
     ack("ack", "error", contextName + "_invalid_slot_index", slotIndex);
@@ -4245,20 +4416,31 @@ function getClipSlotOrError(trackIndex, slotIndex, contextName) {
   }
 
   var slotPath = "live_set tracks " + Math.floor(Number(trackIndex)) + " clip_slots " + slot;
+  if (!checkInspectionReadDeadline(budget)) return null;
   try {
-    return new LiveAPI(null, slotPath);
+    var clipSlot = new LiveAPI(null, slotPath);
+    return checkInspectionReadDeadline(budget) ? clipSlot : null;
   } catch (err) {
+    if (!checkInspectionReadDeadline(budget)) return null;
     debug("Unable to access clip slot at " + slotPath + ": " + err);
     ack("ack", "error", contextName + "_clip_slot_access_failed", trackIndex, slot);
     return null;
   }
 }
 
-function getClipFromSlotOrError(trackIndex, slotIndex, contextName) {
-  var clipSlot = getClipSlotOrError(trackIndex, slotIndex, contextName);
+function getClipFromSlotOrError(trackIndex, slotIndex, contextName, budget) {
+  var clipSlot = getClipSlotOrError(trackIndex, slotIndex, contextName, budget);
   if (!clipSlot) return null;
 
-  var hasClip = Number(getScalar(clipSlot, "has_clip"));
+  if (!checkInspectionReadDeadline(budget)) return null;
+  var hasClip = 0;
+  try {
+    hasClip = Number(getScalar(clipSlot, "has_clip"));
+  } catch (errHasClip) {
+    if (!checkInspectionReadDeadline(budget)) return null;
+    throw errHasClip;
+  }
+  if (!checkInspectionReadDeadline(budget)) return null;
   if (hasClip !== 1) {
     ack("ack", "error", contextName + "_no_clip", trackIndex, slotIndex);
     return null;
@@ -4270,9 +4452,12 @@ function getClipFromSlotOrError(trackIndex, slotIndex, contextName) {
     " clip_slots " +
     Math.floor(Number(slotIndex)) +
     " clip";
+  if (!checkInspectionReadDeadline(budget)) return null;
   try {
-    return new LiveAPI(null, clipPath);
+    var clip = new LiveAPI(null, clipPath);
+    return checkInspectionReadDeadline(budget) ? clip : null;
   } catch (err) {
+    if (!checkInspectionReadDeadline(budget)) return null;
     debug("Unable to access clip at " + clipPath + ": " + err);
     ack("ack", "error", contextName + "_clip_access_failed", trackIndex, slotIndex);
     return null;
@@ -4280,19 +4465,30 @@ function getClipFromSlotOrError(trackIndex, slotIndex, contextName) {
 }
 
 function inspect_session_clip_notes(trackIndex, slotIndex) {
-  if (!ensureInitialized()) return;
-
   var contextName = "inspect_session_clip_notes";
-  var track = getTrackOrError(trackIndex, contextName);
+  var budget = newInspectionReadBudget(function (details) {
+    ack("ack", "error", contextName + "_limit_exceeded", details.join(":"));
+  });
+  if (!ensureInitialized() || !checkInspectionReadDeadline(budget)) return;
+
+  var track = getTrackOrError(trackIndex, contextName, budget);
   if (!track) return;
 
-  var hasMidiInput = Number(getScalar(track, "has_midi_input"));
+  if (!checkInspectionReadDeadline(budget)) return;
+  var hasMidiInput = 0;
+  try {
+    hasMidiInput = Number(getScalar(track, "has_midi_input"));
+  } catch (errMidiInput) {
+    if (!checkInspectionReadDeadline(budget)) return;
+    throw errMidiInput;
+  }
+  if (!checkInspectionReadDeadline(budget)) return;
   if (hasMidiInput !== 1) {
     ack("ack", "error", contextName + "_track_not_midi", trackIndex);
     return;
   }
 
-  var clip = getClipFromSlotOrError(trackIndex, slotIndex, contextName);
+  var clip = getClipFromSlotOrError(trackIndex, slotIndex, contextName, budget);
   if (!clip) return;
 
   var noteCount = 0;
@@ -4301,13 +4497,16 @@ function inspect_session_clip_notes(trackIndex, slotIndex) {
   var clipLength = 0;
   var rawResult = "";
 
+  if (!checkInspectionReadDeadline(budget)) return;
   try {
     clipLength = Number(getScalar(clip, "length"));
   } catch (err) {
     clipLength = 0;
   }
+  if (!checkInspectionReadDeadline(budget)) return;
 
-  var noteRead = readBoundedSessionClipNotes(clip);
+  var noteRead = readBoundedSessionClipNotes(clip, budget);
+  if (!checkInspectionReadDeadline(budget)) return;
   if (!noteRead.ok) {
     ack(
       "ack",
@@ -4328,14 +4527,17 @@ function inspect_session_clip_notes(trackIndex, slotIndex) {
       if (pitch > maxPitch) maxPitch = pitch;
     }
   }
+  if (!checkInspectionReadDeadline(budget)) return;
   try {
     rawResult = JSON.stringify({ notes: notes });
   } catch (errSerialize) {
+    if (!checkInspectionReadDeadline(budget)) return;
     debug("Failed to serialize legacy note inspection: " + errSerialize);
     ack("ack", "error", contextName + "_serialization_failed");
     return;
   }
   var responseBytes = utf8ByteLength(rawResult);
+  if (!checkInspectionReadDeadline(budget)) return;
   if (responseBytes > LEGACY_CLIP_INSPECTION_MAX_RESPONSE_BYTES) {
     ack(
       "ack",

@@ -94,6 +94,7 @@ ACK_PACKET_BUDGET_BYTES = 65_507
 ACK_WAIT_MAX_PACKETS = 256
 ACK_WAIT_MAX_RETAINED_ACKS = 64
 ACK_WAIT_MAX_RETAINED_BYTES = 64 * 1024
+ACK_MAX_BATCH_COMMANDS = 32
 ACK_MAX_PACKETS_PER_SELECT = 16
 ACK_MAX_DIAGNOSTIC_CHARS = 256
 
@@ -1245,11 +1246,14 @@ class ArrangementInspectionAssembler:
     def _require_nullable_number(cls, value: object, label: str) -> None:
         if value is None:
             return
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-        ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            cls._fail(label)
+        try:
+            finite = math.isfinite(value)
+        except (OverflowError, TypeError, ValueError):
+            cls._fail(label)
+            return
+        if not finite:
             cls._fail(label)
 
     @classmethod
@@ -1803,7 +1807,10 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         "--ack-mode",
         choices=("per_command", "flush_end", "flush_interval"),
         default="per_command",
-        help="Acknowledgement handling strategy (default: per_command)",
+        help=(
+            "Acknowledgement handling strategy (default: per_command); flush modes "
+            "batch only distinct request IDs and serialize uncorrelated or fragmented commands"
+        ),
     )
     parser.add_argument(
         "--ack-flush-interval",
@@ -2418,7 +2425,10 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         for parts in entries:
             if len(parts) not in (2, 3):
                 parser.error("--api-drum-chain-in-note expects: <drum_chain_path> <note|-1> [request_id]")
-            note = int(parts[1])
+            try:
+                note = int(parts[1])
+            except (TypeError, ValueError):
+                parser.error("--api-drum-chain-in-note note must be an integer between -1 and 127")
             if not -1 <= note <= 127:
                 parser.error("--api-drum-chain-in-note note must be between -1 and 127")
             parsed.append((str(parts[0]), note, _optional_request_id(parts, 2)))
@@ -2499,9 +2509,12 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         for parts in entries:
             if len(parts) not in (2, 3):
                 parser.error("--midi-cc expects: <controller> <value> [channel]")
-            controller = midi_byte(str(parts[0]))
-            value = midi_byte(str(parts[1]))
-            channel = midi_channel(str(parts[2])) if len(parts) == 3 else 1
+            try:
+                controller = midi_byte(str(parts[0]))
+                value = midi_byte(str(parts[1]))
+                channel = midi_channel(str(parts[2])) if len(parts) == 3 else 1
+            except (TypeError, ValueError, argparse.ArgumentTypeError) as exc:
+                parser.error(f"--midi-cc: {exc}")
             parsed.append((controller, value, channel))
         return tuple(parsed)
 
@@ -2510,8 +2523,11 @@ def parse_args(argv: Iterable[str]) -> BridgeConfig:
         for parts in entries:
             if len(parts) not in (1, 2):
                 parser.error("--cc64 expects: <value> [channel]")
-            value = midi_byte(str(parts[0]))
-            channel = midi_channel(str(parts[1])) if len(parts) == 2 else 1
+            try:
+                value = midi_byte(str(parts[0]))
+                channel = midi_channel(str(parts[1])) if len(parts) == 2 else 1
+            except (TypeError, ValueError, argparse.ArgumentTypeError) as exc:
+                parser.error(f"--cc64: {exc}")
             parsed.append((value, channel))
         return tuple(parsed)
 
@@ -2758,7 +2774,7 @@ def _try_parse_json(value: OscArg) -> object | None:
         return value
     try:
         return json.loads(value)
-    except json.JSONDecodeError:
+    except (ValueError, OverflowError, RecursionError):
         return None
 
 
@@ -2981,7 +2997,11 @@ def _rpc_ack_summary(args: Sequence[OscArg]) -> str | None:
         count = len(parsed) if isinstance(parsed, list) else "?"
         preview = ""
         if isinstance(parsed, list) and parsed:
-            names = [str(item.get("name", item.get("path"))) for item in parsed[:3]]
+            names = [
+                str(item.get("name", item.get("path")))
+                if isinstance(item, dict) else "<malformed child>"
+                for item in parsed[:3]
+            ]
             preview = f" first={names}"
         return (
             f"api_children {path} {child_name} count={count}{preview}"
@@ -3536,11 +3556,272 @@ def _sender_matches(
 ) -> bool:
     if expected_sender_host is None:
         return True
+    if expected_sender_host.strip().lower() == "localhost":
+        expected_sender_host = DEFAULT_HOST
     return (
         isinstance(sender, tuple)
         and len(sender) >= 1
         and sender[0] == expected_sender_host
     )
+
+
+_INVALID_ACK_JSON = object()
+_ACK_JSON_FIELDS = {
+    "api_get": (3, None),
+    "api_set": (3, dict),
+    "api_call": (3, None),
+    "api_children": (3, list),
+    "api_describe": (2, dict),
+    "api_observe": (4, dict),
+    "api_unobserve": (2, dict),
+    "api_observers": (1, list),
+    "api_clear_observers": (1, dict),
+    "api_session_context": (1, dict),
+    "api_theory_status": (1, dict),
+    "api_tuning_status": (1, dict),
+    "api_device_list": (2, dict),
+    "api_device_parameters": (2, dict),
+    "api_parameter_set": (2, dict),
+    "api_mixer_status": (2, dict),
+    "api_insert_device": (3, dict),
+    "api_insert_chain": (2, dict),
+    "api_drum_chain_in_note": (2, dict),
+}
+
+
+def _ack_json(value: object) -> object:
+    if not isinstance(value, str):
+        return _INVALID_ACK_JSON
+
+    def reject_constant(_value: str) -> None:
+        raise ValueError("non-finite JSON number")
+
+    def finite_float(value: str) -> float:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("non-finite JSON number")
+        return number
+
+    try:
+        return json.loads(value, parse_constant=reject_constant, parse_float=finite_float)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return _INVALID_ACK_JSON
+
+
+def _ack_number(value: object, *, minimum: float | None = None) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and (minimum is None or value >= minimum)
+    except (OverflowError, ValueError):
+        return False
+
+
+def _ack_integer(value: object, *, minimum: int = 0) -> bool:
+    return _ack_number(value, minimum=minimum) and int(value) == value
+
+
+def _normalized_live_path(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if len(text) >= 2 and text[0] in {"'", '"'} and text[-1] == text[0]:
+        text = text[1:-1].strip()
+    return " ".join(text.split())
+
+
+def _ack_path_matches(actual: object, requested: object) -> bool:
+    actual_path = _normalized_live_path(actual)
+    requested_path = _normalized_live_path(requested)
+    if not actual_path or not requested_path:
+        return False
+    if actual_path == requested_path:
+        return True
+    tokens = requested_path.split()
+    resolving_alias = (
+        (len(tokens) == 2 and tokens[0] == "id" and tokens[1].isdigit())
+        or tokens[0] == "this_device"
+        or "canonical_parent" in tokens
+        or "view" in tokens
+        or any(token.startswith("selected_") for token in tokens)
+    )
+    if not resolving_alias:
+        return False
+    # LiveAPI resolves these aliases before echoing its path. The response is
+    # correlated, but the wire contract does not prove the alias's object ID.
+    resolved = actual_path.split()
+    return resolved[0] in {"live_set", "live_app"} and all(
+        token.isidentifier() or token.isdigit() for token in resolved
+    )
+
+
+def _track_reference_path(value: object) -> str:
+    text = str(value).strip()
+    if text in {"", "default"}:
+        return "live_set tracks 0"
+    if text == "master":
+        return "live_set master_track"
+    parts = text.replace(":", " ").split()
+    if len(parts) == 2 and parts[0] == "return" and parts[1].isdigit():
+        return f"live_set return_tracks {int(parts[1])}"
+    if text.isdigit():
+        return f"live_set tracks {int(text)}"
+    return text
+
+
+def _command_ack_is_valid(command: OscCommand, address: str, args: Sequence[OscArg]) -> bool:
+    expected_event, request_id = _command_ack_expectation(command)
+    event = parse_ack_event(address, args)
+    if (
+        address != "/ack" or event.is_error
+        or event.event != expected_event or event.request_id != request_id
+    ):
+        return False
+    supplied = command.args[1:] if command.address in PROTECTED_OSC_ADDRESSES else command.args
+    layout = _ACK_JSON_FIELDS.get(expected_event)
+    if layout is not None:
+        json_index, payload_type = layout
+        if len(args) != json_index + 1 + int(request_id is not None):
+            return False
+        payload = _ack_json(args[json_index])
+        if payload is _INVALID_ACK_JSON or (
+            payload_type is not None and not isinstance(payload, payload_type)
+        ):
+            return False
+        if expected_event in {"api_children", "api_observers"} and not all(
+            isinstance(item, dict) for item in payload
+        ):
+            return False
+        if expected_event in {"api_set", "api_insert_device", "api_insert_chain"}:
+            if payload.get("ok") is not True:
+                return False
+        if expected_event in {"api_get", "api_set", "api_call", "api_children"}:
+            return (
+                len(supplied) >= 2 and _ack_path_matches(args[1], supplied[0])
+                and isinstance(args[2], str) and args[2] == str(supplied[1]).strip()
+            )
+        if expected_event == "api_observe":
+            return (
+                len(supplied) >= 2 and isinstance(args[1], str) and bool(args[1])
+                and _ack_path_matches(args[2], supplied[0])
+                and args[3] == str(supplied[1]).strip()
+            )
+        if expected_event == "api_unobserve":
+            return bool(supplied) and args[1] == str(supplied[0]).strip() and payload.get("removed") is True
+        if expected_event == "api_device_list":
+            return bool(supplied) and args[1] == (str(supplied[0]).strip() or "all")
+        if expected_event == "api_mixer_status":
+            return bool(supplied) and _ack_path_matches(args[1], _track_reference_path(supplied[0]))
+        if expected_event in {
+            "api_describe", "api_device_parameters", "api_parameter_set",
+            "api_insert_device", "api_insert_chain", "api_drum_chain_in_note",
+        }:
+            if not supplied or not _ack_path_matches(args[1], supplied[0]):
+                return False
+            if expected_event == "api_insert_device":
+                return len(supplied) >= 2 and args[2] == str(supplied[1]).strip()
+        return True
+
+    if expected_event == "pong":
+        return len(args) == 1 + int(request_id is not None)
+    if expected_event == "status":
+        return (
+            len(args) >= 5 and all(_ack_integer(value) for value in args[1:5])
+            and args[2] + args[3] <= args[1]
+        )
+    if expected_event in {"tempo", "sig_num", "sig_den"}:
+        return (
+            len(args) == 2 and bool(supplied) and _ack_number(args[1], minimum=0)
+            and _ack_number(supplied[0])
+            and math.isclose(args[1], supplied[0], rel_tol=1e-6, abs_tol=1e-6)
+        )
+    if expected_event in {"create_midi_track", "create_audio_track"}:
+        return len(args) == 2 and args[1] == -1
+    if expected_event == "track_renamed":
+        return (
+            len(args) == 3 and len(supplied) >= 2 and _ack_integer(args[1])
+            and args[1] == supplied[0]
+            and args[2] == (str(supplied[1]).strip() or f"Track {supplied[0]}")
+        )
+    if expected_event in {"midi_cc", "cc64"}:
+        count = 3 if expected_event == "midi_cc" else 2
+        return len(args) == count + 1 + int(request_id is not None) and list(args[1:count + 1]) == list(supplied[:count])
+    if expected_event in {"add_midi_tracks", "add_audio_tracks"}:
+        return (
+            len(args) == 5 and bool(supplied) and args[1] == supplied[0]
+            and isinstance(args[2], str) and all(_ack_integer(args[i]) for i in (1, 3, 4))
+            and args[3] == args[1] and args[4] >= args[3]
+        )
+    if expected_event in {"delete_midi_tracks", "delete_audio_tracks"}:
+        return (
+            len(args) == 4 and bool(supplied) and args[1] == supplied[0]
+            and all(_ack_integer(value) for value in args[1:]) and args[2] <= args[1]
+        )
+    if expected_event == "ensure_midi_tracks":
+        return (
+            len(args) == 5 and bool(supplied) and args[1] == supplied[0]
+            and all(_ack_integer(value) for value in args[1:])
+            and args[3] == max(0, args[1] - args[2]) and args[4] >= args[2]
+        )
+    if expected_event in {"set_session_clip_notes", "append_session_clip_notes", "inspect_session_clip_notes"}:
+        minimum_length = {"set_session_clip_notes": 7, "append_session_clip_notes": 5, "inspect_session_clip_notes": 8}[expected_event]
+        if len(args) != minimum_length or len(supplied) < 2 or not all(_ack_integer(value) for value in args[1:3]):
+            return False
+        if list(args[1:3]) != list(supplied[:2]):
+            return False
+        if expected_event == "inspect_session_clip_notes":
+            payload = _ack_json(args[7])
+            return (
+                _ack_integer(args[3]) and _ack_number(args[6], minimum=0)
+                and isinstance(payload, dict) and isinstance(payload.get("notes"), list)
+                and len(payload["notes"]) == args[3]
+            )
+        if expected_event == "set_session_clip_notes":
+            if len(supplied) < 5:
+                return False
+            supplied_notes = _ack_json(supplied[3])
+            notes = supplied_notes.get("notes") if isinstance(supplied_notes, dict) else supplied_notes
+            return (
+                _ack_number(args[3], minimum=0) and _ack_number(supplied[2], minimum=0)
+                and math.isclose(args[3], supplied[2], rel_tol=1e-6, abs_tol=1e-6)
+                and _ack_integer(args[4]) and isinstance(notes, list) and args[4] == len(notes)
+                and _ack_integer(args[5]) and args[6] == str(supplied[4]).strip()
+            )
+        if len(supplied) < 3:
+            return False
+        supplied_notes = _ack_json(supplied[2])
+        notes = supplied_notes.get("notes") if isinstance(supplied_notes, dict) else supplied_notes
+        return (
+            _ack_integer(args[3]) and isinstance(notes, list) and args[3] == len(notes)
+            and _ack_integer(args[4])
+        )
+    return False
+
+
+def validate_command_acks(
+    command: OscCommand,
+    acks: Sequence[Tuple[str, List[OscArg]]],
+) -> AckEvent:
+    """Require a complete matching success and reject a correlated error."""
+    expected_event, request_id = _command_ack_expectation(command)
+    matched: AckEvent | None = None
+    for address, args in acks:
+        event = parse_ack_event(address, args)
+        if address != "/ack" or event.request_id != request_id:
+            continue
+        if event.is_error:
+            raise BridgeAcknowledgementError(
+                f"bridge rejected {command.address} (request {request_id}): "
+                f"{event.payload.get('code', 'unknown_error')}"
+            )
+        if _command_ack_is_valid(command, address, args):
+            matched = event
+    if matched is None:
+        raise BridgeAcknowledgementError(
+            f"did not receive the {expected_event} acknowledgement with a complete "
+            f"matching payload for {command.address} (request {request_id})"
+        )
+    return matched
 
 
 def wait_for_acks(
@@ -3550,11 +3831,23 @@ def wait_for_acks(
     expected_sender_host: str | None = None,
     expected_request_id: str | None = None,
     expected_event: str | None = None,
+    expected_commands: Sequence[OscCommand] = (),
 ) -> List[Tuple[str, List[OscArg]]]:
     timeout = _finite_wait_seconds(timeout_s, "timeout_s")
     quiet_window = _finite_wait_seconds(quiet_window_s, "quiet_window_s")
     if timeout <= 0:
         return []
+    if len(expected_commands) > ACK_MAX_BATCH_COMMANDS:
+        raise ValueError("ACK batch exceeds the pending-command limit")
+    expected = {_command_ack_expectation(command): command for command in expected_commands}
+    expected_ids = {key[1] for key in expected}
+    if len(expected) != len(expected_commands) or (
+        len(expected_commands) > 1
+        and (None in expected_ids or len(expected_ids) != len(expected_commands))
+    ):
+        raise ValueError("ACK batch contains ambiguous command correlations")
+    matched_commands: set[tuple[str, str | None]] = set()
+    retained_byte_limit = ACK_WAIT_MAX_RETAINED_BYTES * max(1, len(expected))
 
     deadline = time.monotonic() + timeout
     received: List[Tuple[str, List[OscArg]]] = []
@@ -3574,7 +3867,10 @@ def wait_for_acks(
         if (
             received
             and quiet_window > 0.0
-            and (expected_event is None or received_expected_event)
+            and (
+                (len(matched_commands) == len(expected) if expected else expected_event is None)
+                or received_expected_event
+            )
         ):
             wait_timeout = min(wait_timeout, quiet_window)
 
@@ -3624,21 +3920,44 @@ def wait_for_acks(
                     )
 
             event: AckEvent | None = None
-            if expected_request_id is not None or expected_event is not None:
+            if expected_request_id is not None or expected_event is not None or expected:
                 event = parse_ack_event(*retained_item)
                 if (
                     expected_request_id is not None
                     and event.request_id != expected_request_id
                 ):
                     continue
+                if expected:
+                    if event.address != "/ack" or event.request_id not in expected_ids:
+                        continue
+                    if not event.is_error and (event.event, event.request_id) not in expected:
+                        continue
+
+            if (
+                event is not None and event.address == "/ack" and event.is_error
+                and (expected or event.request_id == expected_request_id)
+            ):
+                # A definitive failure must survive duplicate successes filling
+                # either retention cap. One UDP packet fits the per-command cap.
+                if (
+                    len(received) >= ACK_WAIT_MAX_RETAINED_ACKS
+                    or retained_bytes + len(packet) > retained_byte_limit
+                ):
+                    return [retained_item]
+                return received + [retained_item]
 
             if (
                 len(received) < ACK_WAIT_MAX_RETAINED_ACKS
-                and retained_bytes + len(packet) <= ACK_WAIT_MAX_RETAINED_BYTES
+                and retained_bytes + len(packet) <= retained_byte_limit
             ):
                 received.append(retained_item)
                 retained_bytes += len(packet)
-                if (
+                if expected and event is not None and event.address == "/ack":
+                    key = (event.event, event.request_id)
+                    command = expected.get(key)
+                    if command is not None and _command_ack_is_valid(command, *retained_item):
+                        matched_commands.add(key)
+                elif (
                     expected_event is not None
                     and event is not None
                     and event.address == "/ack"
@@ -3657,6 +3976,8 @@ def wait_for_session_clip_inspection_acks(
     sock: socket.socket,
     timeout_s: float,
     request_id: str,
+    *,
+    expected_sender_host: str | None = None,
 ) -> List[Tuple[str, List[OscArg]]]:
     """Wait for a complete inspection, correlated error, or the full timeout."""
     timeout = _finite_wait_seconds(timeout_s, "timeout_s")
@@ -3683,7 +4004,7 @@ def wait_for_session_clip_inspection_acks(
             if time.monotonic() >= deadline:
                 return received
             try:
-                packet, _addr = sock.recvfrom(
+                packet, sender = sock.recvfrom(
                     SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES + 1
                 )
             except BlockingIOError:
@@ -3693,6 +4014,8 @@ def wait_for_session_clip_inspection_acks(
             packets_processed += 1
             if time.monotonic() >= deadline:
                 return received
+            if not _sender_matches(sender, expected_sender_host):
+                continue
 
             if len(packet) > SESSION_CLIP_INSPECTION_PACKET_BUDGET_BYTES:
                 if unrelated_ack_count < SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS:
@@ -3722,9 +4045,11 @@ def wait_for_session_clip_inspection_acks(
                 continue
 
             event = parse_ack_event(address, args)
-            correlated_error = event.is_error and event.request_id == request_id
+            correlated_error = (
+                address == "/ack" and event.is_error and event.request_id == request_id
+            )
             correlated_fragment = (
-                event.event == "api_session_clip_inspect"
+                address == "/ack" and event.event == "api_session_clip_inspect"
                 and event.request_id == request_id
             )
             if correlated_error or correlated_fragment:
@@ -3752,6 +4077,8 @@ def wait_for_arrangement_inspection_acks(
     timeout_s: float,
     request_id: str,
     expected_event: str,
+    *,
+    expected_sender_host: str | None = None,
 ) -> List[Tuple[str, List[OscArg]]]:
     """Wait for complete bounded Arrangement facts or a correlated failure."""
     if expected_event not in ARRANGEMENT_INSPECTION_EVENTS:
@@ -3779,7 +4106,7 @@ def wait_for_arrangement_inspection_acks(
             if time.monotonic() >= deadline:
                 return received
             try:
-                packet, _address = sock.recvfrom(
+                packet, sender = sock.recvfrom(
                     ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES + 1
                 )
             except (BlockingIOError, OSError):
@@ -3787,6 +4114,8 @@ def wait_for_arrangement_inspection_acks(
             packets_processed += 1
             if time.monotonic() >= deadline:
                 return received
+            if not _sender_matches(sender, expected_sender_host):
+                continue
             if len(packet) > ARRANGEMENT_INSPECTION_PACKET_BUDGET_BYTES:
                 if unrelated_ack_count < SESSION_CLIP_INSPECTION_MAX_UNRELATED_ACKS:
                     received.append(
@@ -3811,9 +4140,12 @@ def wait_for_arrangement_inspection_acks(
                 continue
 
             event = parse_ack_event(address, args)
-            correlated_error = event.is_error and event.request_id == request_id
+            correlated_error = (
+                address == "/ack" and event.is_error and event.request_id == request_id
+            )
             correlated_fragment = (
-                event.event == expected_event and event.request_id == request_id
+                address == "/ack" and event.event == expected_event
+                and event.request_id == request_id
             )
             if correlated_error or correlated_fragment:
                 if correlated_ack_count < ARRANGEMENT_INSPECTION_MAX_FRAGMENTS + 1:
@@ -3873,6 +4205,7 @@ def _collect_and_print_acks(
     expected_request_id: str | None = None,
     expected_sender_host: str | None = None,
     command_address: str | None = None,
+    command: OscCommand | None = None,
 ) -> None:
     t0 = time.perf_counter()
     acks = wait_for_acks(
@@ -3881,6 +4214,7 @@ def _collect_and_print_acks(
         expected_sender_host=expected_sender_host,
         expected_request_id=expected_request_id,
         expected_event=expected_event,
+        expected_commands=() if command is None else (command,),
     )
     durations_ms.append((time.perf_counter() - t0) * 1000.0)
     ack_counts.append(len(acks))
@@ -3910,6 +4244,10 @@ def _collect_and_print_acks(
         elif expected_event is None or event.event == expected_event:
             matching_ack = True
 
+    if command is not None:
+        validate_command_acks(command, acks)
+        return
+
     target = command_address or "the command"
     correlation = (
         "" if expected_request_id is None else f" (request {expected_request_id})"
@@ -3931,18 +4269,98 @@ def _collect_and_print_acks(
         )
 
 
+def _collect_and_print_ack_batch(
+    ack_sock: socket.socket,
+    cfg: BridgeConfig,
+    commands: Sequence[OscCommand],
+    durations_ms: List[float],
+    ack_counts: List[int],
+) -> None:
+    started = time.perf_counter()
+    acks = wait_for_acks(
+        ack_sock,
+        cfg.ack_timeout_s,
+        expected_sender_host=cfg.host,
+        expected_commands=commands,
+    )
+    durations_ms.append((time.perf_counter() - started) * 1000.0)
+    ack_counts.append(len(acks))
+    for address, args in acks:
+        for line in summarize_ack(address, args):
+            print(line)
+    for command in commands:
+        validate_command_acks(command, acks)
+
+
+def _validate_inspection_target(
+    command: OscCommand,
+    inspection: dict[str, object],
+) -> None:
+    """Compare a schema-validated inspection with the actual requested target."""
+    correlation = inspection["correlation"]
+    assert isinstance(correlation, dict)
+    if command.address == "/api/session_clip_inspect":
+        expected = {
+            "track_index": command.args[0],
+            "slot_index": command.args[1],
+            "request_id": command.args[3],
+        }
+        data = inspection
+        clip_path = f"live_set tracks {command.args[0]} clip_slots {command.args[1]} clip"
+    else:
+        scope = command.address.removeprefix("/api/arrangement_").removesuffix("_inspect")
+        expected = {
+            "scope": scope,
+            "track_index": None if scope == "project" else command.args[0],
+            "clip_index": command.args[1] if scope == "clip" else None,
+            "request_id": command.args[-1],
+        }
+        data = inspection["data"]
+        assert isinstance(data, dict)
+        privacy = data["privacy"]
+        assert isinstance(privacy, dict)
+        requested_notes = scope == "clip" and command.args[2] == 1
+        if privacy["notes_requested"] != requested_notes:
+            raise BridgeAcknowledgementError(
+                f"{command.address} acknowledgement does not match requested note access"
+            )
+        clip_path = f"live_set tracks {command.args[0]} arrangement_clips {command.args[1]}"
+    if any(correlation.get(key) != value for key, value in expected.items()):
+        raise BridgeAcknowledgementError(
+            f"{command.address} acknowledgement does not match the requested target"
+        )
+    if expected["track_index"] is not None:
+        track = data["track"]
+        assert isinstance(track, dict)
+        if not _ack_path_matches(track["path"], f"live_set tracks {expected['track_index']}"):
+            raise BridgeAcknowledgementError(
+                f"{command.address} acknowledgement has the wrong track path"
+            )
+    if "clip" in data:
+        clip = data["clip"]
+        assert isinstance(clip, dict)
+        if not _ack_path_matches(clip["path"], clip_path):
+            raise BridgeAcknowledgementError(
+                f"{command.address} acknowledgement has the wrong clip path"
+            )
+
+
 def _collect_and_print_session_clip_inspection_acks(
     ack_sock: socket.socket,
     timeout_s: float,
     request_id: str,
     durations_ms: List[float],
     ack_counts: List[int],
+    *,
+    expected_sender_host: str | None = None,
+    command: OscCommand | None = None,
 ) -> None:
     t0 = time.perf_counter()
     acks = wait_for_session_clip_inspection_acks(
         ack_sock,
         timeout_s,
         request_id,
+        expected_sender_host=expected_sender_host,
     )
     durations_ms.append((time.perf_counter() - t0) * 1000.0)
     ack_counts.append(len(acks))
@@ -3971,7 +4389,11 @@ def _collect_and_print_session_clip_inspection_acks(
                 f"(request {request_id}): {code}"
             )
         if event.event == "api_session_clip_inspect":
-            inspection_completed = assembler.add_event(event) is not None
+            inspection = assembler.add_event(event)
+            if inspection is not None:
+                if command is not None:
+                    _validate_inspection_target(command, inspection)
+                inspection_completed = True
 
     if not inspection_completed:
         raise BridgeAcknowledgementError(
@@ -3987,6 +4409,9 @@ def _collect_and_print_arrangement_inspection_acks(
     expected_event: str,
     durations_ms: List[float],
     ack_counts: List[int],
+    *,
+    expected_sender_host: str | None = None,
+    command: OscCommand | None = None,
 ) -> None:
     started = time.perf_counter()
     acks = wait_for_arrangement_inspection_acks(
@@ -3994,6 +4419,7 @@ def _collect_and_print_arrangement_inspection_acks(
         timeout_s,
         request_id,
         expected_event,
+        expected_sender_host=expected_sender_host,
     )
     durations_ms.append((time.perf_counter() - started) * 1000.0)
     ack_counts.append(len(acks))
@@ -4022,7 +4448,11 @@ def _collect_and_print_arrangement_inspection_acks(
                 f"(request {request_id}): {code}"
             )
         if event.event == expected_event:
-            completed = assembler.add_event(event) is not None
+            inspection = assembler.add_event(event)
+            if inspection is not None:
+                if command is not None:
+                    _validate_inspection_target(command, inspection)
+                completed = True
     if not completed:
         raise BridgeAcknowledgementError(
             f"did not receive a complete {command_address} "
@@ -4054,6 +4484,8 @@ _ACK_REQUEST_ARGUMENT_COUNTS = {
     "/api/arrangement_project_inspect": 1,
     "/api/arrangement_track_inspect": 2,
     "/api/arrangement_clip_inspect": 4,
+    "/midi_cc": 4,
+    "/cc64": 3,
 }
 
 
@@ -4072,6 +4504,40 @@ def _command_ack_expectation(command: OscCommand) -> tuple[str, str | None]:
     if isinstance(request_id, str) and request_id:
         return expected_event, request_id
     return expected_event, None
+
+
+def _ack_command_batches(
+    cfg: BridgeConfig,
+    commands: Sequence[OscCommand],
+) -> Iterable[list[OscCommand]]:
+    limit = ACK_MAX_BATCH_COMMANDS
+    if cfg.ack_mode == "flush_interval":
+        limit = min(limit, max(1, cfg.ack_flush_interval))
+    pending: list[OscCommand] = []
+    request_ids: set[str] = set()
+    for command in commands:
+        event, request_id = _command_ack_expectation(command)
+        serial = (
+            not cfg.expect_ack or cfg.ack_mode == "per_command" or request_id is None
+            or command.address == "/api/session_clip_inspect"
+            or event in ARRANGEMENT_INSPECTION_EVENTS
+        )
+        if pending and (serial or request_id in request_ids):
+            yield pending
+            pending = []
+            request_ids.clear()
+        if serial:
+            yield [command]
+            continue
+        assert request_id is not None
+        pending.append(command)
+        request_ids.add(request_id)
+        if len(pending) == limit:
+            yield pending
+            pending = []
+            request_ids.clear()
+    if pending:
+        yield pending
 
 
 def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetrics:
@@ -4098,7 +4564,6 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
     send_durations_ms: List[float] = []
     ack_wait_durations_ms: List[float] = []
     ack_counts: List[int] = []
-    flush_pending = 0
 
     t_all = time.perf_counter()
 
@@ -4111,18 +4576,28 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
                     f"(timeout {cfg.ack_timeout_s:.2f}s)"
                 )
 
-            for idx, cmd in enumerate(commands):
+            sent_count = 0
+            for batch in _ack_command_batches(cfg, commands):
                 if ack_sock is not None:
                     _drain_acks_nonblocking(ack_sock)
 
-                payload = encode_osc_message(cmd.address, cmd.args)
-                t_send = time.perf_counter()
-                sock.sendto(payload, (cfg.host, cfg.port))
-                send_durations_ms.append((time.perf_counter() - t_send) * 1000.0)
-                print(f"sent: {describe_command(cmd)}")
+                payloads = [encode_osc_message(cmd.address, cmd.args) for cmd in batch]
+                for index, (cmd, payload) in enumerate(zip(batch, payloads)):
+                    t_send = time.perf_counter()
+                    sock.sendto(payload, (cfg.host, cfg.port))
+                    send_durations_ms.append((time.perf_counter() - t_send) * 1000.0)
+                    sent_count += 1
+                    print(f"sent: {describe_command(cmd)}")
+                    if delay_s > 0 and index < len(batch) - 1:
+                        time.sleep(delay_s)
 
                 if ack_sock is not None:
-                    if cmd.address == "/api/session_clip_inspect":
+                    cmd = batch[0]
+                    if len(batch) > 1:
+                        _collect_and_print_ack_batch(
+                            ack_sock, cfg, batch, ack_wait_durations_ms, ack_counts
+                        )
+                    elif cmd.address == "/api/session_clip_inspect":
                         request_id = str(cmd.args[3])
                         _collect_and_print_session_clip_inspection_acks(
                             ack_sock,
@@ -4130,6 +4605,8 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
                             request_id,
                             ack_wait_durations_ms,
                             ack_counts,
+                            expected_sender_host=cfg.host,
+                            command=cmd,
                         )
                     elif cmd.address in {
                         "/api/arrangement_project_inspect",
@@ -4145,8 +4622,10 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
                             expected_event,
                             ack_wait_durations_ms,
                             ack_counts,
+                            expected_sender_host=cfg.host,
+                            command=cmd,
                         )
-                    elif cfg.ack_mode == "per_command":
+                    else:
                         expected_event, request_id = _command_ack_expectation(cmd)
                         _collect_and_print_acks(
                             ack_sock,
@@ -4157,33 +4636,10 @@ def send_commands(cfg: BridgeConfig, commands: Sequence[OscCommand]) -> SendMetr
                             expected_request_id=request_id,
                             expected_sender_host=cfg.host,
                             command_address=cmd.address,
+                            command=cmd,
                         )
-                    else:
-                        flush_pending += 1
-                        should_flush = False
-                        if cfg.ack_mode == "flush_end":
-                            should_flush = idx == len(commands) - 1
-                        elif cfg.ack_mode == "flush_interval":
-                            should_flush = (
-                                flush_pending >= max(1, int(cfg.ack_flush_interval))
-                                or idx == len(commands) - 1
-                            )
 
-                        if should_flush:
-                            expected_event, request_id = _command_ack_expectation(cmd)
-                            _collect_and_print_acks(
-                                ack_sock,
-                                cfg.ack_timeout_s,
-                                ack_wait_durations_ms,
-                                ack_counts,
-                                expected_event=expected_event,
-                                expected_request_id=request_id,
-                                expected_sender_host=cfg.host,
-                                command_address=cmd.address,
-                            )
-                            flush_pending = 0
-
-                if delay_s > 0 and idx < len(commands) - 1:
+                if delay_s > 0 and sent_count < len(commands):
                     time.sleep(delay_s)
     finally:
         if ack_sock is not None:
